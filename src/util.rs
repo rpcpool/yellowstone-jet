@@ -171,7 +171,7 @@ impl Signer for PubkeySigner {
     }
 }
 
-pub fn now_ms() -> u64 {
+pub fn ms_since_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("failed to get system time")

@@ -1,7 +1,10 @@
 use {
     crate::{
         config::ConfigJetGatewayClient,
-        metrics,
+        metrics::{
+            self,
+            jet::{increment_send_transaction_error, increment_send_transaction_success},
+        },
         proto::jet::{
             auth_request, auth_response, jet_gateway_client::JetGatewayClient,
             subscribe_request::Message as SubscribeRequestMessage,
@@ -11,7 +14,7 @@ use {
         },
         pubkey_challenger::{append_nonce_and_sign, OneTimeAuthToken},
         rpc::rpc_solana_like::{RpcServer as _, RpcServerImpl as RpcServerImplSolanaLike},
-        util::{now_ms, IncrementalBackoff},
+        util::{ms_since_epoch, IncrementalBackoff},
     },
     anyhow::Context,
     base64::{prelude::BASE64_STANDARD, Engine},
@@ -251,17 +254,6 @@ impl GrpcServer {
             let mut interval = interval(LIMIT_UPDATE_INTERVAL);
             loop {
                 if let Err(error) = async {
-                    let next_message = if tasks.len() > MAX_SEND_TRANSACTIONS {
-                        futures::future::pending().boxed()
-                    } else {
-                        stream.next().boxed()
-                    };
-                    let next_task = if tasks.is_empty() {
-                        futures::future::pending().boxed()
-                    } else {
-                        tasks.join_next().boxed()
-                    };
-
                     tokio::select! {
                         _ = interval.tick() => {
                             let messages_per100ms = config
@@ -272,7 +264,8 @@ impl GrpcServer {
                             };
                             sink.send(message).await.context("failed to send limit value")
                         }
-                        message = next_message => {
+                        // If we use tokio_stream::StreamExt, `next` is Cancel safe, so `if` statement can cancel the future without losing any data.
+                        message = stream.next(), if tasks.len() < MAX_SEND_TRANSACTIONS => {
                             match message
                                 .ok_or(anyhow::anyhow!("stream finished"))?
                                 .context("failed to receive message")?
@@ -293,30 +286,30 @@ impl GrpcServer {
                                         } = Payload::decode(&payload).context("failed to decode message")?;
                                         // Calculate latency if timestamp exists
                                         if let Some(gateway_timestamp) = timestamp {
-                                            let now = now_ms();
-                                            // Calculate latency in milliseconds
-                                            let latency = match now.checked_sub(gateway_timestamp) {
-                                                Some(lat) => lat as f64,
-                                                None => {
-                                                    error!("Invalid timestamp calculation");
-                                                    0.0
-                                                }
-                                            };
-
-                                            // Record latency metric
-                                            metrics::jet::observe_forwarded_txn_latency(latency);
+                                            let now = ms_since_epoch();
+                                            let latency = now.saturating_sub(gateway_timestamp);
+                                            metrics::jet::observe_forwarded_txn_latency(latency as f64);
                                         }
                                         let tx_sender = tx_sender.clone();
                                         tasks.spawn(async move {
-                                            tx_sender.send_transaction(transaction, Some(config)).await
+                                            tx_sender.send_transaction(transaction, Some(config))
+                                                .await
+                                                .context(format!("config.encoding={:?}", config.encoding))
                                         });
                                         Ok(())
                                     },
                                 }
                         }
-                        joined_task = next_task => {
-                            let send_tx_result = joined_task.unwrap().context("failed to join future with sending tx")?;
-                            send_tx_result.context("failed to send transaction")?;
+                        // Join next is cancel safe
+                        Some(result) = tasks.join_next() => {
+                            let result = result.expect("failed to join send_transaction task");
+                            if result.is_err() {
+                                // On error we don't want to break.
+                                increment_send_transaction_error();
+                                error!(?result, "failed to send transaction");
+                            } else {
+                                increment_send_transaction_success();
+                            }
                             Ok(())
                         }
                     }

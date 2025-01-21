@@ -172,7 +172,7 @@ impl QuicClient {
                                 &tpu_info.leader,
                                 &tpu_addr,
                                 "success",
-                                "ok",
+                                "",
                             );
                             let metric = QuicClientMetric::SendAttempts {
                                 sig: signature,
@@ -197,8 +197,8 @@ impl QuicClient {
                             metrics::quic_send_attempts_inc(
                                 &tpu_info.leader,
                                 &tpu_addr,
+                                "error",
                                 &error.get_categorie(),
-                                &format!("{error}"),
                             );
                             let metric = QuicClientMetric::SendAttempts {
                                 sig: signature,

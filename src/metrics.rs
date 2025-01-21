@@ -136,6 +136,9 @@ pub mod jet {
             Opts::new("transaction_deserialize_errors_total", "Number of transaction deserialization errors (bincode)"),
             &["error_type"]
         ).unwrap();
+
+        static ref SEND_TRANSACTION_ERROR: IntCounter = IntCounter::new("send_transaction_error", "Number of errors when sending transaction").unwrap();
+        static ref SEND_TRANSACTION_SUCCESS: IntCounter = IntCounter::new("send_transaction_success", "Number of successful transactions sent").unwrap();
     }
 
     pub fn init() {
@@ -165,7 +168,17 @@ pub mod jet {
             register!(FORWADED_TRANSACTION_LATENCY);
             register!(TRANSACTION_DECODE_ERRORS);
             register!(TRANSACTION_DESERIALIZE_ERRORS);
+            register!(SEND_TRANSACTION_ERROR);
+            register!(SEND_TRANSACTION_SUCCESS);
         });
+    }
+
+    pub fn increment_send_transaction_error() {
+        SEND_TRANSACTION_ERROR.inc();
+    }
+
+    pub fn increment_send_transaction_success() {
+        SEND_TRANSACTION_SUCCESS.inc();
     }
 
     pub fn observe_forwarded_txn_latency(duration: f64) {
