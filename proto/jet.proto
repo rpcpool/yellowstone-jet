@@ -1,12 +1,13 @@
 syntax = "proto3";
 package jet;
 
-option go_package = "github.com/rpcpool/solana-yellowstone-jet/proto;jet_gateway_grpc";
+option go_package = "github.com/rpcpool/yellowstone-jet/proto;jet_gateway_grpc";
 
 service JetGateway {
   rpc GetVersion(VersionRequest) returns (VersionResponse);
 
   rpc Auth(AuthRequest) returns (AuthResponse);
+  rpc Publish(stream PublishRequest) returns (stream PublishResponse);
   rpc Subscribe(stream SubscribeRequest) returns (stream SubscribeResponse);
 }
 
@@ -69,6 +70,24 @@ message Pong {
   uint32 id = 1;
 }
 
+message PublishRequest {
+  oneof message {
+    Ping ping = 1;
+    Pong pong = 2;
+    PublishTransaction transaction = 3;
+  }
+}
+
+message PublishTransaction {
+  bytes payload = 1;
+}
+
+message PublishResponse {
+  oneof message {
+    Ping ping = 1;
+    Pong pong = 2;
+  }
+}
 
 message SubscribeRequest {
   oneof message {
