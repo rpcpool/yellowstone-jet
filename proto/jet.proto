@@ -1,0 +1,95 @@
+syntax = "proto3";
+package jet;
+
+option go_package = "github.com/rpcpool/solana-yellowstone-jet/proto;jet_gateway_grpc";
+
+service JetGateway {
+  rpc GetVersion(VersionRequest) returns (VersionResponse);
+
+  rpc Auth(AuthRequest) returns (AuthResponse);
+  rpc Subscribe(stream SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+
+message AuthRequest {
+  oneof auth_step {
+    GetChallengeRequest begin_auth = 1;
+    AnswerChallengeRequest complete_auth = 2;
+  }
+}
+
+message AuthResponse {
+  oneof auth_step {
+    GetChallengeResponse begin_auth = 1;
+    AnswerChallengeResponse complete_auth = 2;
+  }
+}
+
+message GetChallengeRequest {
+  bytes pubkey_to_verify = 1;
+}
+
+message GetChallengeResponse {
+  // Challenge to sign
+  string challenge = 1;
+  // The pubkey the client claim to own
+  bytes pubkey_to_verify = 2;
+}
+
+message AnswerChallengeRequest {
+  string challenge = 1;
+
+  // The pubkey the client claim to own
+  bytes pubkey_to_verify = 2;
+
+  // The signature of the Hash(challenge || nonce)
+  bytes signature = 3;
+
+  bytes nonce = 4;
+
+}
+
+message AnswerChallengeResponse {
+  bool success = 1;
+  // If not success, auth_token will contains 0 bytes.
+  string one_time_auth_token = 2; // otak
+}
+
+message VersionRequest {}
+
+message VersionResponse {
+  string version = 1;
+}
+
+message Ping {
+  uint32 id = 1;
+}
+
+message Pong {
+  uint32 id = 1;
+}
+
+
+message SubscribeRequest {
+  oneof message {
+    Ping ping = 1;
+    Pong pong = 2;
+    SubscribeUpdateLimit update_limit = 3;
+  }
+}
+
+message SubscribeUpdateLimit {
+  uint64 messages_per100ms = 1;
+}
+
+message SubscribeResponse {
+  oneof message {
+    Ping ping = 1;
+    Pong pong = 2;
+    SubscribeTransaction transaction = 3;
+  }
+}
+
+message SubscribeTransaction {
+  bytes payload = 1;
+}

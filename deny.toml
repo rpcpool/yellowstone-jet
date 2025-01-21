@@ -1,0 +1,37 @@
+[graph]
+all-features = true
+
+[advisories]
+ignore = [
+    # ansi_term v0.12.1
+    # Advisory: https://rustsec.org/advisories/RUSTSEC-2021-0139
+    "RUSTSEC-2021-0139",
+
+    # atty 0.2.14
+    # Advisory: https://rustsec.org/advisories/RUSTSEC-2021-0145
+    "RUSTSEC-2021-0145",
+
+    # ed25519-dalek 1.0.1
+    # Advisory: https://rustsec.org/advisories/RUSTSEC-2022-0093
+    "RUSTSEC-2022-0093",
+
+    # borsh 0.9.3
+    # borsh 0.10.3
+    # Advisory: https://rustsec.org/advisories/RUSTSEC-2023-0033
+    # "RUSTSEC-2023-0033",
+
+    # curve25519-dalek 3.2.1
+    # Advisory: https://rustsec.org/advisories/RUSTSEC-2024-0344
+    # "RUSTSEC-2024-0344",
+
+    # proc-macro-error 1.0.4
+    # Advisory: https://rustsec.org/advisories/RUSTSEC-2024-0370
+    "RUSTSEC-2024-0370",
+
+    # atty 0.2.14
+    # Advisory: https://rustsec.org/advisories/RUSTSEC-2024-0375
+    "RUSTSEC-2024-0375",
+
+    # caused by rustls v0.23.16, Acceptor::accept affected.
+    "RUSTSEC-2024-0399",
+]
