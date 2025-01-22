@@ -69,3 +69,7 @@ ProtectSystem=full
 [Install]
 WantedBy=multi-user.target
 ```
+
+## Copyright
+
+Copyright (C) 2024 Triton One Ltd
