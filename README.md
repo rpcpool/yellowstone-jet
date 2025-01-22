@@ -29,7 +29,7 @@ yellowstone-jet --config yellowstone.yaml
 
 A sample configuration file can be found [config.yml](https://github.com/rpcpool/yellowstone-jet/blob/main/config.yml)
 
-## Systemd
+### Systemd
 
 Running Jet as a service under SystemD is our recommended approach. A sample systemd file:
 
