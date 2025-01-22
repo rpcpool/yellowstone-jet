@@ -6,10 +6,11 @@ Implements the Solana QUIC protocol for sending transactions.
 
 ## Features:
 
-- Efficient transaction sending implementing the Solana TPU client in proxy format
+- Efficient transaction sending, implementing the Solana TPU client in proxy format
 - Detailed configuration of all QUIC related parameters
 - Solana JSONRPC support, with an rpc server that supports sendTransaction
-- Simulation and transaction sanitization support
+- Full support for SwQoS
+- Simulation and transaction sanitization support via external RPC
 - Prometheus metrics
 - Dynamic key loading via getIdentity/setIdentity
 - Support for blocklists to block forwarding to specific leaders
@@ -23,13 +24,15 @@ cargo build --release
 
 ## Usage
 
+```
 yellowstone-jet --config yellowstone.yaml
+```
 
 ## Config file
 
 A sample configuration file can be found [config.yml](https://github.com/rpcpool/yellowstone-jet/blob/main/config.yml)
 
-## Systemd
+### Systemd
 
 Running Jet as a service under SystemD is our recommended approach. A sample systemd file:
 
@@ -69,3 +72,11 @@ ProtectSystem=full
 [Install]
 WantedBy=multi-user.target
 ```
+
+
+## Attribution
+
+Created by the greybeards at [Triton One](https://triton.one)
+
+Copyright (C) 2024 Triton One Ltd
+
