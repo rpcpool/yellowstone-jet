@@ -4,7 +4,7 @@ External Solana transaction sender implementation.
 
 Implements the Solana QUIC protocol for sending transactions.
 
-Features:
+## Features:
 
 - Efficient transaction sending implementing the Solana TPU client in proxy format
 - Detailed configuration of all QUIC related parameters
