@@ -10,7 +10,7 @@ Implements the Solana QUIC protocol for sending transactions.
 - Detailed configuration of all QUIC related parameters
 - Solana JSONRPC support, with an rpc server that supports sendTransaction
 - Full support for SwQoS
-- Simulation and transaction sanitization support
+- Simulation and transaction sanitization support via external RPC
 - Prometheus metrics
 - Dynamic key loading via getIdentity/setIdentity
 - Support for blocklists to block forwarding to specific leaders
