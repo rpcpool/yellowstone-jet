@@ -6,9 +6,10 @@ Implements the Solana QUIC protocol for sending transactions.
 
 ## Features:
 
-- Efficient transaction sending implementing the Solana TPU client in proxy format
+- Efficient transaction sending, implementing the Solana TPU client in proxy format
 - Detailed configuration of all QUIC related parameters
 - Solana JSONRPC support, with an rpc server that supports sendTransaction
+- Full support for SwQoS
 - Simulation and transaction sanitization support
 - Prometheus metrics
 - Dynamic key loading via getIdentity/setIdentity
