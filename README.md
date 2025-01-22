@@ -24,7 +24,9 @@ cargo build --release
 
 ## Usage
 
+```
 yellowstone-jet --config yellowstone.yaml
+```
 
 ## Config file
 
