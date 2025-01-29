@@ -4,7 +4,9 @@ use {
     futures::future::{self, Either, FutureExt},
     jsonrpsee::http_client::HttpClientBuilder,
     solana_sdk::{
-        commitment_config::CommitmentConfig, pubkey::Pubkey, signature::{read_keypair, Keypair}
+        commitment_config::CommitmentConfig,
+        pubkey::Pubkey,
+        signature::{read_keypair, Keypair},
     },
     std::{
         convert::identity,
@@ -23,7 +25,23 @@ use {
         time::{sleep, Duration},
     },
     tracing::{info, warn},
-    yellowstone_jet::{blockhash_queue::BlockhashQueue, cluster_tpu_info::ClusterTpuInfo, config::{load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream}, grpc_geyser::GeyserSubscriber, grpc_jet::GrpcServer, grpc_metrics::GrpcClient as GrpcMetricsClient, metrics::jet as metrics, quic::{QuicClient, QuicClientMetric}, quic_solana::ConnectionCache, rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType}, setup_tracing, stake::StakeInfo, task_group::TaskGroup, transactions::{RootedTransactions, SendTransactionsPool}, util::{PubkeySigner, ValueObserver, WaitShutdown}},
+    yellowstone_jet::{
+        blockhash_queue::BlockhashQueue,
+        cluster_tpu_info::ClusterTpuInfo,
+        config::{load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream},
+        grpc_geyser::GeyserSubscriber,
+        grpc_jet::GrpcServer,
+        grpc_metrics::GrpcClient as GrpcMetricsClient,
+        metrics::jet as metrics,
+        quic::{QuicClient, QuicClientMetric},
+        quic_solana::ConnectionCache,
+        rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType},
+        setup_tracing,
+        stake::StakeInfo,
+        task_group::TaskGroup,
+        transactions::{RootedTransactions, SendTransactionsPool},
+        util::{PubkeySigner, ValueObserver, WaitShutdown},
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -266,8 +284,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     .await?;
 
     let rpc = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
-        config.upstream.rpc.clone(), 
-        CommitmentConfig::finalized()
+        config.upstream.rpc.clone(),
+        CommitmentConfig::finalized(),
     );
     let stake = StakeInfo::new(
         rpc,

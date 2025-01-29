@@ -2,7 +2,8 @@ use {
     crate::{
         metrics::jet as metrics,
         util::{
-            IncrementalBackoff, ValueObserver, WaitShutdown, WaitShutdownJoinHandleResult, WaitShutdownSharedJoinHandle
+            IncrementalBackoff, ValueObserver, WaitShutdown, WaitShutdownJoinHandleResult,
+            WaitShutdownSharedJoinHandle,
         },
     },
     solana_client::nonblocking::rpc_client::RpcClient,
@@ -34,14 +35,19 @@ impl WaitShutdown for StakeInfo {
 
 impl StakeInfo {
     pub fn new(
-        rpc: RpcClient, 
-        update_interval: Duration, 
+        rpc: RpcClient,
+        update_interval: Duration,
         reactive_identity: ValueObserver<Pubkey>,
     ) -> Self {
         let shutdown = Arc::new(Notify::new());
         Self {
             shutdown: Arc::clone(&shutdown),
-            join_handle: Self::spawn(Self::update_stake(shutdown, rpc, update_interval, reactive_identity)),
+            join_handle: Self::spawn(Self::update_stake(
+                shutdown,
+                rpc,
+                update_interval,
+                reactive_identity,
+            )),
         }
     }
 
@@ -83,7 +89,6 @@ impl StakeInfo {
                 .chain(vote_accounts.delinquent.iter())
                 .map(|vote_account| vote_account.activated_stake)
                 .sum();
-
 
             // https://github.com/rpcpool/solana-private/blob/v1.18.18-triton/streamer/src/nonblocking/quic.rs#L780-L790
             let max_streams = if stake == 0 || stake > total_stake {
