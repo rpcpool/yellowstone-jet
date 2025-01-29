@@ -35,7 +35,8 @@ use {
 /// This is useful if you want to update the identity of a [`ConectionCache`] without restarting the whole application.
 pub struct ConnectionCacheIdentity {
     shared: Arc<Mutex<QuicSessionInner>>,
-    identity_watcher: watch::Sender<PubkeySigner>,
+    identity_watcher: watch::Sender<Pubkey>,
+    reactive_signer: watch::Sender<PubkeySigner>,
 }
 
 impl ConnectionCacheIdentity {
@@ -54,7 +55,8 @@ impl ConnectionCacheIdentity {
         locked.client_certificate = cert;
         let kp = keypair.insecure_clone();
         let ps = PubkeySigner::new(kp);
-        self.identity_watcher.send_replace(ps);
+        self.identity_watcher.send_replace(keypair.pubkey());
+        self.reactive_signer.send_replace(ps);
     }
 
     pub async fn get_cert(&self) -> Certificate {
@@ -70,8 +72,12 @@ impl ConnectionCacheIdentity {
         self.shared.lock().await.client_certificate.pubkey
     }
 
-    pub fn observe_identity_change(&self) -> ValueObserver<PubkeySigner> {
+    pub fn observe_identity_change(&self) -> ValueObserver<Pubkey> {
         self.identity_watcher.subscribe().into()
+    }
+
+    pub fn observe_signer_change(&self) -> ValueObserver<PubkeySigner> {
+        self.reactive_signer.subscribe().into()
     }
 }
 
@@ -87,9 +93,8 @@ pub struct ConnectionCache {
 
 impl ConnectionCache {
     pub fn new(config: ConfigQuic, initial_identity: Keypair) -> (Self, ConnectionCacheIdentity) {
-        let initial_keypair_signer = PubkeySigner::new(initial_identity.insecure_clone());
-        let initial_identity_signer = initial_keypair_signer;
         let client_certificate = Self::create_client_certificate(&initial_identity);
+        let initial_signer = PubkeySigner::new(initial_identity.insecure_clone());
         metrics::quic_set_indetity(client_certificate.pubkey);
         info!("generate new QUIC identity: {}", client_certificate.pubkey);
 
@@ -98,10 +103,12 @@ impl ConnectionCache {
             client_certificate,
             connection_pools,
         }));
-        let (identity_watcher, _) = watch::channel(initial_identity_signer);
+        let (identity_watcher, _) = watch::channel(initial_identity.pubkey());
+        let (reactive_signer, _) = watch::channel(initial_signer);
         let quic_identity_man = ConnectionCacheIdentity {
             shared: Arc::clone(&shared),
             identity_watcher,
+            reactive_signer,
         };
         let ret = Self {
             config: Arc::new(config),

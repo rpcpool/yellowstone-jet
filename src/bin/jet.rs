@@ -272,10 +272,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let stake = StakeInfo::new(
         rpc,
         config.upstream.stake_update_interval,
-        config.identity.expected,
+        quic_identity_man.observe_identity_change(),
     );
 
-    let quic_identity_observer = quic_identity_man.observe_identity_change();
+    let quic_identity_observer = quic_identity_man.observe_signer_change();
     // Run RPC admin
     let rpc_admin = RpcServer::new(
         config.listen_admin.bind[0],

@@ -14,6 +14,12 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [10.3.2]
+
+### Fixes
+
+- Specifying `keypair` for identity configuration withtout `expected` caused invalid stake-based message per 100ms calculation
+
 ## [10.3.1]
 
 ### Fixes
