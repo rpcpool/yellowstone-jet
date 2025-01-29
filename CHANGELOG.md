@@ -18,7 +18,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-- Specifying `keypair` for identity configuration withtout `expected` caused invalid stake-based message per 100ms calculation (#[5](https://github.com/rpcpool/yellowstone-jet/pull/5))
+- Specifying `keypair` in identity configuration without `expected` caused invalid stake-based message per 100ms calculation (#[5](https://github.com/rpcpool/yellowstone-jet/pull/5))
 
 ## [10.3.1]
 
