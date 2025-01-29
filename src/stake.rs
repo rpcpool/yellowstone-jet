@@ -7,7 +7,7 @@ use {
         },
     },
     solana_client::nonblocking::rpc_client::RpcClient,
-    solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey},
+    solana_sdk::pubkey::Pubkey,
     std::{ops::DerefMut, sync::Arc},
     tokio::{
         sync::Notify,
@@ -34,7 +34,11 @@ impl WaitShutdown for StakeInfo {
 }
 
 impl StakeInfo {
-    pub fn new(rpc: String, update_interval: Duration, identity: Option<Pubkey>) -> Self {
+    pub fn new(
+        rpc: RpcClient, 
+        update_interval: Duration, 
+        identity: Option<Pubkey>
+    ) -> Self {
         let shutdown = Arc::new(Notify::new());
         Self {
             shutdown: Arc::clone(&shutdown),
@@ -44,7 +48,7 @@ impl StakeInfo {
 
     async fn update_stake(
         shutdown: Arc<Notify>,
-        rpc: String,
+        rpc: RpcClient,
         update_interval: Duration,
         identity: Option<Pubkey>,
     ) -> anyhow::Result<()> {
@@ -52,7 +56,6 @@ impl StakeInfo {
 
         let mut last_stake = (0, 0);
         let mut backoff = IncrementalBackoff::default();
-        let rpc = RpcClient::new_with_commitment(rpc, CommitmentConfig::finalized());
         loop {
             backoff.maybe_tick().await;
 
