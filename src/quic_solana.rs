@@ -2,16 +2,26 @@ use {
     crate::{
         cluster_tpu_info::TpuInfo,
         config::ConfigQuic,
+        crypto_provider::crypto_provider,
         metrics::jet as metrics,
         util::{PubkeySigner, ValueObserver},
     },
     futures::future::try_join_all,
     lru::LruCache,
-    quinn::{ConnectError, Connection, ConnectionError, Endpoint, WriteError},
+    quinn::{
+        crypto::rustls::QuicClientConfig, ClientConfig, ConnectError, Connection, ConnectionError,
+        Endpoint, IdleTimeout, TransportConfig, WriteError,
+    },
     rand::{thread_rng, Rng},
-    rustls::Certificate,
+    rustls::{
+        client::danger::{HandshakeSignatureValid, ServerCertVerified},
+        crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider},
+        pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+        DigitallySignedStruct, Error,
+    },
     solana_sdk::{
         pubkey::Pubkey,
+        quic::QUIC_SEND_FAIRNESS,
         signature::{Keypair, Signer},
     },
     solana_streamer::{
@@ -59,7 +69,7 @@ impl ConnectionCacheIdentity {
         self.reactive_signer.send_replace(ps);
     }
 
-    pub async fn get_cert(&self) -> Certificate {
+    pub async fn get_cert(&self) -> CertificateDer {
         self.shared
             .lock()
             .await
@@ -182,8 +192,8 @@ struct QuicSessionInner {
 
 struct QuicClientCertificate {
     pubkey: Pubkey,
-    privkey: rustls::PrivateKey,
-    certificate: rustls::Certificate,
+    privkey: PrivateKeyDer<'static>,
+    certificate: CertificateDer<'static>,
 }
 
 struct QuicPool {
@@ -223,20 +233,57 @@ impl QuicPool {
     }
 }
 
-#[derive(Debug, Default)]
-struct SkipServerVerification;
+#[derive(Debug)]
+struct SkipServerVerification(Arc<CryptoProvider>);
 
-impl rustls::client::ServerCertVerifier for SkipServerVerification {
+impl SkipServerVerification {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self(Arc::new(crypto_provider())))
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -271,24 +318,31 @@ impl QuicLazyInitializedEndpoint {
         )
         .expect("QuicNewConnection::create_endpoint quinn::Endpoint::new");
 
-        let mut crypto = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+        let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("Failed to set QUIC client protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(SkipServerVerification::new())
             .with_client_auth_cert(
                 vec![self.client_certificate.certificate.clone()],
-                self.client_certificate.privkey.clone(),
+                self.client_certificate.privkey.clone_key(),
             )
             .expect("Failed to set QUIC client certificates");
         crypto.enable_early_data = true;
         crypto.alpn_protocols = vec![ALPN_TPU_PROTOCOL_ID.to_vec()];
 
-        let mut config = quinn::ClientConfig::new(Arc::new(crypto));
-        let mut transport_config = quinn::TransportConfig::default();
+        let transport_config = {
+            let mut res = TransportConfig::default();
 
-        let timeout = quinn::IdleTimeout::try_from(self.config.max_idle_timeout)
-            .expect("QuicLazyInitializedEndpoint::create_endpoint IdleTimeout::try_from");
-        transport_config.max_idle_timeout(Some(timeout));
-        transport_config.keep_alive_interval(Some(self.config.keep_alive_interval));
+            let timeout = IdleTimeout::try_from(self.config.max_idle_timeout).unwrap();
+            res.max_idle_timeout(Some(timeout));
+            res.keep_alive_interval(Some(self.config.keep_alive_interval));
+            res.send_fairness(QUIC_SEND_FAIRNESS);
+
+            res
+        };
+
+        let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
         config.transport_config(Arc::new(transport_config));
 
         endpoint.set_default_client_config(config);

@@ -1,6 +1,6 @@
 use {
     futures::{channel::oneshot, future::pending},
-    quinn::ReadExactError,
+    quinn::{crypto::rustls::QuicServerConfig, ReadExactError},
     rand::Rng,
     solana_sdk::{signature::Keypair, signer::Signer},
     solana_streamer::{
@@ -14,6 +14,7 @@ use {
     yellowstone_jet::{
         cluster_tpu_info::TpuInfo,
         config::{ConfigQuic, ConfigQuicTpuPort},
+        crypto_provider::crypto_provider,
         quic_solana::ConnectionCache,
     },
 };
@@ -44,13 +45,16 @@ fn generate_random_local_addr() -> SocketAddr {
 pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
     let kp = Keypair::new();
     let (cert, priv_key) = new_dummy_x509_certificate(&kp);
-    let mut crypto = rustls::ServerConfig::builder()
-        .with_safe_defaults()
-        .with_client_cert_verifier(Arc::new(solana_streamer::quic::SkipClientVerification))
+    let mut crypto = rustls::ServerConfig::builder_with_provider(Arc::new(crypto_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("server config build")
+        .with_client_cert_verifier(solana_streamer::quic::SkipClientVerification::new())
         .with_single_cert(vec![cert], priv_key)
         .expect("quinn server config");
     crypto.alpn_protocols = vec![ALPN_TPU_PROTOCOL_ID.to_vec()];
-    let config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+
+    let quic_server_config = QuicServerConfig::try_from(crypto).expect("quic server config");
+    let config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
     let endpoint = quinn::Endpoint::server(config, addr).expect("quinn server endpoint");
 
     (endpoint, kp)
@@ -226,7 +230,7 @@ async fn update_identity_should_drop_all_connections() {
     let maybe = client_rx.recv().await;
     assert!(maybe.is_none());
     let result = rx_server_handle.await.expect("rx_server_handle");
-    assert!(matches!(result, Err(ReadExactError::FinishedEarly)));
+    assert!(matches!(result, Err(ReadExactError::FinishedEarly(_))));
 }
 
 pub fn default_config_quic() -> ConfigQuic {

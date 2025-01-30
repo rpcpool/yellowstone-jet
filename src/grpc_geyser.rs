@@ -181,6 +181,7 @@ impl GeyserSubscriber {
                                     Ok(GrpcCommitmentLevel::Processed) => CommitmentLevel::Processed,
                                     Ok(GrpcCommitmentLevel::Confirmed) => CommitmentLevel::Confirmed,
                                     Ok(GrpcCommitmentLevel::Finalized) => CommitmentLevel::Finalized,
+                                    Ok(_) => continue,
                                     Err(error) => {
                                         anyhow::bail!("gRPC: failed to parse commitment level ({endpoint}): {error:?}")
                                     }
