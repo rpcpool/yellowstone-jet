@@ -59,8 +59,10 @@ impl StakeInfo {
     ) -> anyhow::Result<()> {
         let mut backoff = IncrementalBackoff::default();
         loop {
-            backoff.maybe_tick().await;
-
+            tokio::select! {
+                _ = shutdown.notified() => return Ok(()),
+                _ = backoff.maybe_tick() => {},
+            }
             let ts = Instant::now();
             let vote_accounts = match rpc.get_vote_accounts().await {
                 Ok(vote_accounts) => {
@@ -74,15 +76,23 @@ impl StakeInfo {
                     continue;
                 }
             };
+            let total_vote_accounts = vote_accounts.current.len() + vote_accounts.delinquent.len();
+            tracing::trace!("total vote accounts: {total_vote_accounts}");
             let identity = reactive_identity.get_current();
             let identity_str = identity.to_string();
-            let stake = vote_accounts
+            let vote_account_info = vote_accounts
                 .current
                 .iter()
                 .chain(vote_accounts.delinquent.iter())
-                .find(|info| info.node_pubkey == identity_str)
-                .map(|info| info.activated_stake)
-                .unwrap_or_default();
+                .find(|info| info.node_pubkey == identity_str);
+
+            let stake = if let Some(stake) = vote_account_info {
+                stake.activated_stake
+            } else {
+                warn!("Did not find identity in vote accounts list");
+                0
+            };
+            // .unwrap_or_default();
             let total_stake: u64 = vote_accounts
                 .current
                 .iter()

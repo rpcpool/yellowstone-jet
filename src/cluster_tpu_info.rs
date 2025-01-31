@@ -288,7 +288,10 @@ impl ClusterTpuInfo {
         let mut backoff = IncrementalBackoff::default();
         let rpc = RpcClient::new(rpc);
         loop {
-            backoff.maybe_tick().await;
+            tokio::select! {
+                _ = shutdown.notified() => return Ok(()),
+                _ = backoff.maybe_tick() => {}
+            }
 
             let ts = Instant::now();
             let nodes = match rpc.get_cluster_nodes().await {

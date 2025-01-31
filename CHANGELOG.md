@@ -14,10 +14,16 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-## [10.3.2]
+## [10.4.0]
+
+### Features
+
+- Updated solana SDK dependencies to 2.1.11 to support version `>=4.1.1` of Dragonsmouth gRPC endpoints.
+- Imported `gentx` util to test jet instance.
 
 ### Fixes
 
+- Fixes hanging issue during SIGINT shutdown in: `yellowstone_jet::cluster_tpu_info::update_leader_schedule`, `yellowstone-jet::cluster_tpu_info::update_cluster_nodes`, `yellowstone_jet::stake::update_stake`.
 - Specifying `keypair` in identity configuration without `expected` caused invalid stake-based message per 100ms calculation (#[5](https://github.com/rpcpool/yellowstone-jet/pull/5))
 
 ## [10.3.1]

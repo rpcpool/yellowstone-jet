@@ -13,7 +13,7 @@ use {
         fs,
         path::PathBuf,
         sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
             Arc,
         },
     },
@@ -21,7 +21,7 @@ use {
         runtime::Builder,
         signal::unix::{signal, SignalKind},
         sync::{broadcast, oneshot},
-        task::JoinHandle,
+        task::{JoinHandle, JoinSet},
         time::{sleep, Duration},
     },
     tracing::{info, warn},
@@ -236,16 +236,13 @@ fn spawn_lewis_metric_subscriber(
 }
 
 async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-
-    // Initialize metrics
     metrics::init();
     if let Some(identity) = config.identity.expected {
         metrics::quic_set_indetity_expected(identity);
     }
-
-    let geyser = GeyserSubscriber::new(
-        Arc::clone(&shutdown_flag),
+    let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
+    let (geyser, mut geyser_handle) = GeyserSubscriber::new(
+        shutdown_geyser_rx,
         config.upstream.primary_grpc.clone(),
         config
             .upstream
@@ -366,12 +363,12 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     tg.spawn_with_shutdown("geyser", |mut stop| async move {
         tokio::select! {
-            result = geyser.clone().wait_shutdown() => {
-                result.expect("geyser");
+            result = &mut geyser_handle => {
+                result.expect("geyser handle").expect("geyser result");
             },
             _ = &mut stop => {
-                geyser.shutdown();
-                geyser.wait_shutdown().await.expect("geyser shutdown");
+                let _ = shutdown_geyser_tx.send(());
+                geyser_handle.await.expect("geyser handle").expect("geyser result");
             },
         }
     });
@@ -469,7 +466,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     tg.spawn_cancelable("SIGINT", async move {
         sigint.recv().await;
         info!("SIGINT received...");
-        shutdown_flag.store(true, Ordering::Relaxed);
     });
 
     let (first, result, rest) = tg.wait_one().await.expect("task group empty");
