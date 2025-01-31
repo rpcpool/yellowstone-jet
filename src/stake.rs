@@ -100,14 +100,14 @@ impl StakeInfo {
                 .map(|vote_account| vote_account.activated_stake)
                 .sum();
 
-            // https://github.com/rpcpool/solana-private/blob/v1.18.18-triton/streamer/src/nonblocking/quic.rs#L780-L790
+            // https://github.com/rpcpool/solana-public/blob/v2.1.11-triton-public/streamer/src/nonblocking/quic.rs#L780-L790
             let max_streams = if stake == 0 || stake > total_stake {
-                // https://github.com/rpcpool/solana-private/blob/v1.18.18-triton/streamer/src/nonblocking/stream_throttle.rs#L36-L76
+                // https://github.com/rpcpool/solana-public/blob/v2.1.11-triton-public/streamer/src/nonblocking/stream_throttle.rs#L36-L76
                 // `max_unstaked_connections` = 500, `max_streams_per_ms` = 250
                 // `max_unstaked_load_in_throttling_window` = 0.2 * 250 * 100 / 500 = 10
                 10
             } else {
-                // https://github.com/rpcpool/solana-private/blob/v1.18.18-triton/streamer/src/nonblocking/stream_throttle.rs#L151-L195
+                // https://github.com/rpcpool/solana-public/blob/v2.1.11-triton-public/streamer/src/nonblocking/stream_throttle.rs#L151-L195
                 // `max_unstaked_connections` = 500, `max_streams_per_ms` = 250
                 // `current_load` = 2_500 (min value, give us mix streams capacity)
                 // `capacity_in_ema_window` = 40_000 * stake (%)
