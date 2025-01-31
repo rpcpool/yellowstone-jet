@@ -216,7 +216,10 @@ impl ClusterTpuInfo {
             let slot_offset =
                 epoch_schedule.get_first_slot_in_epoch(epoch_schedule.get_epoch(slot));
             loop {
-                backoff.maybe_tick().await;
+                tokio::select! {
+                    _ = shutdown.notified() => return Ok(()),
+                    _ = backoff.maybe_tick() => {}
+                }
 
                 let ts = Instant::now();
                 match rpc.get_leader_schedule(Some(slot)).await {
