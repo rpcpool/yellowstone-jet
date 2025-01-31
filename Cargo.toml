@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "10.3.1"
+version = "10.4.0"
 authors = ["Triton One"]
 edition = "2021"
 description = "Yellowstone Jet"
@@ -33,25 +33,25 @@ pin-project = "1.1.5"
 prometheus = "0.13.3"
 prost = "0.13.3"
 prost-types = "0.13.3"
-quinn = "0.10.2"
+quinn = "0.11.6"
 rand = "0.8.5"
-rustls = { version = "0.21.7", default-features = false, features = ["quic"] }
-rust-etcd-utils = { git = "https://github.com/rpcpool/rust-etcd-utils.git", tag = "v0.8.0" }
+rustls = { version = "0.23.15", default-features = false }
 semver = "1.0.22"
 serde = "1.0.215"
 serde_json = "1.0.116"
 serde_yaml = "0.9.25"
-solana-client = "~2.0.14"
-solana-connection-cache = "~2.0.14"
-solana-net-utils = "~2.0.14"
-solana-program = "~2.0.14"
-solana-quic-client = "~2.0.14"
-solana-rpc-client-api = "~2.0.14"
-solana-sdk = "~2.0.14"
-solana-streamer = "~2.0.14"
-solana-tpu-client = "~2.0.14"
-solana-transaction-status = "~2.0.14"
-solana-version = "~2.0.14"
+solana-client = "~2.1.11"
+solana-connection-cache = "~2.1.11"
+solana-net-utils = "~2.1.11"
+solana-program = "~2.1.11"
+solana-quic-client = "~2.1.11"
+solana-rpc-client-api = "~2.1.11"
+solana-sdk = "~2.1.11"
+solana-streamer = "~2.1.11"
+solana-tpu-client = "~2.1.11"
+solana-transaction-status = "~2.1.11"
+solana-version = "~2.1.11"
+
 thiserror = "1.0.58"
 tokio = { version = "1.36.0", features = ["rt-multi-thread", "macros"] }
 tokio-stream = "0.1.15"
@@ -65,8 +65,8 @@ tracing-subscriber = { version = "0.3.1", features = [
     "json",
 ] }
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
-yellowstone-grpc-client = "2.0.0"
-yellowstone-grpc-proto = "2.0.0"
+yellowstone-grpc-client = "4.1.1"
+yellowstone-grpc-proto = "4.1.1"
 
 [build-dependencies]
 anyhow = "1.0.69"
@@ -86,14 +86,22 @@ codegen-units = 1
 lto = true
 
 [patch.crates-io]
-solana-account-decoder = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-solana-program = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-solana-rpc-client-api = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-solana-sdk = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-solana-transaction-status = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
+# solana-account-decoder = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
+# solana-program = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
+# solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
+# solana-rpc-client-api = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
+# solana-sdk = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
+# solana-transaction-status = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
+solana-account-decoder = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
+solana-program = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
+solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
+solana-rpc-client-api = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
+solana-sdk = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
+solana-transaction-status = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
+solana-derivation-path = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
+solana-feature-set = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
 
 # https://github.com/anza-xyz/agave/blob/v2.0.4/Cargo.toml#L502-L533
-[patch.crates-io.curve25519-dalek]
-git = "https://github.com/anza-xyz/curve25519-dalek.git"
-rev = "b500cdc2a920cd5bff9e2dd974d7b97349d61464"
+# [patch.crates-io.curve25519-dalek]
+# git = "https://github.com/anza-xyz/curve25519-dalek.git"
+# rev = "b500cdc2a920cd5bff9e2dd974d7b97349d61464"

@@ -78,6 +78,9 @@ pub struct ConfigTracing {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigIdentity {
+    /// 
+    /// Represents the expected validator identity.
+    /// 
     /// Do not send transactions if Quic identity doesn't match specified one
     #[serde(default, deserialize_with = "ConfigIdentity::deserialize_maybe_pubkey")]
     pub expected: Option<Pubkey>,

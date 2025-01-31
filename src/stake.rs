@@ -2,12 +2,12 @@ use {
     crate::{
         metrics::jet as metrics,
         util::{
-            IncrementalBackoff, WaitShutdown, WaitShutdownJoinHandleResult,
+            IncrementalBackoff, ValueObserver, WaitShutdown, WaitShutdownJoinHandleResult,
             WaitShutdownSharedJoinHandle,
         },
     },
     solana_client::nonblocking::rpc_client::RpcClient,
-    solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey},
+    solana_sdk::pubkey::Pubkey,
     std::{ops::DerefMut, sync::Arc},
     tokio::{
         sync::Notify,
@@ -34,28 +34,35 @@ impl WaitShutdown for StakeInfo {
 }
 
 impl StakeInfo {
-    pub fn new(rpc: String, update_interval: Duration, identity: Option<Pubkey>) -> Self {
+    pub fn new(
+        rpc: RpcClient,
+        update_interval: Duration,
+        reactive_identity: ValueObserver<Pubkey>,
+    ) -> Self {
         let shutdown = Arc::new(Notify::new());
         Self {
             shutdown: Arc::clone(&shutdown),
-            join_handle: Self::spawn(Self::update_stake(shutdown, rpc, update_interval, identity)),
+            join_handle: Self::spawn(Self::update_stake(
+                shutdown,
+                rpc,
+                update_interval,
+                reactive_identity,
+            )),
         }
     }
 
     async fn update_stake(
         shutdown: Arc<Notify>,
-        rpc: String,
+        rpc: RpcClient,
         update_interval: Duration,
-        identity: Option<Pubkey>,
+        mut reactive_identity: ValueObserver<Pubkey>,
     ) -> anyhow::Result<()> {
-        let identity = identity.map(|pk| pk.to_string()).unwrap_or_default();
-
-        let mut last_stake = (0, 0);
         let mut backoff = IncrementalBackoff::default();
-        let rpc = RpcClient::new_with_commitment(rpc, CommitmentConfig::finalized());
         loop {
-            backoff.maybe_tick().await;
-
+            tokio::select! {
+                _ = shutdown.notified() => return Ok(()),
+                _ = backoff.maybe_tick() => {},
+            }
             let ts = Instant::now();
             let vote_accounts = match rpc.get_vote_accounts().await {
                 Ok(vote_accounts) => {
@@ -69,14 +76,23 @@ impl StakeInfo {
                     continue;
                 }
             };
-
-            let stake = vote_accounts
+            let total_vote_accounts = vote_accounts.current.len() + vote_accounts.delinquent.len();
+            tracing::trace!("total vote accounts: {total_vote_accounts}");
+            let identity = reactive_identity.get_current();
+            let identity_str = identity.to_string();
+            let vote_account_info = vote_accounts
                 .current
                 .iter()
                 .chain(vote_accounts.delinquent.iter())
-                .find(|info| info.node_pubkey == identity)
-                .map(|info| info.activated_stake)
-                .unwrap_or_default();
+                .find(|info| info.node_pubkey == identity_str);
+
+            let stake = if let Some(stake) = vote_account_info {
+                stake.activated_stake
+            } else {
+                warn!("Did not find identity in vote accounts list");
+                0
+            };
+            // .unwrap_or_default();
             let total_stake: u64 = vote_accounts
                 .current
                 .iter()
@@ -84,42 +100,38 @@ impl StakeInfo {
                 .map(|vote_account| vote_account.activated_stake)
                 .sum();
 
-            if last_stake != (stake, total_stake) {
-                last_stake = (stake, total_stake);
+            // https://github.com/rpcpool/solana-public/blob/v2.1.11-triton-public/streamer/src/nonblocking/quic.rs#L780-L790
+            let max_streams = if stake == 0 || stake > total_stake {
+                // https://github.com/rpcpool/solana-public/blob/v2.1.11-triton-public/streamer/src/nonblocking/stream_throttle.rs#L36-L76
+                // `max_unstaked_connections` = 500, `max_streams_per_ms` = 250
+                // `max_unstaked_load_in_throttling_window` = 0.2 * 250 * 100 / 500 = 10
+                10
+            } else {
+                // https://github.com/rpcpool/solana-public/blob/v2.1.11-triton-public/streamer/src/nonblocking/stream_throttle.rs#L151-L195
+                // `max_unstaked_connections` = 500, `max_streams_per_ms` = 250
+                // `current_load` = 2_500 (min value, give us mix streams capacity)
+                // `capacity_in_ema_window` = 40_000 * stake (%)
+                // `calculated_capacity` = 40_000 * stake (%) * 100 / 50 = 80_000 * stake (%)
+                (80_000f64 * stake as f64 / total_stake as f64).floor() as u64
+            };
 
-                // https://github.com/rpcpool/solana-private/blob/v1.18.18-triton/streamer/src/nonblocking/quic.rs#L780-L790
-                let max_streams = if stake == 0 || stake > total_stake {
-                    // https://github.com/rpcpool/solana-private/blob/v1.18.18-triton/streamer/src/nonblocking/stream_throttle.rs#L36-L76
-                    // `max_unstaked_connections` = 500, `max_streams_per_ms` = 250
-                    // `max_unstaked_load_in_throttling_window` = 0.2 * 250 * 100 / 500 = 10
-                    10
-                } else {
-                    // https://github.com/rpcpool/solana-private/blob/v1.18.18-triton/streamer/src/nonblocking/stream_throttle.rs#L151-L195
-                    // `max_unstaked_connections` = 500, `max_streams_per_ms` = 250
-                    // `current_load` = 2_500 (min value, give us mix streams capacity)
-                    // `capacity_in_ema_window` = 40_000 * stake (%)
-                    // `calculated_capacity` = 40_000 * stake (%) * 100 / 50 = 80_000 * stake (%)
-                    (80_000f64 * stake as f64 / total_stake as f64).floor() as u64
-                };
+            metrics::cluster_identity_stake_set(metrics::ClusterIdentityStakeKind::Jet, stake);
+            metrics::cluster_identity_stake_set(
+                metrics::ClusterIdentityStakeKind::Total,
+                total_stake,
+            );
+            metrics::cluster_identity_stake_set(
+                metrics::ClusterIdentityStakeKind::MaxStreams,
+                max_streams,
+            );
 
-                metrics::cluster_identity_stake_set(metrics::ClusterIdentityStakeKind::Jet, stake);
-                metrics::cluster_identity_stake_set(
-                    metrics::ClusterIdentityStakeKind::Total,
-                    total_stake,
-                );
-                metrics::cluster_identity_stake_set(
-                    metrics::ClusterIdentityStakeKind::MaxStreams,
-                    max_streams,
-                );
-
-                info!(
-                    elapsed_ms = ts.elapsed().as_millis(),
-                    "update stake info: {stake} / {total_stake} = {max_streams}",
-                );
-            }
-
+            info!(
+                elapsed_ms = ts.elapsed().as_millis(),
+                "update stake info: {stake} / {total_stake} = {max_streams}",
+            );
             tokio::select! {
                 _ = shutdown.notified() => return Ok(()),
+                _ = reactive_identity.observe() => {},
                 _ = sleep(update_interval) => {}
             };
         }

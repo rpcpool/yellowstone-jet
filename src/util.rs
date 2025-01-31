@@ -8,7 +8,7 @@ use {
     },
     std::{cmp::Ordering, future::Future, sync::Arc},
     tokio::{
-        sync::{watch, Mutex},
+        sync::{oneshot, watch, Mutex},
         task::{JoinError, JoinHandle},
         time::{sleep, Duration},
     },
@@ -226,6 +226,26 @@ impl<T: Clone + PartialEq> ValueObserver<T> {
             output = f(current) => Either::Right(output),
         }
     }
+}
+
+///
+/// Fork a oneshot receiver into two receivers.
+///
+pub fn fork_oneshot<T>(rx: oneshot::Receiver<T>) -> (oneshot::Receiver<T>, oneshot::Receiver<T>)
+where
+    T: Clone + Send + 'static,
+{
+    let (tx1, rx1) = oneshot::channel();
+    let (tx2, rx2) = oneshot::channel();
+    tokio::spawn(async move {
+        let x = match rx.await {
+            Ok(x) => x,
+            Err(_) => return,
+        };
+        let _ = tx1.send(x.clone());
+        let _ = tx2.send(x.clone());
+    });
+    (rx1, rx2)
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ tracing:
 
 # Identity options
 identity:
+  # Represents the expected validator pubkey in base58.
   # Do not send transactions if Quic identity doesn't match specified one
   expected: null # 3RY3bvCRoCoSTy5qSNL1ezeGQwt1ufToLSKdmEZZjb4Z
   # Load specified keypair from file
