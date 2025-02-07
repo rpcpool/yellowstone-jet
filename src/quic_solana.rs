@@ -47,10 +47,21 @@ pub struct ConnectionCacheIdentity {
     shared: Arc<Mutex<QuicSessionInner>>,
     identity_watcher: watch::Sender<Pubkey>,
     reactive_signer: watch::Sender<PubkeySigner>,
+    stop_transactions: watch::Sender<()>,
+    allow_reset: watch::Receiver<()>,
 }
 
 impl ConnectionCacheIdentity {
-    pub async fn update_keypair(&self, keypair: &Keypair) {
+    pub async fn update_keypair(&self, keypair: &Keypair, is_reset: bool) {
+        let kp = keypair.insecure_clone();
+        let ps = PubkeySigner::new(kp);
+        self.reactive_signer.send_replace(ps);
+        if is_reset {
+            let mut allow_reset = self.allow_reset.clone();
+            self.stop_transactions.send_replace(());
+            allow_reset.changed().await.expect("Sender dropped");
+        }
+
         let pubkey = keypair.pubkey();
         let (certificate, privkey) = new_dummy_x509_certificate(keypair);
         let cert = Arc::new(QuicClientCertificate {
@@ -59,14 +70,11 @@ impl ConnectionCacheIdentity {
             certificate,
         });
         let mut locked = self.shared.lock().await;
-        metrics::quic_set_indetity(cert.pubkey);
-        info!("update QUIC identityc: {}", cert.pubkey);
+        metrics::quic_set_identity(cert.pubkey);
+        info!("update QUIC identity: {}", cert.pubkey);
         locked.connection_pools.clear(); // drop all previously created connections
         locked.client_certificate = cert;
-        let kp = keypair.insecure_clone();
-        let ps = PubkeySigner::new(kp);
         self.identity_watcher.send_replace(keypair.pubkey());
-        self.reactive_signer.send_replace(ps);
     }
 
     pub async fn get_cert(&self) -> CertificateDer {
@@ -80,6 +88,10 @@ impl ConnectionCacheIdentity {
 
     pub async fn get_identity(&self) -> Pubkey {
         self.shared.lock().await.client_certificate.pubkey
+    }
+
+    pub fn get_stop_transaction_rx(&self) -> watch::Receiver<()> {
+        self.stop_transactions.subscribe()
     }
 
     pub fn observe_identity_change(&self) -> ValueObserver<Pubkey> {
@@ -102,10 +114,13 @@ pub struct ConnectionCache {
 }
 
 impl ConnectionCache {
-    pub fn new(config: ConfigQuic, initial_identity: Keypair) -> (Self, ConnectionCacheIdentity) {
+    pub fn new(
+        config: ConfigQuic,
+        initial_identity: Keypair,
+    ) -> (Self, ConnectionCacheIdentity, watch::Sender<()>) {
         let client_certificate = Self::create_client_certificate(&initial_identity);
         let initial_signer = PubkeySigner::new(initial_identity.insecure_clone());
-        metrics::quic_set_indetity(client_certificate.pubkey);
+        metrics::quic_set_identity(client_certificate.pubkey);
         info!("generate new QUIC identity: {}", client_certificate.pubkey);
 
         let connection_pools = LruCache::new(config.connection_max_pools);
@@ -115,16 +130,21 @@ impl ConnectionCache {
         }));
         let (identity_watcher, _) = watch::channel(initial_identity.pubkey());
         let (reactive_signer, _) = watch::channel(initial_signer);
+        let (stop_transactions, _) = watch::channel(());
+        let (allow_reset_tx, allow_reset) = watch::channel(());
+
         let quic_identity_man = ConnectionCacheIdentity {
             shared: Arc::clone(&shared),
             identity_watcher,
             reactive_signer,
+            stop_transactions,
+            allow_reset,
         };
         let ret = Self {
             config: Arc::new(config),
             shared,
         };
-        (ret, quic_identity_man)
+        (ret, quic_identity_man, allow_reset_tx)
     }
 
     fn create_client_certificate(keypair: &Keypair) -> Arc<QuicClientCertificate> {

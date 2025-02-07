@@ -191,6 +191,9 @@ pub mod rpc_admin {
             identity_keypair: Vec<u8>,
             require_tower: bool,
         ) -> RpcResult<()>;
+
+        #[method(name = "resetIdentity")]
+        async fn reset_identity(&self) -> RpcResult<()>;
     }
 
     pub struct RpcServerImpl {
@@ -226,6 +229,14 @@ pub mod rpc_admin {
             })?;
             self.set_keypair(keypair, require_tower).await
         }
+
+        async fn reset_identity(&self) -> RpcResult<()> {
+            let new_keypair = Keypair::new();
+            self.quic_identity_man
+                .update_keypair(&new_keypair, true)
+                .await;
+            Ok(())
+        }
     }
 
     impl RpcServerImpl {
@@ -242,7 +253,9 @@ pub mod rpc_admin {
                 }
             }
 
-            self.quic_identity_man.update_keypair(&identity).await;
+            self.quic_identity_man
+                .update_keypair(&identity, false)
+                .await;
             info!("update identity: {}", identity.pubkey());
 
             Ok(())

@@ -29,7 +29,7 @@ use {
         time::SystemTime,
     },
     tokio::{
-        sync::{mpsc, Notify, RwLock},
+        sync::{mpsc, watch, Notify, RwLock},
         task::JoinSet,
         time::{interval, Duration, Instant},
     },
@@ -252,6 +252,8 @@ impl SendTransactionsPool {
         blockhash_queue: BlockhashQueue,
         rooted_transactions: RootedTransactions,
         quic_client: QuicClient,
+        stop_transactions: watch::Receiver<()>,
+        allow_reset: watch::Sender<()>,
     ) -> anyhow::Result<Self> {
         let shutdown = Arc::new(Notify::new());
 
@@ -273,6 +275,8 @@ impl SendTransactionsPool {
             tasks: JoinSet::new(),
             transactions: HashMap::new(),
             retry_schedule: BTreeMap::new(),
+            stop_transactions,
+            allow_reset,
         };
 
         Ok(Self {
@@ -359,12 +363,25 @@ struct SendTransactionsPoolTask {
     tasks: JoinSet<SendTransactionTaskResult>,
     transactions: HashMap<Signature, SendTransactionInfo>,
     retry_schedule: BTreeMap<TransactionRetryTimestamp, Vec<Signature>>,
+    stop_transactions: watch::Receiver<()>,
+    allow_reset: watch::Sender<()>,
 }
 
 impl SendTransactionsPoolTask {
     async fn run(mut self) -> anyhow::Result<()> {
         let mut retry_interval = interval(Duration::from_millis(10));
+        let mut flush_transactions = false;
         loop {
+            if self.tasks.is_empty()
+                && self.transactions.is_empty()
+                && self.retry_schedule.is_empty()
+                && flush_transactions
+            {
+                info!("All transactions sent. Resetting identity");
+                self.allow_reset.send_replace(());
+                flush_transactions = false;
+            }
+
             let tasks_join_next = if self.tasks.is_empty() {
                 pending().boxed()
             } else {
@@ -372,9 +389,23 @@ impl SendTransactionsPoolTask {
             };
 
             tokio::select! {
+                res = self.stop_transactions.changed() => {
+                    match res {
+                        Ok(()) => {
+                            info!("Flushing all transactions in queue");
+                            flush_transactions = true;
+                        }
+                        Err(_)  => {
+                            error!("Reset identity channel was dropped");
+                            return Ok(())}
+                    }
+                }
                 _ = self.shutdown.notified() => return Ok(()),
                 maybe_newtx = self.new_transactions_rx.recv() => match maybe_newtx {
-                    Some(newtx) => self.add_new_transaction(newtx).await,
+                    Some(newtx) => if !flush_transactions {
+                           self.add_new_transaction(newtx).await
+                        }
+                    ,
                     None => anyhow::bail!("incoming transactions channel is closed"),
                 },
                 maybe_result = tasks_join_next => {

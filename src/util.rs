@@ -178,6 +178,7 @@ pub fn ms_since_epoch() -> u64 {
         .as_millis() as u64
 }
 
+#[derive(Clone)]
 pub struct ValueObserver<T> {
     last_val: T,
     rx: watch::Receiver<T>,

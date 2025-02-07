@@ -65,7 +65,7 @@ async fn send_buffer_should_land_properly() {
     let connection_cache_kp = Keypair::new();
     let rx_server_addr = generate_random_local_addr();
     let config = default_config_quic();
-    let (quic_session, _identity_map) =
+    let (quic_session, _identity_map, _) =
         ConnectionCache::new(config, connection_cache_kp.insecure_clone());
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
 
@@ -113,7 +113,7 @@ async fn test_update_identity() {
     let rx_server_addr = generate_random_local_addr();
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
     let config = default_config_quic();
-    let (quic_session, identity_map) =
+    let (quic_session, identity_map, _) =
         ConnectionCache::new(config, connection_cache_kp.insecure_clone());
 
     let (start_tx, start_rx) = oneshot::channel::<()>();
@@ -162,7 +162,7 @@ async fn test_update_identity() {
     assert_eq!(actual_remote_key, current_identity1);
     assert_eq!(msg, "helloworld");
     let new_kp = Keypair::new();
-    identity_map.update_keypair(&new_kp).await;
+    identity_map.update_keypair(&new_kp, false).await;
     let (actual_remote_key, buf) = client_rx.recv().await.expect("recv");
     let msg = String::from_utf8(buf).expect("utf8");
     let current_identity2 = identity_map.get_identity().await;
@@ -177,7 +177,7 @@ async fn update_identity_should_drop_all_connections() {
     let rx_server_addr = generate_random_local_addr();
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
     let config = default_config_quic();
-    let (quic_session, identity_map) =
+    let (quic_session, identity_map, _) =
         ConnectionCache::new(config, connection_cache_kp.insecure_clone());
 
     let (start_tx, start_rx) = oneshot::channel::<()>();
@@ -226,7 +226,7 @@ async fn update_identity_should_drop_all_connections() {
     assert_eq!(actual_remote_key, current_identity1);
     assert_eq!(msg, "helloworld");
     let new_kp = Keypair::new();
-    identity_map.update_keypair(&new_kp).await;
+    identity_map.update_keypair(&new_kp, false).await;
     let maybe = client_rx.recv().await;
     assert!(maybe.is_none());
     let result = rx_server_handle.await.expect("rx_server_handle");
