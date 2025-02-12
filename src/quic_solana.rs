@@ -473,7 +473,7 @@ impl QuicClient {
     async fn send_buffer_using_conn(connection: &Connection, data: &[u8]) -> Result<(), QuicError> {
         let mut send_stream = connection.open_uni().await?;
         send_stream.write_all(data).await?;
-        // Finish sends a FIN packet, which is a signal that the stream is done sending data.
+        // Finish sets FIN bit in the last Frame, which is a signal that the stream is done sending data.
         // You must call finish before stopped underwise the reader won't ever know you finished and will make
         // `stopped` called wait forever.
         // Finish should never return an error since the stream is created and end within the same function.
