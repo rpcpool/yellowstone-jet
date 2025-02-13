@@ -162,7 +162,7 @@ pub async fn get_identity() {
 }
 
 #[tokio::test]
-pub async fn reset_identity() {
+pub async fn reset_identity_to_random() {
     let rpc_addr = generate_random_local_addr();
 
     let expected_identity = Keypair::new();
