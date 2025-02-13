@@ -21,7 +21,7 @@ use {
         runtime::Builder,
         signal::unix::{signal, SignalKind},
         sync::{broadcast, oneshot},
-        task::{JoinHandle, JoinSet},
+        task::JoinHandle,
         time::{sleep, Duration},
     },
     tracing::{info, warn},

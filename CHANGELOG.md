@@ -14,6 +14,20 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [10.5.0]
+
+### Features
+
+- Added `leader_rtt` histogram metric which obseve round-trip-time between jet and remote leader.
+- Added `leader_mtu` gauge metric which tracks the each leader connection MTU.
+- Added `send_transaction_attempt` counter metrics which count every send attempt (sucessful or failed) to a leader.
+- Added `send_transaction_e2e_latency` histogram metrics which measure to end-to-end time it takes from opening a uni-stream sending a transaction and waiting for a acks.
+
+### Fixes
+
+- Added `finish` and `stopped` call in `quic_solana::QuicClientsend_buffer_using_conn` to properly awaits acks making sure transaction are truely handled by
+a remote validator.
+
 ## [10.4.0]
 
 ### Features

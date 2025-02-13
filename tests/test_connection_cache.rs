@@ -1,5 +1,6 @@
 use {
-    futures::{channel::oneshot, future::pending},
+    bytes::Bytes,
+    futures::channel::oneshot,
     quinn::{crypto::rustls::QuicServerConfig, ReadExactError},
     rand::Rng,
     solana_sdk::{signature::Keypair, signer::Signer},
@@ -7,15 +8,17 @@ use {
         nonblocking::quic::ALPN_TPU_PROTOCOL_ID, tls_certificates::new_dummy_x509_certificate,
     },
     std::{
+        array,
         net::{SocketAddr, TcpListener},
         sync::Arc,
+        thread,
     },
     tokio::sync::mpsc,
     yellowstone_jet::{
         cluster_tpu_info::TpuInfo,
         config::{ConfigQuic, ConfigQuicTpuPort},
         crypto_provider::crypto_provider,
-        quic_solana::ConnectionCache,
+        quic_solana::{ConnectionCache, QuicError},
     },
 };
 
@@ -60,6 +63,56 @@ pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
     (endpoint, kp)
 }
 
+#[test]
+fn send_buffer_should_timeout_on_idle_connection() {
+    let connection_cache_kp = Keypair::new();
+    let rx_server_addr = generate_random_local_addr();
+    let mut config = default_config_quic();
+    config.max_idle_timeout = std::time::Duration::from_secs(1);
+
+    let single_threaded_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let _server_handle = single_threaded_runtime.spawn(async move {
+        let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
+        let connecting = rx_server_endpoint.accept().await.expect("accept");
+        let _conn = connecting.await.expect("quinn connection");
+        // Make a blocking operation here to stall tokio runtime causing connection keep-alive timeout in the send_buffer thread.
+        thread::sleep(std::time::Duration::from_secs(10));
+    });
+
+    let send_buffer_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let send_buffer_result = send_buffer_rt
+        .block_on(async move {
+            let (quic_session, _identity_map) =
+                ConnectionCache::new(config, connection_cache_kp.insecure_clone());
+            let buf = "helloworld".as_bytes();
+            let tpu_info = TpuInfo {
+                leader: Keypair::new().pubkey(),
+                slots: [0, 1, 2, 3],
+                quic: None,
+                quic_forwards: None,
+            };
+            quic_session
+                .send_buffer(rx_server_addr, buf, &tpu_info)
+                .await
+        })
+        .expect_err("send buffer");
+
+    assert!(matches!(
+        send_buffer_result,
+        QuicError::ConnectionError(quinn::ConnectionError::TimedOut)
+    ));
+}
+
 #[tokio::test]
 async fn send_buffer_should_land_properly() {
     let connection_cache_kp = Keypair::new();
@@ -83,7 +136,6 @@ async fn send_buffer_should_land_properly() {
             .send_buffer(rx_server_addr, buf, &tpu_info)
             .await
             .expect("send buffer");
-        pending::<()>().await;
     });
 
     let (client_tx, mut client_rx) = mpsc::channel(100);
@@ -92,19 +144,32 @@ async fn send_buffer_should_land_properly() {
         let conn = connecting.await.expect("quinn connection");
         let remote_key = solana_streamer::nonblocking::quic::get_remote_pubkey(&conn)
             .expect("get remote pubkey");
+
         let mut rx = conn.accept_uni().await.expect("accept uni");
-        let mut buf = vec![0; 10];
-        rx.read_exact(&mut buf).await.expect("read");
-        client_tx.send((remote_key, buf)).await.expect("send");
+        // This code as been partially copied from agave source code:
+        let mut chunks: [Bytes; 4] = array::from_fn(|_| Bytes::new());
+        let mut total_chunks_read = 0;
+        while let Some(n_chunk) = rx.read_chunks(&mut chunks).await.expect("read") {
+            total_chunks_read += n_chunk;
+            if total_chunks_read > 4 {
+                panic!("total_chunks_read > 4");
+            }
+        }
+        let combined = chunks.iter().fold(vec![], |mut acc, chunk| {
+            acc.extend_from_slice(chunk);
+            acc
+        });
+        drop(rx);
+        client_tx.send((remote_key, combined)).await.expect("send");
     });
 
     start_tx.send(()).expect("send");
+    h2.await.expect("h2");
+    h1.await.expect("h1");
     let (actual_remote_key, buf) = client_rx.recv().await.expect("recv");
     let msg = String::from_utf8(buf).expect("utf8");
-    assert_eq!(actual_remote_key, connection_cache_kp.pubkey());
     assert_eq!(msg, "helloworld");
-    h2.await.expect("h2");
-    h1.abort();
+    assert_eq!(actual_remote_key, connection_cache_kp.pubkey());
 }
 
 #[tokio::test]
@@ -147,10 +212,20 @@ async fn test_update_identity() {
                     .expect("get remote pubkey");
 
                 let mut rx = conn.accept_uni().await.expect("accept uni");
-
-                let mut buf = vec![0; 10];
-                rx.read_exact(&mut buf).await.expect("read");
-                client_tx.send((remote_key, buf)).await.expect("send");
+                // This code as been partially copied from agave source code:
+                let mut chunks: [Bytes; 4] = array::from_fn(|_| Bytes::new());
+                let mut total_chunks_read = 0;
+                while let Some(n_chunk) = rx.read_chunks(&mut chunks).await.expect("read") {
+                    total_chunks_read += n_chunk;
+                    if total_chunks_read > 4 {
+                        panic!("total_chunks_read > 4");
+                    }
+                }
+                let combined = chunks.iter().fold(vec![], |mut acc, chunk| {
+                    acc.extend_from_slice(chunk);
+                    acc
+                });
+                client_tx.send((remote_key, combined)).await.expect("send");
             });
         }
     });
