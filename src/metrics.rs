@@ -325,7 +325,7 @@ pub mod jet {
         STS_TPU_BLOCKLISTED_TOTAL.inc_by(blocklisted as u64)
     }
 
-    pub fn quic_set_indetity(identity: Pubkey) {
+    pub fn quic_set_identity(identity: Pubkey) {
         QUIC_IDENTITY.reset();
         QUIC_IDENTITY
             .with_label_values(&[&identity.to_string()])
@@ -333,7 +333,7 @@ pub mod jet {
         *QUIC_IDENTITY_VALUE.lock().unwrap() = Some(identity);
     }
 
-    pub fn quic_set_indetity_expected(identity: Pubkey) {
+    pub fn quic_set_identity_expected(identity: Pubkey) {
         QUIC_IDENTITY_EXPECTED.reset();
         QUIC_IDENTITY_EXPECTED
             .with_label_values(&[&identity.to_string()])

@@ -59,7 +59,7 @@ impl ConnectionCacheIdentity {
             certificate,
         });
         let mut locked = self.shared.lock().await;
-        metrics::quic_set_indetity(cert.pubkey);
+        metrics::quic_set_identity(cert.pubkey);
         info!("update QUIC identityc: {}", cert.pubkey);
         locked.connection_pools.clear(); // drop all previously created connections
         locked.client_certificate = cert;
@@ -105,7 +105,7 @@ impl ConnectionCache {
     pub fn new(config: ConfigQuic, initial_identity: Keypair) -> (Self, ConnectionCacheIdentity) {
         let client_certificate = Self::create_client_certificate(&initial_identity);
         let initial_signer = PubkeySigner::new(initial_identity.insecure_clone());
-        metrics::quic_set_indetity(client_certificate.pubkey);
+        metrics::quic_set_identity(client_certificate.pubkey);
         info!("generate new QUIC identity: {}", client_certificate.pubkey);
 
         let connection_pools = LruCache::new(config.connection_max_pools);

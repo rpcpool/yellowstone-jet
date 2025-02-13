@@ -37,7 +37,7 @@ fn find_available_port() -> Option<u16> {
     None // If no port found after 100 attempts, return None
 }
 
-fn generate_random_local_addr() -> SocketAddr {
+pub fn generate_random_local_addr() -> SocketAddr {
     let port = find_available_port().expect("port");
     SocketAddr::new("127.0.0.1".parse().expect("ipv4"), port)
 }

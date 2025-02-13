@@ -21,7 +21,7 @@ use {
         runtime::Builder,
         signal::unix::{signal, SignalKind},
         sync::{broadcast, oneshot},
-        task::{JoinHandle, JoinSet},
+        task::JoinHandle,
         time::{sleep, Duration},
     },
     tracing::{info, warn},
@@ -78,6 +78,8 @@ enum ArgsCommandAdmin {
         #[clap(long)]
         identity: Option<PathBuf>,
     },
+    /// Reset identity
+    ResetIdentityKeypair,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -141,6 +143,9 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
                 format!("Failed to update identity: {identity} (new) != {identity_prev} (old)")
             );
             println!("Successfully update identity to {identity}");
+        }
+        ArgsCommandAdmin::ResetIdentityKeypair => {
+            client.reset_identity().await?;
         }
     }
 
@@ -238,7 +243,7 @@ fn spawn_lewis_metric_subscriber(
 async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     metrics::init();
     if let Some(identity) = config.identity.expected {
-        metrics::quic_set_indetity_expected(identity);
+        metrics::quic_set_identity_expected(identity);
     }
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
