@@ -3,14 +3,17 @@ use {
         cluster_tpu_info::TpuInfo,
         config::ConfigQuic,
         crypto_provider::crypto_provider,
-        metrics::jet as metrics,
+        metrics::jet::{
+            self as metrics, incr_send_tx_attempt, observe_leader_rtt,
+            observe_send_transaction_e2e_latency, set_leader_mtu,
+        },
         util::{PubkeySigner, ValueObserver},
     },
     futures::future::try_join_all,
     lru::LruCache,
     quinn::{
         crypto::rustls::QuicClientConfig, ClientConfig, ConnectError, Connection, ConnectionError,
-        Endpoint, IdleTimeout, TransportConfig, WriteError,
+        Endpoint, IdleTimeout, StoppedError, TransportConfig, VarInt, WriteError,
     },
     rand::{thread_rng, Rng},
     rustls::{
@@ -34,7 +37,7 @@ use {
     },
     tokio::{
         sync::{watch, AcquireError, Mutex, OnceCell, Semaphore},
-        time::timeout,
+        time::{timeout, Instant},
     },
     tracing::{debug, info},
 };
@@ -373,6 +376,10 @@ pub enum QuicError {
     ExceedBatchLimit { size: usize, limit: usize },
     #[error(transparent)]
     AcquireFailed(#[from] AcquireError),
+    #[error("0-RTT rejected")]
+    ZeroRttRejected,
+    #[error("stopped failed with error code {0}")]
+    StopErrorCode(VarInt),
 }
 
 impl QuicError {
@@ -389,6 +396,8 @@ impl QuicError {
                 QuicError::IdentityMismatch => "Identity Mismatch",
                 QuicError::ExceedBatchLimit { .. } => "Exceed Batch Limit",
                 QuicError::AcquireFailed(_) => "Acquired Failed",
+                QuicError::ZeroRttRejected => "Zero RTT Rejected",
+                QuicError::StopErrorCode(_) => "Stop Error Code",
             }
         }
         .to_owned()
@@ -464,10 +473,34 @@ impl QuicClient {
     async fn send_buffer_using_conn(connection: &Connection, data: &[u8]) -> Result<(), QuicError> {
         let mut send_stream = connection.open_uni().await?;
         send_stream.write_all(data).await?;
-        // https://github.com/anza-xyz/agave/pull/2905#issuecomment-2356530294
-        // stream will be finished when dropped. Finishing here explicitly would lead to blocking.
-        // send_stream.finish().await.map_err(Into::into)
-        Ok(())
+        // Finish sets FIN bit in the last Frame, which is a signal that the stream is done sending data.
+        // You must call finish before stopped underwise the reader won't ever know you finished and will make
+        // `stopped` called wait forever.
+        // Finish should never return an error since the stream is created and end within the same function.
+        // It is impossible this function is called twice on the same stream.
+        // Finish error happen if the stream has already been closed.
+        send_stream.finish().expect("finish failed");
+        // Make sure we the remote side has acknowledged all the data we sent
+        // This stopped may timeout if the remote side is not responding after MAX_CONNECTION_IDLE_TIMEOUT
+        send_stream
+            .stopped()
+            .await
+            .map_err(|e| match e {
+                StoppedError::ConnectionLost(e2) => e2.into(),
+                StoppedError::ZeroRttRejected => QuicError::ZeroRttRejected,
+            })
+            .and_then(|maybe| {
+                match maybe {
+                    None => Ok(()),
+                    Some(error_code) => {
+                        // If we get here, it is not guaranteed that the remote side has received all the data we sent.
+                        // Even if we get 0x00 (NO_ERROR) QUIC error code.
+                        // NO_ERROR = the receiver close abruptly the connection.
+                        // In rust, if the Recv object is dropped before reading all the data, it should return NO_ERROR.
+                        Err(QuicError::StopErrorCode(error_code))
+                    }
+                }
+            })
     }
 
     // Attempts to send data, connecting/reconnecting as necessary
@@ -556,8 +589,17 @@ impl QuicClient {
             }
 
             last_connection_id = connection.stable_id();
+            let path_stats = connection.stats().path;
+            let current_mut = path_stats.current_mtu;
+            set_leader_mtu(tpu_info.leader, current_mut);
+            observe_leader_rtt(tpu_info.leader, path_stats.rtt);
 
-            return match Self::send_buffer_using_conn(&connection, data).await {
+            let t = Instant::now();
+            let quic_result = Self::send_buffer_using_conn(&connection, data).await;
+            let elapsed = t.elapsed();
+            observe_send_transaction_e2e_latency(tpu_info.leader, elapsed);
+            incr_send_tx_attempt(tpu_info.leader);
+            return match quic_result {
                 Ok(()) => {
                     debug!(
                         tpu.leader = %tpu_info.leader,
