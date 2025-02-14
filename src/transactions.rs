@@ -18,6 +18,7 @@ use {
         clock::{Slot, MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES},
         signature::Signature,
         transaction::VersionedTransaction,
+        hash::Hash,
     },
     std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -249,7 +250,7 @@ impl WaitShutdown for SendTransactionsPool {
 impl SendTransactionsPool {
     pub async fn new(
         config: ConfigSendTransactionService,
-        blockhash_queue: BlockhashQueue,
+        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
         rooted_transactions: RootedTransactions,
         quic_client: QuicClient,
     ) -> anyhow::Result<Self> {
@@ -265,7 +266,7 @@ impl SendTransactionsPool {
         let task = SendTransactionsPoolTask {
             shutdown: Arc::clone(&shutdown),
             config,
-            blockhash_queue,
+            block_height_service,
             rooted_transactions,
             quic_client,
             new_transactions_rx,
@@ -347,11 +348,38 @@ impl TransactionRetryTimestamp {
     }
 }
 
-#[derive(Debug)]
+///
+/// Interface to query block height information
+/// 
+#[async_trait::async_trait]
+pub trait BlockHeighService {
+
+    ///
+    /// Get the block height for the given blockhash
+    /// 
+    async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight>;
+    ///
+    /// Get the latest block height for the given commitment level
+    /// 
+    async fn get_block_height_for_commitment(&self, commitment: CommitmentLevel) -> Option<BlockHeight>;
+}
+
+#[async_trait::async_trait]
+impl BlockHeighService for BlockhashQueue {
+    async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
+        self.get_block_height(blockhash).await
+    }
+
+    async fn get_block_height_for_commitment(&self, commitment: CommitmentLevel) -> Option<BlockHeight> {
+        self.get_block_height_latest(commitment).await
+    }
+}
+
+
 struct SendTransactionsPoolTask {
     shutdown: Arc<Notify>,
     config: ConfigSendTransactionService,
-    blockhash_queue: BlockhashQueue,
+    block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
     rooted_transactions: RootedTransactions,
     quic_client: QuicClient,
     new_transactions_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
@@ -413,7 +441,7 @@ impl SendTransactionsPoolTask {
             .min(self.config.service_max_retries);
 
         let mut last_valid_block_height = self
-            .blockhash_queue
+            .block_height_service
             .get_block_height(transaction.message.recent_blockhash())
             .await
             .map(|block_height| block_height + MAX_PROCESSING_AGE as u64)
@@ -424,8 +452,8 @@ impl SendTransactionsPoolTask {
         let durable_nonce_info = get_durable_nonce(&transaction);
         if durable_nonce_info.is_some() {
             last_valid_block_height = self
-                .blockhash_queue
-                .get_block_height_latest(CommitmentLevel::Confirmed)
+                .block_height_service
+                .get_block_height_for_commitment(CommitmentLevel::Confirmed)
                 .await
                 .map(|block_height| block_height + MAX_PROCESSING_AGE as u64)
                 .unwrap_or(0);
@@ -576,8 +604,8 @@ impl SendTransactionsPoolTask {
         }
 
         let maybe_block_height = self
-            .blockhash_queue
-            .get_block_height_latest(CommitmentLevel::Confirmed)
+            .block_height_service
+            .get_block_height_for_commitment(CommitmentLevel::Confirmed)
             .await;
 
         let retry_timestamp = TransactionRetryTimestamp::next(self.config.retry_rate);

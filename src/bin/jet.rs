@@ -274,7 +274,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     let send_transactions = SendTransactionsPool::new(
         config.send_transaction_service,
-        blockhash_queue.clone(),
+        Arc::new(blockhash_queue.clone()),
         rooted_transactions.clone(),
         quic_tx_sender.clone(),
     )
