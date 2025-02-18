@@ -78,7 +78,7 @@ enum ArgsCommandAdmin {
         #[clap(long)]
         identity: Option<PathBuf>,
     },
-
+    /// Reset identity
     ResetIdentityKeypair,
 }
 
@@ -159,10 +159,10 @@ async fn spawn_jet_gw_listener(
     expected_identity: Option<Pubkey>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
-    let mut identity_observer2 = identity_observer.clone();
     loop {
         let jet_gw_config2 = jet_gw_config.clone();
         let tx_sender2 = tx_sender.clone();
+        let mut identity_observer2 = identity_observer.clone();
         let (stop_tx2, stop_rx2) = tokio::sync::oneshot::channel();
         let fut = identity_observer.until_value_change(move |current_identity| {
             if let Some(expected_identity) = expected_identity {
@@ -188,7 +188,6 @@ async fn spawn_jet_gw_listener(
                 ).boxed()
             }
         });
-
         tokio::select! {
             result = fut => {
                 match result {
@@ -274,7 +273,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let rooted_transactions = RootedTransactions::new(&geyser).await?;
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
-    let (quic_session, quic_identity_man, allow_reset_tx) =
+    let (quic_session, quic_identity_man) =
         ConnectionCache::new(config.quic.clone(), initial_identity);
 
     let quic_tx_sender = QuicClient::new(
@@ -288,11 +287,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     let send_transactions = SendTransactionsPool::new(
         config.send_transaction_service,
-        blockhash_queue.clone(),
-        rooted_transactions.clone(),
+        Arc::new(blockhash_queue.clone()),
+        Arc::new(rooted_transactions.clone()),
         quic_tx_sender.clone(),
-        quic_identity_man.get_stop_transaction_rx(),
-        allow_reset_tx,
+        quic_identity_man.flush_transactions_receiver(),
     )
     .await?;
 

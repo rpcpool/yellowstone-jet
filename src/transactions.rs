@@ -1,6 +1,6 @@
 use {
     crate::{
-        blockhash_queue::BlockhashQueue,
+        blockhash_queue::BlockHeighService,
         config::ConfigSendTransactionService,
         grpc_geyser::{
             GeyserSubscriber, GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived,
@@ -44,6 +44,16 @@ struct RootedTransactionsSlotInfo {
 
 type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
 
+#[async_trait::async_trait]
+pub trait RootedTransactionsTraits {
+    async fn subscribe_signature(&self, signature: Signature);
+    async fn unsubscribe_signature(&self, signature: &Signature);
+    async fn subscribe_signature_updates(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>>;
+    async fn get_transaction_commitment(&self, signature: Signature) -> Option<CommitmentLevel>;
+}
+
 #[derive(Debug, Default)]
 struct RootedTransactionsInner {
     slots: HashMap<Slot, RootedTransactionsSlotInfo>,
@@ -70,6 +80,36 @@ impl WaitShutdown for RootedTransactions {
     }
 }
 
+#[async_trait::async_trait]
+impl RootedTransactionsTraits for RootedTransactions {
+    async fn get_transaction_commitment(&self, signature: Signature) -> Option<CommitmentLevel> {
+        let locked = self.inner.read().await;
+        locked
+            .transactions
+            .get(&signature)
+            .and_then(|slot| locked.slots.get(slot))
+            .and_then(|info| info.slot)
+            .map(|info| info.commitment)
+    }
+
+    async fn subscribe_signature(&self, signature: Signature) {
+        let mut locked = self.inner.write().await;
+        locked.watch_signatures.insert(signature);
+    }
+
+    async fn unsubscribe_signature(&self, signature: &Signature) {
+        let mut locked = self.inner.write().await;
+        locked.watch_signatures.remove(signature);
+    }
+
+    async fn subscribe_signature_updates(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>> {
+        let mut locked = self.inner.write().await;
+        locked.signature_updates_rx.take()
+    }
+}
+
 impl RootedTransactions {
     pub async fn new(grpc: &GeyserSubscriber) -> anyhow::Result<Self> {
         let shutdown = Arc::new(Notify::new());
@@ -92,36 +132,6 @@ impl RootedTransactions {
                 signature_updates_tx,
             )),
         })
-    }
-
-    pub async fn get_transaction_commitment(
-        &self,
-        signature: Signature,
-    ) -> Option<CommitmentLevel> {
-        let locked = self.inner.read().await;
-        locked
-            .transactions
-            .get(&signature)
-            .and_then(|slot| locked.slots.get(slot))
-            .and_then(|info| info.slot)
-            .map(|info| info.commitment)
-    }
-
-    pub async fn subscribe_signature(&self, signature: Signature) {
-        let mut locked = self.inner.write().await;
-        locked.watch_signatures.insert(signature);
-    }
-
-    pub async fn unsubscribe_signature(&self, signature: &Signature) {
-        let mut locked = self.inner.write().await;
-        locked.watch_signatures.remove(signature);
-    }
-
-    pub async fn subscribe_signature_updates(
-        &self,
-    ) -> Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>> {
-        let mut locked = self.inner.write().await;
-        locked.signature_updates_rx.take()
     }
 
     async fn start_loop(
@@ -249,11 +259,10 @@ impl WaitShutdown for SendTransactionsPool {
 impl SendTransactionsPool {
     pub async fn new(
         config: ConfigSendTransactionService,
-        blockhash_queue: BlockhashQueue,
-        rooted_transactions: RootedTransactions,
+        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+        rooted_transactions: Arc<dyn RootedTransactionsTraits + Send + Sync + 'static>,
         quic_client: QuicClient,
-        stop_transactions: watch::Receiver<()>,
-        allow_reset: watch::Sender<()>,
+        flush_transactions: watch::Receiver<Arc<Notify>>,
     ) -> anyhow::Result<Self> {
         let shutdown = Arc::new(Notify::new());
 
@@ -267,7 +276,7 @@ impl SendTransactionsPool {
         let task = SendTransactionsPoolTask {
             shutdown: Arc::clone(&shutdown),
             config,
-            blockhash_queue,
+            block_height_service,
             rooted_transactions,
             quic_client,
             new_transactions_rx,
@@ -275,8 +284,7 @@ impl SendTransactionsPool {
             tasks: JoinSet::new(),
             transactions: HashMap::new(),
             retry_schedule: BTreeMap::new(),
-            stop_transactions,
-            allow_reset,
+            flush_transactions,
         };
 
         Ok(Self {
@@ -351,35 +359,37 @@ impl TransactionRetryTimestamp {
     }
 }
 
-#[derive(Debug)]
-struct SendTransactionsPoolTask {
+pub struct SendTransactionsPoolTask {
     shutdown: Arc<Notify>,
     config: ConfigSendTransactionService,
-    blockhash_queue: BlockhashQueue,
-    rooted_transactions: RootedTransactions,
+    block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+    rooted_transactions: Arc<dyn RootedTransactionsTraits + Send + Sync + 'static>,
     quic_client: QuicClient,
     new_transactions_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
     signature_updates: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
     tasks: JoinSet<SendTransactionTaskResult>,
     transactions: HashMap<Signature, SendTransactionInfo>,
     retry_schedule: BTreeMap<TransactionRetryTimestamp, Vec<Signature>>,
-    stop_transactions: watch::Receiver<()>,
-    allow_reset: watch::Sender<()>,
+    flush_transactions: watch::Receiver<Arc<Notify>>,
 }
 
 impl SendTransactionsPoolTask {
-    async fn run(mut self) -> anyhow::Result<()> {
+    pub async fn run(mut self) -> anyhow::Result<()> {
+        let mut start_flush_transactions = false;
+        let mut notification: Arc<Notify> = Arc::new(Notify::new());
+
         let mut retry_interval = interval(Duration::from_millis(10));
-        let mut flush_transactions = false;
+
         loop {
             if self.tasks.is_empty()
                 && self.transactions.is_empty()
                 && self.retry_schedule.is_empty()
-                && flush_transactions
+                && start_flush_transactions
             {
+                notification.notify_waiters();
+
                 info!("All transactions sent. Resetting identity");
-                self.allow_reset.send_replace(());
-                flush_transactions = false;
+                start_flush_transactions = false;
             }
 
             let tasks_join_next = if self.tasks.is_empty() {
@@ -389,26 +399,31 @@ impl SendTransactionsPoolTask {
             };
 
             tokio::select! {
-                res = self.stop_transactions.changed() => {
+                res = self.flush_transactions.changed() => {
                     match res {
-                        Ok(()) => {
+                        Ok(_) => {
+                            eprintln!("Flushing all transactions in queue");
+
                             info!("Flushing all transactions in queue");
-                            flush_transactions = true;
+                            start_flush_transactions = true;
+                            notification = self.flush_transactions.borrow().clone();
                         }
                         Err(_)  => {
                             error!("Reset identity channel was dropped");
+
                             return Ok(())}
                     }
                 }
                 _ = self.shutdown.notified() => return Ok(()),
                 maybe_newtx = self.new_transactions_rx.recv() => match maybe_newtx {
-                    Some(newtx) => if !flush_transactions {
-                           self.add_new_transaction(newtx).await
-                        }
-                    ,
+                    Some(newtx) =>{
+                        eprintln!("Received transaction before flush");
+                        self.add_new_transaction(newtx).await
+                    },
                     None => anyhow::bail!("incoming transactions channel is closed"),
                 },
                 maybe_result = tasks_join_next => {
+                    eprintln!("Error joining tasks");
                     match maybe_result {
                         Some(Ok(result)) => self.handle_joined_task(result).await,
                         Some(Err(error)) => error!("failed to join send task: {error:?}"),
@@ -416,7 +431,10 @@ impl SendTransactionsPoolTask {
                     };
                     metrics::sts_inflight_set_size(self.tasks.len());
                 },
-                _ = retry_interval.tick() => self.retry_scheduled_transactions().await,
+                _ = retry_interval.tick() => {
+                    eprintln!("Error joining tasks");
+
+                    self.retry_scheduled_transactions().await},
                 maybe_signature_update = self.signature_updates.recv() => match maybe_signature_update {
                     Some((signature, commitment)) => self.update_signature(signature, commitment).await,
                     None => {
@@ -426,6 +444,18 @@ impl SendTransactionsPoolTask {
                 },
             }
         }
+    }
+
+    pub fn transactions_count(&mut self) -> usize {
+        self.transactions.len()
+    }
+
+    pub fn retry_schedule_count(&mut self) -> usize {
+        self.retry_schedule.len()
+    }
+
+    pub fn tasks_count(&mut self) -> usize {
+        self.tasks.len()
     }
 
     #[instrument(skip_all, fields(signature = %signature))]
@@ -444,7 +474,7 @@ impl SendTransactionsPoolTask {
             .min(self.config.service_max_retries);
 
         let mut last_valid_block_height = self
-            .blockhash_queue
+            .block_height_service
             .get_block_height(transaction.message.recent_blockhash())
             .await
             .map(|block_height| block_height + MAX_PROCESSING_AGE as u64)
@@ -455,8 +485,8 @@ impl SendTransactionsPoolTask {
         let durable_nonce_info = get_durable_nonce(&transaction);
         if durable_nonce_info.is_some() {
             last_valid_block_height = self
-                .blockhash_queue
-                .get_block_height_latest(CommitmentLevel::Confirmed)
+                .block_height_service
+                .get_block_height_for_commitment(CommitmentLevel::Confirmed)
                 .await
                 .map(|block_height| block_height + MAX_PROCESSING_AGE as u64)
                 .unwrap_or(0);
@@ -467,6 +497,7 @@ impl SendTransactionsPoolTask {
             .get_transaction_commitment(signature)
             .await;
         if tx_commitment == Some(CommitmentLevel::Finalized) {
+            eprintln!("Transaction finalized for commitment");
             info!(%signature, "new transaction already finalized");
             return;
         }
@@ -512,6 +543,8 @@ impl SendTransactionsPoolTask {
             self.schedule_transaction_retry(signature, retry_timestamp)
                 .await;
         } else {
+            eprintln!("Transaction::spawn_send_transaction");
+
             self.spawn_send_transaction(id, signature, wire_transaction);
         }
     }
@@ -535,12 +568,16 @@ impl SendTransactionsPoolTask {
         let quic_client = self.quic_client.clone();
         let leader_forward_count = self.config.leader_forward_count;
         let retry_timestamp = TransactionRetryTimestamp::next(self.config.retry_rate);
+        eprintln!("Transaction::send_transaction.await");
+
         self.tasks.spawn(async move {
             info!(id, %signature, "trying to send transaction");
 
+            eprintln!("Transaction::send_transaction.await2");
             quic_client
                 .send_transaction(id, signature, wire_transaction, leader_forward_count)
                 .await;
+            eprintln!("Transaction::send_transaction");
 
             SendTransactionTaskResult {
                 id,
@@ -559,7 +596,11 @@ impl SendTransactionsPoolTask {
             retry_timestamp,
         }: SendTransactionTaskResult,
     ) {
+        eprintln!("Transaction::handle_joined_task");
+
         if let Some(info) = self.transactions.get_mut(&signature) {
+            eprintln!("Transaction::handle_joined_task info {:?}", info);
+
             if info.id == id {
                 info.total_retries += 1;
                 self.schedule_transaction_retry(signature, retry_timestamp)
@@ -607,8 +648,8 @@ impl SendTransactionsPoolTask {
         }
 
         let maybe_block_height = self
-            .blockhash_queue
-            .get_block_height_latest(CommitmentLevel::Confirmed)
+            .block_height_service
+            .get_block_height_for_commitment(CommitmentLevel::Confirmed)
             .await;
 
         let retry_timestamp = TransactionRetryTimestamp::next(self.config.retry_rate);
@@ -654,5 +695,52 @@ impl SendTransactionsPoolTask {
                 metrics::sts_landed_inc();
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MockRootedTransactions {
+    inner: Arc<RwLock<RootedTransactionsInner>>,
+}
+
+impl MockRootedTransactions {
+    pub fn new() -> Self {
+        let (_, signature_updates_rx) = mpsc::unbounded_channel();
+
+        let rooted_transactions_inner = RootedTransactionsInner {
+            signature_updates_rx: Some(signature_updates_rx),
+            ..Default::default()
+        };
+
+        Self {
+            inner: Arc::new(RwLock::new(rooted_transactions_inner)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RootedTransactionsTraits for MockRootedTransactions {
+    async fn subscribe_signature(&self, signature: Signature) {
+        let mut locked = self.inner.write().await;
+        locked.watch_signatures.insert(signature);
+    }
+    async fn unsubscribe_signature(&self, signature: &Signature) {
+        let mut locked = self.inner.write().await;
+        locked.watch_signatures.remove(signature);
+    }
+    async fn subscribe_signature_updates(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>> {
+        let mut locked = self.inner.write().await;
+        locked.signature_updates_rx.take()
+    }
+    async fn get_transaction_commitment(&self, signature: Signature) -> Option<CommitmentLevel> {
+        let locked = self.inner.read().await;
+        locked
+            .transactions
+            .get(&signature)
+            .and_then(|slot| locked.slots.get(slot))
+            .and_then(|info| info.slot)
+            .map(|info| info.commitment)
     }
 }

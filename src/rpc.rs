@@ -231,9 +231,9 @@ pub mod rpc_admin {
         }
 
         async fn reset_identity(&self) -> RpcResult<()> {
-            let new_keypair = Keypair::new();
+            let random_identity = Keypair::new();
             self.quic_identity_man
-                .update_keypair(&new_keypair, true)
+                .update_keypair(&random_identity)
                 .await;
             Ok(())
         }
@@ -253,9 +253,7 @@ pub mod rpc_admin {
                 }
             }
 
-            self.quic_identity_man
-                .update_keypair(&identity, false)
-                .await;
+            self.quic_identity_man.update_keypair(&identity).await;
             info!("update identity: {}", identity.pubkey());
 
             Ok(())

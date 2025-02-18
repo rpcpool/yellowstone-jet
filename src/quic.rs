@@ -252,3 +252,24 @@ impl QuicClient {
         metrics::sts_tpu_send_inc(success);
     }
 }
+
+pub struct MockClusterTpuInfo {
+    leaders: Vec<TpuInfo>,
+}
+
+impl MockClusterTpuInfo {
+    pub fn new(leaders: Vec<TpuInfo>) -> Self {
+        Self { leaders }
+    }
+}
+
+impl UpcomingLeaderSchedule for MockClusterTpuInfo {
+    fn get_leader_tpus(
+        &self,
+        _leader_forward_lookahead: usize,
+        _extra_tpu_forward: Vec<TpuInfo>,
+    ) -> BoxFuture<'_, Vec<TpuInfo>> {
+        let leaders = self.leaders.clone();
+        async move { leaders }.boxed()
+    }
+}
