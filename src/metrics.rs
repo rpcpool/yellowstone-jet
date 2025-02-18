@@ -60,6 +60,7 @@ pub mod jet {
         std::{
             net::SocketAddr,
             sync::{Mutex, Once},
+            time::Duration,
         },
     };
 
@@ -139,6 +140,56 @@ pub mod jet {
 
         static ref SEND_TRANSACTION_ERROR: IntCounter = IntCounter::new("send_transaction_error", "Number of errors when sending transaction").unwrap();
         static ref SEND_TRANSACTION_SUCCESS: IntCounter = IntCounter::new("send_transaction_success", "Number of successful transactions sent").unwrap();
+        static ref SEND_TRANSACTION_ATTEMPT: IntCounterVec = IntCounterVec::new(
+            Opts::new("send_transaction_attempt", "Number of attempts to send transaction"),
+            &["leader"]
+        ).unwrap();
+
+        static ref SEND_TRANSACTION_E2E_LATENCY: HistogramVec = HistogramVec::new(
+            HistogramOpts::new("send_transaction_e2e_latency", "End-to-end transmission latency of sending transaction to a leader and waiting for acks")
+                // 0ms to 2 seconds, above that it means the remote connection is really bad and will probably crash soon.
+                .buckets(vec![
+                    0.0, 10.0, 15.0, 25.0, 35.0, 50.0, 75.0, 100.0,
+                    150.0, 200.0, 250.0, 300.0, 350.0, 400.0, 450.0, 500.0,
+                    600.0, 700.0, 800.0, 900.0, 1000.0, 1500.0, 2000.0
+                ]),
+            &["leader"]
+        ).unwrap();
+
+        static ref LEADER_RTT: HistogramVec = HistogramVec::new(
+            HistogramOpts::new("leader_rtt", "Leader Rounrd-trip-time")
+                // 0ms to 50ms, above that it means the remote connection is really bad and will probably crash soon.
+                .buckets(vec![
+                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0,
+                    15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0,
+                ]),
+            &["leader"]
+        ).unwrap();
+
+        static ref LEADER_MTU: IntGaugeVec = IntGaugeVec::new(
+            Opts::new("leader_mtu", "Leader current MTU"),
+            &["leader"]
+        ).unwrap();
+
+        // static ref LEADER_PMTUD:
+    }
+
+    pub fn observe_leader_rtt(leader: Pubkey, rtt: Duration) {
+        LEADER_RTT
+            .with_label_values(&[&leader.to_string()])
+            .observe(rtt.as_millis() as f64);
+    }
+
+    pub fn observe_send_transaction_e2e_latency(leader: Pubkey, duration: Duration) {
+        SEND_TRANSACTION_E2E_LATENCY
+            .with_label_values(&[&leader.to_string()])
+            .observe(duration.as_millis() as f64);
+    }
+
+    pub fn set_leader_mtu(leader: Pubkey, mtu: u16) {
+        LEADER_MTU
+            .with_label_values(&[&leader.to_string()])
+            .set(mtu as i64);
     }
 
     pub fn init() {
@@ -171,6 +222,12 @@ pub mod jet {
             register!(SEND_TRANSACTION_ERROR);
             register!(SEND_TRANSACTION_SUCCESS);
         });
+    }
+
+    pub fn incr_send_tx_attempt(leader: Pubkey) {
+        SEND_TRANSACTION_ATTEMPT
+            .with_label_values(&[&leader.to_string()])
+            .inc();
     }
 
     pub fn increment_send_transaction_error() {
