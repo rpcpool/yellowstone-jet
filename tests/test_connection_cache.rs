@@ -3,12 +3,13 @@ use {
     futures::channel::oneshot,
     quinn::ReadExactError,
     solana_sdk::{signature::Keypair, signer::Signer},
-    std::{array, sync::Arc, thread},
+    std::{array, sync::Arc, thread, time::Duration},
     tokio::sync::mpsc,
     yellowstone_jet::{
         cluster_tpu_info::TpuInfo,
         quic_solana::{ConnectionCache, QuicError},
-        utils_test::{build_random_endpoint, default_config_quic, generate_random_local_addr},
+        testkit::{build_random_endpoint, default_config_quic, generate_random_local_addr},
+        util::flush_control,
     },
 };
 
@@ -41,8 +42,9 @@ fn send_buffer_should_timeout_on_idle_connection() {
 
     let send_buffer_result = send_buffer_rt
         .block_on(async move {
+            let (_flush_guard, flush_identity) = flush_control();
             let (quic_session, _identity_map) =
-                ConnectionCache::new(config, connection_cache_kp.insecure_clone());
+                ConnectionCache::new(config, connection_cache_kp.insecure_clone(), flush_identity);
             let buf = "helloworld".as_bytes();
             let tpu_info = TpuInfo {
                 leader: Keypair::new().pubkey(),
@@ -67,8 +69,10 @@ async fn send_buffer_should_land_properly() {
     let connection_cache_kp = Keypair::new();
     let rx_server_addr = generate_random_local_addr();
     let config = default_config_quic();
+    let (_flush_guard, flush_identity) = flush_control();
+
     let (quic_session, _identity_map) =
-        ConnectionCache::new(config, connection_cache_kp.insecure_clone());
+        ConnectionCache::new(config, connection_cache_kp.insecure_clone(), flush_identity);
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
 
     let (start_tx, start_rx) = oneshot::channel::<()>();
@@ -127,9 +131,12 @@ async fn test_update_identity() {
     let rx_server_addr = generate_random_local_addr();
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
     let config = default_config_quic();
-    let (quic_session, identity_map) =
-        ConnectionCache::new(config, connection_cache_kp.insecure_clone());
-    let mut flushed = identity_map.flush_transactions_receiver();
+    let (_flush_guard, flush_identity) = flush_control();
+    let (quic_session, identity_map) = ConnectionCache::new(
+        config,
+        connection_cache_kp.insecure_clone(),
+        flush_identity.clone(),
+    );
 
     let (start_tx, start_rx) = oneshot::channel::<()>();
     let mut identity_observer = identity_map.observe_identity_change();
@@ -193,8 +200,9 @@ async fn test_update_identity() {
         let new_kp = Keypair::new();
         identity_map_arc2.update_keypair(&new_kp).await
     });
-    flushed.changed().await.expect("Error watching channel");
-    flushed.borrow().notify_waiters();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    flush_identity.reset_flush().await;
+
     h_update.await.expect("Error updating identity");
     let (actual_remote_key, buf) = client_rx.recv().await.expect("recv");
     let msg = String::from_utf8(buf).expect("utf8");
@@ -210,9 +218,12 @@ async fn update_identity_should_drop_all_connections() {
     let rx_server_addr = generate_random_local_addr();
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
     let config = default_config_quic();
-    let (quic_session, identity_map) =
-        ConnectionCache::new(config, connection_cache_kp.insecure_clone());
-    let mut flushed = identity_map.flush_transactions_receiver();
+    let (_flush_guard, flush_identity) = flush_control();
+    let (quic_session, identity_map) = ConnectionCache::new(
+        config,
+        connection_cache_kp.insecure_clone(),
+        flush_identity.clone(),
+    );
 
     let (start_tx, start_rx) = oneshot::channel::<()>();
     let mut identity_observer = identity_map.observe_identity_change();
@@ -264,8 +275,10 @@ async fn update_identity_should_drop_all_connections() {
         let new_kp = Keypair::new();
         identity_map.update_keypair(&new_kp).await
     });
-    flushed.changed().await.expect("Error watching channel");
-    flushed.borrow().notify_waiters();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    flush_identity.reset_flush().await;
+
     h_update.await.expect("Error updating identity");
     let maybe = client_rx.recv().await;
     assert!(maybe.is_none());

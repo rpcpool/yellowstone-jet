@@ -4,11 +4,12 @@ use {
         signature::{write_keypair_file, Keypair},
         signer::Signer,
     },
-    std::path::PathBuf,
+    std::{path::PathBuf, time::Duration},
     yellowstone_jet::{
         quic_solana::ConnectionCache,
         rpc::{rpc_admin::RpcClient, RpcServer, RpcServerType},
-        utils_test::{default_config_quic, generate_random_local_addr},
+        testkit::{default_config_quic, generate_random_local_addr},
+        util::flush_control,
     },
 };
 
@@ -26,9 +27,12 @@ pub async fn set_identity_if_expected() {
     let expected_identity_pubkey = expected_identity.pubkey();
     let connection_cache_kp = Keypair::new();
     let config = default_config_quic();
-    let (_quic_session, quic_identity_man) =
-        ConnectionCache::new(config, connection_cache_kp.insecure_clone());
-    let mut flushed = quic_identity_man.flush_transactions_receiver();
+    let (_flush_guard, flush_identity) = flush_control();
+    let (_quic_session, quic_identity_man) = ConnectionCache::new(
+        config,
+        connection_cache_kp.insecure_clone(),
+        flush_identity.clone(),
+    );
 
     let mut value_observer = quic_identity_man.observe_identity_change();
 
@@ -43,7 +47,7 @@ pub async fn set_identity_if_expected() {
     .expect("Error creating rpc server");
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr.to_string()))
+        .build(format!("http://{}", rpc_addr))
         .expect("Error build rpc client");
 
     let client2 = client.clone();
@@ -54,8 +58,9 @@ pub async fn set_identity_if_expected() {
             .await
             .expect("Error setting identity");
     });
-    flushed.changed().await.expect("Error watching channel");
-    flushed.borrow().notify_waiters();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    flush_identity.reset_flush().await;
     let _ = h.await;
     let identity = client.get_identity().await.expect("Error getting identity");
     assert_eq!(identity, expected_identity_pubkey.to_string());
@@ -71,8 +76,9 @@ pub async fn set_identity_wrong_keypair() {
     let expected_identity = Keypair::new();
     let connection_cache_kp = Keypair::new();
     let config = default_config_quic();
+    let (_flush_guard, flush_identity) = flush_control();
     let (_quic_session, quic_identity_man) =
-        ConnectionCache::new(config, connection_cache_kp.insecure_clone());
+        ConnectionCache::new(config, connection_cache_kp.insecure_clone(), flush_identity);
 
     let rpc_admin = RpcServer::new(
         rpc_addr,
@@ -85,7 +91,7 @@ pub async fn set_identity_wrong_keypair() {
     .expect("Error creating rpc server");
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr.to_string()))
+        .build(format!("http://{}", rpc_addr))
         .expect("Error build rpc client");
 
     let _ = client
@@ -108,9 +114,12 @@ pub async fn set_identity_from_file() {
     let rpc_addr = generate_random_local_addr();
     let connection_cache_kp = Keypair::new();
     let config = default_config_quic();
-    let (_quic_session, quic_identity_man) =
-        ConnectionCache::new(config, connection_cache_kp.insecure_clone());
-    let mut flushed = quic_identity_man.flush_transactions_receiver();
+    let (_flush_guard, flush_identity) = flush_control();
+    let (_quic_session, quic_identity_man) = ConnectionCache::new(
+        config,
+        connection_cache_kp.insecure_clone(),
+        flush_identity.clone(),
+    );
     let mut value_observer = quic_identity_man.observe_identity_change();
 
     let rpc_admin = RpcServer::new(
@@ -124,7 +133,7 @@ pub async fn set_identity_from_file() {
     .expect("Error creating rpc server");
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr.to_string()))
+        .build(format!("http://{}", rpc_addr))
         .expect("Error build rpc client");
 
     let client2 = client.clone();
@@ -135,8 +144,9 @@ pub async fn set_identity_from_file() {
             .await
             .expect("Error setting identity");
     });
-    flushed.changed().await.expect("Error watching channel");
-    flushed.borrow().notify_waiters();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    flush_identity.reset_flush().await;
     let _ = h.await;
 
     let identity = client.get_identity().await.expect("Error getting identity");
@@ -152,8 +162,9 @@ pub async fn get_identity() {
 
     let expected_identity = Keypair::new();
     let config = default_config_quic();
+    let (_flush_guard, flush_identity) = flush_control();
     let (_quic_session, quic_identity_man) =
-        ConnectionCache::new(config, expected_identity.insecure_clone());
+        ConnectionCache::new(config, expected_identity.insecure_clone(), flush_identity);
 
     let rpc_admin = RpcServer::new(
         rpc_addr,
@@ -166,7 +177,7 @@ pub async fn get_identity() {
     .expect("Error creating rpc server");
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr.to_string()))
+        .build(format!("http://{}", rpc_addr))
         .expect("Error build rpc client");
 
     let identity = client.get_identity().await.expect("Error getting identity");
@@ -181,9 +192,12 @@ pub async fn reset_identity_to_random() {
 
     let expected_identity = Keypair::new();
     let config = default_config_quic();
-    let (_quic_session, quic_identity_man) =
-        ConnectionCache::new(config, expected_identity.insecure_clone());
-    let mut flushed = quic_identity_man.flush_transactions_receiver();
+    let (_flush_guard, flush_identity) = flush_control();
+    let (_quic_session, quic_identity_man) = ConnectionCache::new(
+        config,
+        expected_identity.insecure_clone(),
+        flush_identity.clone(),
+    );
 
     let rpc_admin = RpcServer::new(
         rpc_addr,
@@ -196,7 +210,7 @@ pub async fn reset_identity_to_random() {
     .expect("Error creating rpc server");
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr.to_string()))
+        .build(format!("http://{}", rpc_addr))
         .expect("Error build rpc client");
 
     let client2 = client.clone();
@@ -207,8 +221,9 @@ pub async fn reset_identity_to_random() {
             .await
             .expect("Error setting identity");
     });
-    flushed.changed().await.expect("Error watching channel");
-    flushed.borrow().notify_waiters();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    flush_identity.reset_flush().await;
     let _ = h.await;
 
     let identity = client.get_identity().await.expect("Error getting identity");

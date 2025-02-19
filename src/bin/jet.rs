@@ -40,7 +40,7 @@ use {
         stake::StakeInfo,
         task_group::TaskGroup,
         transactions::{RootedTransactions, SendTransactionsPool},
-        util::{PubkeySigner, ValueObserver, WaitShutdown},
+        util::{flush_control, PubkeySigner, ValueObserver, WaitShutdown},
     },
 };
 
@@ -253,6 +253,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     if let Some(identity) = config.identity.expected {
         metrics::quic_set_identity_expected(identity);
     }
+    let (flush_guard, flush_identity) = flush_control();
+    // let flush_identity = Arc::new(flush_identity);
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
         shutdown_geyser_rx,
@@ -273,8 +275,11 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let rooted_transactions = RootedTransactions::new(&geyser).await?;
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
-    let (quic_session, quic_identity_man) =
-        ConnectionCache::new(config.quic.clone(), initial_identity);
+    let (quic_session, quic_identity_man) = ConnectionCache::new(
+        config.quic.clone(),
+        initial_identity,
+        flush_identity.clone(),
+    );
 
     let quic_tx_sender = QuicClient::new(
         Arc::new(cluster_tpu_info.clone()),
@@ -290,7 +295,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(blockhash_queue.clone()),
         Arc::new(rooted_transactions.clone()),
         quic_tx_sender.clone(),
-        quic_identity_man.flush_transactions_receiver(),
+        flush_identity.clone(),
     )
     .await?;
 
@@ -483,7 +488,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     });
 
     let (first, result, rest) = tg.wait_one().await.expect("task group empty");
-
+    drop(flush_guard);
     rpc_admin.shutdown();
     rpc_solana_like.shutdown();
 

@@ -253,23 +253,31 @@ impl QuicClient {
     }
 }
 
-pub struct MockClusterTpuInfo {
-    leaders: Vec<TpuInfo>,
-}
+pub mod teskit {
+    use {
+        super::UpcomingLeaderSchedule,
+        crate::cluster_tpu_info::TpuInfo,
+        futures::{future::BoxFuture, FutureExt},
+    };
 
-impl MockClusterTpuInfo {
-    pub fn new(leaders: Vec<TpuInfo>) -> Self {
-        Self { leaders }
+    pub struct MockClusterTpuInfo {
+        leaders: Vec<TpuInfo>,
     }
-}
 
-impl UpcomingLeaderSchedule for MockClusterTpuInfo {
-    fn get_leader_tpus(
-        &self,
-        _leader_forward_lookahead: usize,
-        _extra_tpu_forward: Vec<TpuInfo>,
-    ) -> BoxFuture<'_, Vec<TpuInfo>> {
-        let leaders = self.leaders.clone();
-        async move { leaders }.boxed()
+    impl MockClusterTpuInfo {
+        pub const fn new(leaders: Vec<TpuInfo>) -> Self {
+            Self { leaders }
+        }
+    }
+
+    impl UpcomingLeaderSchedule for MockClusterTpuInfo {
+        fn get_leader_tpus(
+            &self,
+            _leader_forward_lookahead: usize,
+            _extra_tpu_forward: Vec<TpuInfo>,
+        ) -> BoxFuture<'_, Vec<TpuInfo>> {
+            let leaders = self.leaders.clone();
+            async move { leaders }.boxed()
+        }
     }
 }

@@ -7,7 +7,7 @@ use {
             self as metrics, incr_send_tx_attempt, observe_leader_rtt,
             observe_send_transaction_e2e_latency, set_leader_mtu,
         },
-        util::{PubkeySigner, ValueObserver},
+        util::{FlushIdentity, PubkeySigner, ValueObserver},
     },
     futures::future::try_join_all,
     lru::LruCache,
@@ -36,7 +36,7 @@ use {
         time::Duration,
     },
     tokio::{
-        sync::{watch, AcquireError, Mutex, Notify, OnceCell, Semaphore},
+        sync::{watch, AcquireError, Mutex, OnceCell, Semaphore},
         time::{timeout, Instant},
     },
     tracing::{debug, info},
@@ -50,7 +50,7 @@ pub struct ConnectionCacheIdentity {
     shared: Arc<Mutex<QuicSessionInner>>,
     identity_watcher: watch::Sender<Pubkey>,
     reactive_signer: watch::Sender<PubkeySigner>,
-    flush_transactions_signal: watch::Sender<Arc<Notify>>,
+    flush_identity: FlushIdentity,
 }
 
 impl ConnectionCacheIdentity {
@@ -68,11 +68,9 @@ impl ConnectionCacheIdentity {
         });
         let mut locked = self.shared.lock().await;
         metrics::quic_set_identity(cert.pubkey);
-        info!("update QUIC identityc: {}", cert.pubkey);
-        let notification = Arc::new(Notify::new());
-        self.flush_transactions_signal
-            .send_replace(Arc::clone(&notification));
-        notification.notified().await;
+        info!("update QUIC identity: {}", cert.pubkey);
+        self.flush_identity.set_flush().await;
+        let _ = self.flush_identity.wait_for_change(|val| !val).await;
         locked.connection_pools.clear(); // drop all previously created connections
         locked.client_certificate = cert;
         self.reactive_signer.send_replace(ps);
@@ -89,10 +87,6 @@ impl ConnectionCacheIdentity {
 
     pub async fn get_identity(&self) -> Pubkey {
         self.shared.lock().await.client_certificate.pubkey
-    }
-
-    pub fn flush_transactions_receiver(&self) -> watch::Receiver<Arc<Notify>> {
-        self.flush_transactions_signal.subscribe()
     }
 
     pub fn observe_identity_change(&self) -> ValueObserver<Pubkey> {
@@ -115,7 +109,11 @@ pub struct ConnectionCache {
 }
 
 impl ConnectionCache {
-    pub fn new(config: ConfigQuic, initial_identity: Keypair) -> (Self, ConnectionCacheIdentity) {
+    pub fn new(
+        config: ConfigQuic,
+        initial_identity: Keypair,
+        flush_identity: FlushIdentity,
+    ) -> (Self, ConnectionCacheIdentity) {
         let client_certificate = Self::create_client_certificate(&initial_identity);
         let initial_signer = PubkeySigner::new(initial_identity.insecure_clone());
         metrics::quic_set_identity(client_certificate.pubkey);
@@ -128,12 +126,11 @@ impl ConnectionCache {
         }));
         let (identity_watcher, _) = watch::channel(initial_identity.pubkey());
         let (reactive_signer, _) = watch::channel(initial_signer);
-        let (flush_transactions_signal, _) = watch::channel(Arc::new(Notify::new()));
         let quic_identity_man = ConnectionCacheIdentity {
             shared: Arc::clone(&shared),
             identity_watcher,
             reactive_signer,
-            flush_transactions_signal,
+            flush_identity,
         };
         let ret = Self {
             config: Arc::new(config),

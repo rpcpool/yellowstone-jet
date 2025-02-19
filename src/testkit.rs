@@ -75,13 +75,13 @@ pub fn default_config_quic() -> ConfigQuic {
     }
 }
 
-pub fn default_config_transaction() -> ConfigSendTransactionService {
+pub const fn default_config_transaction() -> ConfigSendTransactionService {
     ConfigSendTransactionService {
         default_max_retries: Some(1),
         leader_forward_count: 1,
         relay_only_mode: true,
-        retry_rate: Duration::from_secs(2),
-        service_max_retries: 1,
+        retry_rate: Duration::from_secs(1),
+        service_max_retries: 2,
         stop_send_on_commitment: CommitmentLevel::Finalized,
     }
 }

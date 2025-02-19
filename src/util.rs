@@ -8,7 +8,7 @@ use {
     },
     std::{cmp::Ordering, future::Future, sync::Arc},
     tokio::{
-        sync::{oneshot, watch, Mutex},
+        sync::{oneshot, watch, Mutex, Notify, RwLock},
         task::{JoinError, JoinHandle},
         time::{sleep, Duration},
     },
@@ -249,6 +249,75 @@ where
     (rx1, rx2)
 }
 
+pub fn flush_control() -> (FlushGuard, FlushIdentity) {
+    let (tx, rx) = tokio::sync::broadcast::channel(10);
+    (
+        FlushGuard { tx },
+        FlushIdentity {
+            flush: Arc::new(RwLock::new(false)),
+            notification: Arc::new(Notify::new()),
+            rx: Arc::new(rx),
+        },
+    )
+}
+
+pub struct FlushGuard {
+    tx: tokio::sync::broadcast::Sender<()>,
+}
+
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        let tx = self.tx.clone();
+        tokio::task::spawn(async move {
+            let _ = tx.send(()); // Ignore errors if receiver is closed
+        });
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FlushIdentity {
+    flush: Arc<RwLock<bool>>,
+    notification: Arc<Notify>,
+    rx: Arc<tokio::sync::broadcast::Receiver<()>>,
+}
+
+impl FlushIdentity {
+    pub async fn set_flush(&self) {
+        let mut lock = self.flush.write().await;
+        *lock = true;
+        self.notification.notify_waiters();
+    }
+
+    pub async fn wait_for_change<F>(&self, f: F) -> Result<(), anyhow::Error>
+    where
+        F: Fn(bool) -> bool,
+    {
+        let mut rx = self.rx.resubscribe();
+        loop {
+            let actual_value = self.flush.read().await;
+
+            if f(*actual_value) {
+                return Ok(());
+            }
+            drop(actual_value);
+            tokio::select! {
+                _ = rx.recv() => {return Err(anyhow::anyhow!("Dropping flush guard"))}
+                _ = self.notification.notified()=> {}
+            }
+        }
+    }
+
+    pub async fn reset_flush(&self) {
+        let mut lock = self.flush.write().await;
+        *lock = false;
+        self.notification.notify_waiters();
+    }
+
+    pub async fn get_flush_value(&self) -> bool {
+        *self.flush.read().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {super::*, futures::future};
@@ -339,5 +408,60 @@ mod tests {
         drop(tx);
         let result = fut.await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    pub async fn flush_wait_should_return_err() {
+        let (guard, flush) = flush_control();
+
+        let fut = tokio::spawn(async move { flush.wait_for_change(|val| val).await });
+
+        drop(guard);
+        let res = fut.await.expect("Error in future");
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    pub async fn flush_wait_should_return_ok() {
+        let (_, flush) = flush_control();
+
+        let flush2 = flush.clone();
+        let fut = tokio::spawn(async move { flush.wait_for_change(|val| val).await });
+        flush2.set_flush().await;
+        let res = fut.await.expect("Error in future");
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    pub async fn flush_wait_should_return_ok_after_reset() {
+        let (_, flush) = flush_control();
+
+        let flush2 = flush.clone();
+        flush2.set_flush().await;
+        let fut = tokio::spawn(async move { flush.wait_for_change(|val| !val).await });
+        flush2.reset_flush().await;
+        let res = fut.await.expect("Error in future");
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    pub async fn flush_should_be_true_after_set_flush() {
+        let (_, flush) = flush_control();
+
+        flush.set_flush().await;
+
+        let val = flush.get_flush_value().await;
+        assert!(val);
+    }
+
+    #[tokio::test]
+    pub async fn flush_should_be_false_after_reset_flush() {
+        let (_, flush) = flush_control();
+
+        flush.set_flush().await;
+        flush.reset_flush().await;
+
+        let val = flush.get_flush_value().await;
+        assert!(!val);
     }
 }

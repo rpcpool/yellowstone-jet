@@ -23,9 +23,9 @@ pub mod rpc;
 pub mod solana;
 pub mod stake;
 pub mod task_group;
+pub mod testkit;
 pub mod transactions;
 pub mod util;
-pub mod utils_test;
 pub mod version;
 
 pub fn setup_tracing(json: bool) -> anyhow::Result<()> {
