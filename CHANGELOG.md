@@ -14,6 +14,20 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [10.6.0]
+
+### Features
+
+- Added 'IdentityFlusherWaitGroup' struct which function is to control when an identity is updated in Jet.
+- Added reset_identity method in RPC.
+- Added flush transactions while updating identity.
+- Added shutdown connection with Jet-Gateway while updating identity.
+
+### Fixes
+
+- Refactor `SendTransactionsPool`, `SendTransactionsPoolTask`, `RootedTransactions`, `QuicClient`, `ClusterTpuInfo`, `BlockhasQueue` 
+- Added integration test for `SendTransactionsPool`, `IdentityFlusherWaitGroup` and `RpcServer`.
+
 ## [10.5.0]
 
 ### Features
