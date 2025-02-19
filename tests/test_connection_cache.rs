@@ -1,15 +1,16 @@
+mod testkit;
+
 use {
     bytes::Bytes,
     futures::channel::oneshot,
     quinn::ReadExactError,
     solana_sdk::{signature::Keypair, signer::Signer},
     std::{array, sync::Arc, thread, time::Duration},
+    testkit::{build_random_endpoint, default_config_quic, generate_random_local_addr},
     tokio::sync::mpsc,
     yellowstone_jet::{
         cluster_tpu_info::TpuInfo,
-        quic_solana::{ConnectionCache, QuicError},
-        testkit::{build_random_endpoint, default_config_quic, generate_random_local_addr},
-        util::flush_control,
+        quic_solana::{ConnectionCache, NullIdentityFlusher, QuicError},
     },
 };
 
@@ -42,9 +43,11 @@ fn send_buffer_should_timeout_on_idle_connection() {
 
     let send_buffer_result = send_buffer_rt
         .block_on(async move {
-            let (_flush_guard, flush_identity) = flush_control();
-            let (quic_session, _identity_map) =
-                ConnectionCache::new(config, connection_cache_kp.insecure_clone(), flush_identity);
+            let (quic_session, _identity_map) = ConnectionCache::new(
+                config,
+                connection_cache_kp.insecure_clone(),
+                NullIdentityFlusher,
+            );
             let buf = "helloworld".as_bytes();
             let tpu_info = TpuInfo {
                 leader: Keypair::new().pubkey(),
@@ -69,10 +72,12 @@ async fn send_buffer_should_land_properly() {
     let connection_cache_kp = Keypair::new();
     let rx_server_addr = generate_random_local_addr();
     let config = default_config_quic();
-    let (_flush_guard, flush_identity) = flush_control();
 
-    let (quic_session, _identity_map) =
-        ConnectionCache::new(config, connection_cache_kp.insecure_clone(), flush_identity);
+    let (quic_session, _identity_map) = ConnectionCache::new(
+        config,
+        connection_cache_kp.insecure_clone(),
+        NullIdentityFlusher,
+    );
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
 
     let (start_tx, start_rx) = oneshot::channel::<()>();
@@ -131,11 +136,10 @@ async fn test_update_identity() {
     let rx_server_addr = generate_random_local_addr();
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
     let config = default_config_quic();
-    let (_flush_guard, flush_identity) = flush_control();
     let (quic_session, identity_map) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
-        flush_identity.clone(),
+        NullIdentityFlusher,
     );
 
     let (start_tx, start_rx) = oneshot::channel::<()>();
@@ -201,7 +205,6 @@ async fn test_update_identity() {
         identity_map_arc2.update_keypair(&new_kp).await
     });
     tokio::time::sleep(Duration::from_secs(1)).await;
-    flush_identity.reset_flush().await;
 
     h_update.await.expect("Error updating identity");
     let (actual_remote_key, buf) = client_rx.recv().await.expect("recv");
@@ -218,11 +221,10 @@ async fn update_identity_should_drop_all_connections() {
     let rx_server_addr = generate_random_local_addr();
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
     let config = default_config_quic();
-    let (_flush_guard, flush_identity) = flush_control();
     let (quic_session, identity_map) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
-        flush_identity.clone(),
+        NullIdentityFlusher,
     );
 
     let (start_tx, start_rx) = oneshot::channel::<()>();
@@ -276,8 +278,6 @@ async fn update_identity_should_drop_all_connections() {
         identity_map.update_keypair(&new_kp).await
     });
     tokio::time::sleep(Duration::from_secs(1)).await;
-
-    flush_identity.reset_flush().await;
 
     h_update.await.expect("Error updating identity");
     let maybe = client_rx.recv().await;

@@ -22,7 +22,6 @@ use {
         signal::unix::{signal, SignalKind},
         sync::{broadcast, oneshot},
         task::JoinHandle,
-        time::{sleep, Duration},
     },
     tracing::{info, warn},
     yellowstone_jet::{
@@ -40,7 +39,7 @@ use {
         stake::StakeInfo,
         task_group::TaskGroup,
         transactions::{RootedTransactions, SendTransactionsPool},
-        util::{flush_control, PubkeySigner, ValueObserver, WaitShutdown},
+        util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
     },
 };
 
@@ -253,7 +252,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     if let Some(identity) = config.identity.expected {
         metrics::quic_set_identity_expected(identity);
     }
-    let (flush_guard, flush_identity) = flush_control();
     // let flush_identity = Arc::new(flush_identity);
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
@@ -274,11 +272,13 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     .await;
     let rooted_transactions = RootedTransactions::new(&geyser).await?;
 
+    let identity_flusher_wg = IdentityFlusherWaitGroup::default();
+
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
     let (quic_session, quic_identity_man) = ConnectionCache::new(
         config.quic.clone(),
         initial_identity,
-        flush_identity.clone(),
+        identity_flusher_wg.clone(),
     );
 
     let quic_tx_sender = QuicClient::new(
@@ -290,14 +290,18 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
     let lewis = spawn_lewis_metric_subscriber(config.metrics_upstream, quic_tx_metrics_listener);
 
-    let send_transactions = SendTransactionsPool::new(
+    let (send_transactions, send_tx_pool_fut) = SendTransactionsPool::spawn(
         config.send_transaction_service,
         Arc::new(blockhash_queue.clone()),
         Arc::new(rooted_transactions.clone()),
-        quic_tx_sender.clone(),
-        flush_identity.clone(),
+        Arc::new(quic_tx_sender.clone()),
     )
-    .await?;
+    .await;
+
+    // Add all flusher here
+    identity_flusher_wg
+        .add_flusher(Box::new(send_transactions.clone()))
+        .await;
 
     let rpc = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
         config.upstream.rpc.clone(),
@@ -428,33 +432,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         }
     });
 
-    tg.spawn_with_shutdown("send_transactions", |mut stop| async move {
-        tokio::select! {
-            result = send_transactions.clone().wait_shutdown() => {
-                result.expect("send_transactions");
-            },
-            _ = &mut stop => {
-
-                let mut pool_size = metrics::sts_pool_get_size();
-                info!("waiting empty STS pool, size: {pool_size}");
-                loop {
-                    let new_pool_size = metrics::sts_pool_get_size();
-                    if new_pool_size == 0 {
-                        break;
-                    }
-                    if pool_size != new_pool_size {
-                        info!("waiting empty STS pool, size: {pool_size}");
-                        pool_size = new_pool_size;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-
-                info!("shutdown STS");
-                send_transactions.shutdown();
-                send_transactions.wait_shutdown().await.expect("send_transactions shutdown");
-            },
-        }
-    });
+    tg.spawn_cancelable("send_transactions_pool", send_tx_pool_fut);
 
     tg.spawn_with_shutdown("stake", |mut stop| async move {
         tokio::select! {
@@ -488,7 +466,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     });
 
     let (first, result, rest) = tg.wait_one().await.expect("task group empty");
-    drop(flush_guard);
     rpc_admin.shutdown();
     rpc_solana_like.shutdown();
 

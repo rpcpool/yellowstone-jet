@@ -7,13 +7,13 @@ use {
         },
         metrics::jet as metrics,
         quic::QuicClient,
+        quic_solana::IdentityFlusher,
         solana::get_durable_nonce,
         util::{
-            BlockHeight, CommitmentLevel, FlushIdentity, WaitShutdown,
-            WaitShutdownJoinHandleResult, WaitShutdownSharedJoinHandle,
+            BlockHeight, CommitmentLevel, WaitShutdown, WaitShutdownJoinHandleResult,
+            WaitShutdownSharedJoinHandle,
         },
     },
-    futures::future::{pending, FutureExt},
     solana_sdk::{
         clock::{Slot, MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES},
         signature::Signature,
@@ -21,6 +21,7 @@ use {
     },
     std::{
         collections::{BTreeMap, HashMap, HashSet},
+        future::Future,
         ops::DerefMut,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -31,7 +32,7 @@ use {
     tokio::{
         sync::{
             mpsc::{self},
-            Notify, RwLock,
+            oneshot, Notify, RwLock,
         },
         task::JoinSet,
         time::{interval, Duration, Instant},
@@ -244,57 +245,42 @@ pub struct SendTransactionRequest {
 #[derive(Debug, Clone)]
 pub struct SendTransactionsPool {
     new_transactions_tx: mpsc::UnboundedSender<SendTransactionRequest>,
-    shutdown: Arc<Notify>,
-    join_handle: WaitShutdownSharedJoinHandle,
-}
-
-impl WaitShutdown for SendTransactionsPool {
-    fn shutdown(&self) {
-        self.shutdown.notify_one();
-    }
-
-    async fn wait_shutdown_future(self) -> WaitShutdownJoinHandleResult {
-        let mut locked = self.join_handle.lock().await;
-        locked.deref_mut().await
-    }
+    cnc_tx: mpsc::Sender<SendTransactionPoolCommand>,
 }
 
 impl SendTransactionsPool {
-    pub async fn new(
+    pub async fn spawn(
         config: ConfigSendTransactionService,
         block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
         rooted_transactions: Arc<dyn RootedTransactionSignatures + Send + Sync + 'static>,
-        quic_client: QuicClient,
-        flush_identity: FlushIdentity,
-    ) -> anyhow::Result<Self> {
-        let shutdown = Arc::new(Notify::new());
-
+        tx_sender: Arc<dyn TxSender + Send + Sync + 'static>,
+    ) -> (Self, impl Future<Output = ()>) {
         let (new_transactions_tx, new_transactions_rx) = mpsc::unbounded_channel();
         let signature_updates = rooted_transactions
             .subscribe_signature_updates()
             .await
-            .ok_or(anyhow::anyhow!(
-                "SendTransactionsPool: failed to subscribe on signature updates"
-            ))?;
+            .expect("failed to subscribe on signature updates");
         let task = SendTransactionsPoolTask {
-            shutdown: Arc::clone(&shutdown),
             config,
             block_height_service,
             rooted_transactions,
-            quic_client,
+            tx_sender,
             new_transactions_rx,
             signature_updates,
             tasks: JoinSet::new(),
             transactions: HashMap::new(),
             retry_schedule: BTreeMap::new(),
-            flush_identity,
         };
 
-        Ok(Self {
+        let (cnc_tx, cnc_rx) = mpsc::channel(10);
+        let frontend = Self {
             new_transactions_tx,
-            shutdown,
-            join_handle: Self::spawn(task.run()),
-        })
+            cnc_tx,
+        };
+
+        // The backend task will end after all reference to the frontend task are dropped
+        let backend = task.run(cnc_rx);
+        (frontend, backend)
     }
 
     pub fn send_transaction(&self, request: SendTransactionRequest) -> anyhow::Result<()> {
@@ -303,6 +289,22 @@ impl SendTransactionsPool {
             "send service task finished"
         );
         Ok(())
+    }
+
+    pub async fn flush(&self) {
+        let (tx, rx) = oneshot::channel();
+        self.cnc_tx
+            .send(SendTransactionPoolCommand::Flush { callback: tx })
+            .await
+            .expect("failed to send flush command");
+        rx.await.expect("failed to receive flush command result");
+    }
+}
+
+#[async_trait::async_trait]
+impl IdentityFlusher for SendTransactionsPool {
+    async fn flush(&self) {
+        SendTransactionsPool::flush(self).await;
     }
 }
 
@@ -362,81 +364,104 @@ impl TransactionRetryTimestamp {
     }
 }
 
+pub enum SendTransactionPoolCommand {
+    Flush { callback: oneshot::Sender<()> },
+}
+
+#[async_trait::async_trait]
+pub trait TxSender {
+    async fn send_transaction(
+        &self,
+        id: SendTransactionInfoId,
+        signature: Signature,
+        wire_transaction: Arc<Vec<u8>>,
+        leader_forward_count: usize,
+    ) -> ();
+}
+
+#[async_trait::async_trait]
+impl TxSender for QuicClient {
+    async fn send_transaction(
+        &self,
+        id: SendTransactionInfoId,
+        signature: Signature,
+        wire_transaction: Arc<Vec<u8>>,
+        leader_forward_count: usize,
+    ) {
+        QuicClient::send_transaction(self, id, signature, wire_transaction, leader_forward_count)
+            .await
+    }
+}
+
 pub struct SendTransactionsPoolTask {
-    shutdown: Arc<Notify>,
     config: ConfigSendTransactionService,
     block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
     rooted_transactions: Arc<dyn RootedTransactionSignatures + Send + Sync + 'static>,
-    quic_client: QuicClient,
+    tx_sender: Arc<dyn TxSender + Send + Sync + 'static>,
     new_transactions_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
     signature_updates: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
     tasks: JoinSet<SendTransactionTaskResult>,
     transactions: HashMap<Signature, SendTransactionInfo>,
     retry_schedule: BTreeMap<TransactionRetryTimestamp, Vec<Signature>>,
-    flush_identity: FlushIdentity,
 }
 
 impl SendTransactionsPoolTask {
-    pub async fn run(mut self) -> anyhow::Result<()> {
-        let mut start_flush_transactions = false;
-
+    pub async fn run(
+        mut self,
+        mut cnc_rx: mpsc::Receiver<SendTransactionPoolCommand>, // command-and-control channel
+    ) {
         let mut retry_interval = interval(Duration::from_millis(10));
 
         loop {
-            if self.tasks.is_empty()
-                && self.transactions.is_empty()
-                && self.retry_schedule.is_empty()
-                && start_flush_transactions
-            {
-                self.flush_identity.reset_flush().await;
-                info!("All transactions sent. Resetting identity");
-                start_flush_transactions = false;
-            }
-
-            let tasks_join_next = if self.tasks.is_empty() {
-                pending().boxed()
-            } else {
-                self.tasks.join_next().boxed()
-            };
-
             tokio::select! {
-                res = self.flush_identity.wait_for_change(|val| val) => {
-                    match res {
-                        Ok(_) => {
-                            info!("Flushing all transactions in queue");
-                            start_flush_transactions = true;
-                        }
-                        Err(_)  => {
-                            error!("Flush identity channel was dropped");
-                            return Ok(())}
+                maybe = cnc_rx.recv() => {
+                    match maybe {
+                        Some(SendTransactionPoolCommand::Flush { callback }) => {
+                            self.flush_transactions().await;
+                            let _ = callback.send(());
+                        },
+                        None => break,
                     }
-                }
-                _ = self.shutdown.notified() => return Ok(()),
-                maybe_newtx = self.new_transactions_rx.recv() => match maybe_newtx {
-                    Some(newtx) =>{ if !start_flush_transactions{
-                           self.add_new_transaction(newtx).await
-                        }
-                    },
-                    None => anyhow::bail!("incoming transactions channel is closed"),
                 },
-                maybe_result = tasks_join_next => {
-                    match maybe_result {
-                        Some(Ok(result)) => self.handle_joined_task(result).await,
-                        Some(Err(error)) => error!("failed to join send task: {error:?}"),
-                        None => unreachable!("joined tasks can't be None")
+                maybe_newtx = self.new_transactions_rx.recv() => {
+                    match maybe_newtx {
+                        Some(newtx) => self.add_new_transaction(newtx).await,
+                        None => {
+                            tracing::warn!("new transactions channel is closed");
+                            break
+                        }
+                    }
+                },
+                Some(result) = self.tasks.join_next() => {
+                    match result {
+                        Ok(ok) => self.handle_joined_task(ok).await,
+                        Err(error) => error!("failed to join send task: {error:?}"),
                     };
                     metrics::sts_inflight_set_size(self.tasks.len());
                 },
                 _ = retry_interval.tick() => {
-                    self.retry_scheduled_transactions().await},
-                maybe_signature_update = self.signature_updates.recv() => {eprintln!("signature");match maybe_signature_update {
-                    Some((signature, commitment)) => self.update_signature(signature, commitment).await,
-                    None => {
-                        error!("signature updates channel is closed");
-                        return Ok(());
-                    }}
+                    self.retry_scheduled_transactions().await
+                },
+                maybe_signature_update = self.signature_updates.recv() => {
+                    match maybe_signature_update {
+                        Some((signature, commitment)) => self.update_signature(signature, commitment).await,
+                        None => {
+                            error!("signature updates channel is closed");
+                            break;
+                        }
+                    }
                 },
             }
+        }
+    }
+
+    async fn flush_transactions(&mut self) {
+        while let Some(result) = self.tasks.join_next().await {
+            match result {
+                Ok(ok) => self.handle_joined_task(ok).await,
+                Err(error) => error!("failed to join send task: {error:?}"),
+            };
+            metrics::sts_inflight_set_size(self.tasks.len());
         }
     }
 
@@ -544,14 +569,14 @@ impl SendTransactionsPoolTask {
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
     ) {
-        let quic_client = self.quic_client.clone();
+        let tx_sender = Arc::clone(&self.tx_sender);
         let leader_forward_count = self.config.leader_forward_count;
         let retry_timestamp = TransactionRetryTimestamp::next(self.config.retry_rate);
 
         self.tasks.spawn(async move {
             info!(id, %signature, "trying to send transaction");
 
-            quic_client
+            tx_sender
                 .send_transaction(id, signature, wire_transaction, leader_forward_count)
                 .await;
 

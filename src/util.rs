@@ -1,4 +1,5 @@
 use {
+    crate::quic_solana::{BoxedIdentityFlusher, IdentityFlusher},
     futures::future::Either,
     serde::Deserialize,
     solana_sdk::{
@@ -8,7 +9,7 @@ use {
     },
     std::{cmp::Ordering, future::Future, sync::Arc},
     tokio::{
-        sync::{oneshot, watch, Mutex, Notify, RwLock},
+        sync::{oneshot, watch, Mutex, RwLock},
         task::{JoinError, JoinHandle},
         time::{sleep, Duration},
     },
@@ -249,72 +250,38 @@ where
     (rx1, rx2)
 }
 
-pub fn flush_control() -> (FlushGuard, FlushIdentity) {
-    let (tx, rx) = tokio::sync::broadcast::channel(10);
-    (
-        FlushGuard { tx },
-        FlushIdentity {
-            flush: Arc::new(RwLock::new(false)),
-            notification: Arc::new(Notify::new()),
-            rx: Arc::new(rx),
-        },
-    )
+///
+/// Combines multiple [`IdentityFlusher`] into one.
+#[derive(Clone)]
+pub struct IdentityFlusherWaitGroup {
+    waiters: Arc<RwLock<Vec<BoxedIdentityFlusher>>>,
 }
 
-pub struct FlushGuard {
-    tx: tokio::sync::broadcast::Sender<()>,
-}
-
-impl Drop for FlushGuard {
-    fn drop(&mut self) {
-        let tx = self.tx.clone();
-        tokio::task::spawn(async move {
-            let _ = tx.send(()); // Ignore errors if receiver is closed
-        });
+impl Default for IdentityFlusherWaitGroup {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct FlushIdentity {
-    flush: Arc<RwLock<bool>>,
-    notification: Arc<Notify>,
-    rx: Arc<tokio::sync::broadcast::Receiver<()>>,
-}
-
-impl FlushIdentity {
-    pub async fn set_flush(&self) {
-        let mut lock = self.flush.write().await;
-        *lock = true;
-        self.notification.notify_waiters();
-    }
-
-    pub async fn wait_for_change<F>(&self, f: F) -> Result<(), anyhow::Error>
-    where
-        F: Fn(bool) -> bool,
-    {
-        let mut rx = self.rx.resubscribe();
-        loop {
-            let actual_value = self.flush.read().await;
-
-            if f(*actual_value) {
-                return Ok(());
-            }
-            drop(actual_value);
-            tokio::select! {
-                _ = rx.recv() => {return Err(anyhow::anyhow!("Dropping flush guard"))}
-                _ = self.notification.notified()=> {}
-            }
+impl IdentityFlusherWaitGroup {
+    pub fn new() -> Self {
+        Self {
+            waiters: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
-    pub async fn reset_flush(&self) {
-        let mut lock = self.flush.write().await;
-        *lock = false;
-        self.notification.notify_waiters();
+    pub async fn add_flusher(&self, flusher: BoxedIdentityFlusher) {
+        self.waiters.write().await.push(flusher);
     }
+}
 
-    pub async fn get_flush_value(&self) -> bool {
-        *self.flush.read().await
+#[async_trait::async_trait]
+impl IdentityFlusher for IdentityFlusherWaitGroup {
+    async fn flush(&self) {
+        let ws = self.waiters.write().await;
+        for w in ws.iter() {
+            w.flush().await;
+        }
     }
 }
 
@@ -411,57 +378,44 @@ mod tests {
     }
 
     #[tokio::test]
-    pub async fn flush_wait_should_return_err() {
-        let (guard, flush) = flush_control();
+    pub async fn test_identity_flusher_wg() {
+        let wg = IdentityFlusherWaitGroup::default();
 
-        let fut = tokio::spawn(async move { flush.wait_for_change(|val| val).await });
+        #[derive(Clone, Default)]
+        struct SpyIdentityFlusher {
+            flush_count: Arc<RwLock<Vec<()>>>,
+        }
 
-        drop(guard);
-        let res = fut.await.expect("Error in future");
-        assert!(res.is_err());
+        #[async_trait::async_trait]
+        impl IdentityFlusher for SpyIdentityFlusher {
+            async fn flush(&self) {
+                self.flush_count.write().await.push(());
+            }
+        }
+
+        impl SpyIdentityFlusher {
+            async fn flush_count(&self) -> usize {
+                self.flush_count.read().await.len()
+            }
+        }
+
+        let f1 = SpyIdentityFlusher::default();
+        let f2 = SpyIdentityFlusher::default();
+        let f3 = SpyIdentityFlusher::default();
+        wg.add_flusher(Box::new(f1.clone())).await;
+        wg.add_flusher(Box::new(f2.clone())).await;
+        wg.add_flusher(Box::new(f3.clone())).await;
+
+        wg.flush().await;
+
+        assert_eq!(f1.flush_count().await, 1);
+        assert_eq!(f2.flush_count().await, 1);
+        assert_eq!(f3.flush_count().await, 1);
     }
 
     #[tokio::test]
-    pub async fn flush_wait_should_return_ok() {
-        let (_, flush) = flush_control();
-
-        let flush2 = flush.clone();
-        let fut = tokio::spawn(async move { flush.wait_for_change(|val| val).await });
-        flush2.set_flush().await;
-        let res = fut.await.expect("Error in future");
-        assert!(res.is_ok());
-    }
-
-    #[tokio::test]
-    pub async fn flush_wait_should_return_ok_after_reset() {
-        let (_, flush) = flush_control();
-
-        let flush2 = flush.clone();
-        flush2.set_flush().await;
-        let fut = tokio::spawn(async move { flush.wait_for_change(|val| !val).await });
-        flush2.reset_flush().await;
-        let res = fut.await.expect("Error in future");
-        assert!(res.is_ok());
-    }
-
-    #[tokio::test]
-    pub async fn flush_should_be_true_after_set_flush() {
-        let (_, flush) = flush_control();
-
-        flush.set_flush().await;
-
-        let val = flush.get_flush_value().await;
-        assert!(val);
-    }
-
-    #[tokio::test]
-    pub async fn flush_should_be_false_after_reset_flush() {
-        let (_, flush) = flush_control();
-
-        flush.set_flush().await;
-        flush.reset_flush().await;
-
-        let val = flush.get_flush_value().await;
-        assert!(!val);
+    pub async fn test_empty_identity_flusher_wg() {
+        let wg = IdentityFlusherWaitGroup::default();
+        wg.flush().await;
     }
 }

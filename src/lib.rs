@@ -23,7 +23,6 @@ pub mod rpc;
 pub mod solana;
 pub mod stake;
 pub mod task_group;
-pub mod testkit;
 pub mod transactions;
 pub mod util;
 pub mod version;

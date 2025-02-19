@@ -1,3 +1,5 @@
+mod testkit;
+
 use {
     jsonrpsee::http_client::HttpClientBuilder,
     solana_sdk::{
@@ -5,11 +7,10 @@ use {
         signer::Signer,
     },
     std::{path::PathBuf, time::Duration},
+    testkit::{default_config_quic, generate_random_local_addr},
     yellowstone_jet::{
-        quic_solana::ConnectionCache,
+        quic_solana::{ConnectionCache, NullIdentityFlusher},
         rpc::{rpc_admin::RpcClient, RpcServer, RpcServerType},
-        testkit::{default_config_quic, generate_random_local_addr},
-        util::flush_control,
     },
 };
 
@@ -27,11 +28,10 @@ pub async fn set_identity_if_expected() {
     let expected_identity_pubkey = expected_identity.pubkey();
     let connection_cache_kp = Keypair::new();
     let config = default_config_quic();
-    let (_flush_guard, flush_identity) = flush_control();
     let (_quic_session, quic_identity_man) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
-        flush_identity.clone(),
+        NullIdentityFlusher,
     );
 
     let mut value_observer = quic_identity_man.observe_identity_change();
@@ -60,7 +60,6 @@ pub async fn set_identity_if_expected() {
     });
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    flush_identity.reset_flush().await;
     let _ = h.await;
     let identity = client.get_identity().await.expect("Error getting identity");
     assert_eq!(identity, expected_identity_pubkey.to_string());
@@ -76,9 +75,11 @@ pub async fn set_identity_wrong_keypair() {
     let expected_identity = Keypair::new();
     let connection_cache_kp = Keypair::new();
     let config = default_config_quic();
-    let (_flush_guard, flush_identity) = flush_control();
-    let (_quic_session, quic_identity_man) =
-        ConnectionCache::new(config, connection_cache_kp.insecure_clone(), flush_identity);
+    let (_quic_session, quic_identity_man) = ConnectionCache::new(
+        config,
+        connection_cache_kp.insecure_clone(),
+        NullIdentityFlusher,
+    );
 
     let rpc_admin = RpcServer::new(
         rpc_addr,
@@ -114,11 +115,10 @@ pub async fn set_identity_from_file() {
     let rpc_addr = generate_random_local_addr();
     let connection_cache_kp = Keypair::new();
     let config = default_config_quic();
-    let (_flush_guard, flush_identity) = flush_control();
     let (_quic_session, quic_identity_man) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
-        flush_identity.clone(),
+        NullIdentityFlusher,
     );
     let mut value_observer = quic_identity_man.observe_identity_change();
 
@@ -146,7 +146,6 @@ pub async fn set_identity_from_file() {
     });
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    flush_identity.reset_flush().await;
     let _ = h.await;
 
     let identity = client.get_identity().await.expect("Error getting identity");
@@ -162,9 +161,11 @@ pub async fn get_identity() {
 
     let expected_identity = Keypair::new();
     let config = default_config_quic();
-    let (_flush_guard, flush_identity) = flush_control();
-    let (_quic_session, quic_identity_man) =
-        ConnectionCache::new(config, expected_identity.insecure_clone(), flush_identity);
+    let (_quic_session, quic_identity_man) = ConnectionCache::new(
+        config,
+        expected_identity.insecure_clone(),
+        NullIdentityFlusher,
+    );
 
     let rpc_admin = RpcServer::new(
         rpc_addr,
@@ -192,11 +193,10 @@ pub async fn reset_identity_to_random() {
 
     let expected_identity = Keypair::new();
     let config = default_config_quic();
-    let (_flush_guard, flush_identity) = flush_control();
     let (_quic_session, quic_identity_man) = ConnectionCache::new(
         config,
         expected_identity.insecure_clone(),
-        flush_identity.clone(),
+        NullIdentityFlusher,
     );
 
     let rpc_admin = RpcServer::new(
@@ -223,7 +223,6 @@ pub async fn reset_identity_to_random() {
     });
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    flush_identity.reset_flush().await;
     let _ = h.await;
 
     let identity = client.get_identity().await.expect("Error getting identity");

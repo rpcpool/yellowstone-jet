@@ -7,7 +7,7 @@ use {
             self as metrics, incr_send_tx_attempt, observe_leader_rtt,
             observe_send_transaction_e2e_latency, set_leader_mtu,
         },
-        util::{FlushIdentity, PubkeySigner, ValueObserver},
+        util::{PubkeySigner, ValueObserver},
     },
     futures::future::try_join_all,
     lru::LruCache,
@@ -50,7 +50,7 @@ pub struct ConnectionCacheIdentity {
     shared: Arc<Mutex<QuicSessionInner>>,
     identity_watcher: watch::Sender<Pubkey>,
     reactive_signer: watch::Sender<PubkeySigner>,
-    flush_identity: FlushIdentity,
+    identity_flusher: Box<dyn IdentityFlusher + Send + Sync + 'static>,
 }
 
 impl ConnectionCacheIdentity {
@@ -69,8 +69,7 @@ impl ConnectionCacheIdentity {
         let mut locked = self.shared.lock().await;
         metrics::quic_set_identity(cert.pubkey);
         info!("update QUIC identity: {}", cert.pubkey);
-        self.flush_identity.set_flush().await;
-        let _ = self.flush_identity.wait_for_change(|val| !val).await;
+        self.identity_flusher.flush().await;
         locked.connection_pools.clear(); // drop all previously created connections
         locked.client_certificate = cert;
         self.reactive_signer.send_replace(ps);
@@ -99,6 +98,25 @@ impl ConnectionCacheIdentity {
 }
 
 ///
+/// Base Trait for flushing the identity of a [`ConnectionCache`].
+///
+#[async_trait::async_trait]
+pub trait IdentityFlusher {
+    async fn flush(&self);
+}
+
+pub type BoxedIdentityFlusher = Box<dyn IdentityFlusher + Send + Sync + 'static>;
+
+///
+/// IdentityFlusher that does nothing.
+pub struct NullIdentityFlusher;
+
+#[async_trait::async_trait]
+impl IdentityFlusher for NullIdentityFlusher {
+    async fn flush(&self) {}
+}
+
+///
 /// QUIC Session object are a managed version of raw QUIC connection where the session object
 /// manage the lifecycle of each sub connection and provides caching and identity management.
 ///
@@ -109,11 +127,14 @@ pub struct ConnectionCache {
 }
 
 impl ConnectionCache {
-    pub fn new(
+    pub fn new<F>(
         config: ConfigQuic,
         initial_identity: Keypair,
-        flush_identity: FlushIdentity,
-    ) -> (Self, ConnectionCacheIdentity) {
+        flush_identity: F,
+    ) -> (Self, ConnectionCacheIdentity)
+    where
+        F: IdentityFlusher + Send + Sync + 'static,
+    {
         let client_certificate = Self::create_client_certificate(&initial_identity);
         let initial_signer = PubkeySigner::new(initial_identity.insecure_clone());
         metrics::quic_set_identity(client_certificate.pubkey);
@@ -130,7 +151,7 @@ impl ConnectionCache {
             shared: Arc::clone(&shared),
             identity_watcher,
             reactive_signer,
-            flush_identity,
+            identity_flusher: Box::new(flush_identity),
         };
         let ret = Self {
             config: Arc::new(config),

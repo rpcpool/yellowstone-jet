@@ -1,9 +1,4 @@
 use {
-    crate::{
-        config::{ConfigQuic, ConfigQuicTpuPort, ConfigSendTransactionService},
-        crypto_provider::crypto_provider,
-        util::CommitmentLevel,
-    },
     quinn::crypto::rustls::QuicServerConfig,
     rand::Rng,
     solana_sdk::signature::Keypair,
@@ -16,8 +11,14 @@ use {
         sync::Arc,
         time::Duration,
     },
+    yellowstone_jet::{
+        config::{ConfigQuic, ConfigQuicTpuPort, ConfigSendTransactionService},
+        crypto_provider::crypto_provider,
+        util::CommitmentLevel,
+    },
 };
 
+#[allow(dead_code)]
 pub fn find_available_port() -> Option<u16> {
     let mut rng = rand::thread_rng();
 
@@ -36,11 +37,13 @@ pub fn find_available_port() -> Option<u16> {
     None // If no port found after 100 attempts, return None
 }
 
+#[allow(dead_code)]
 pub fn generate_random_local_addr() -> SocketAddr {
     let port = find_available_port().expect("port");
     SocketAddr::new("127.0.0.1".parse().expect("ipv4"), port)
 }
 
+#[allow(dead_code)]
 pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
     let kp = Keypair::new();
     let (cert, priv_key) = new_dummy_x509_certificate(&kp);
@@ -59,6 +62,7 @@ pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
     (endpoint, kp)
 }
 
+#[allow(dead_code)]
 pub fn default_config_quic() -> ConfigQuic {
     ConfigQuic {
         connection_max_pools: ConfigQuic::default_connection_max_pools(),
@@ -75,6 +79,7 @@ pub fn default_config_quic() -> ConfigQuic {
     }
 }
 
+#[allow(dead_code)]
 pub const fn default_config_transaction() -> ConfigSendTransactionService {
     ConfigSendTransactionService {
         default_max_retries: Some(1),
@@ -86,6 +91,7 @@ pub const fn default_config_transaction() -> ConfigSendTransactionService {
     }
 }
 
+#[allow(dead_code)]
 pub fn default_config_quic_client() -> ConfigQuic {
     ConfigQuic {
         connection_max_pools: NonZeroUsize::new(256).unwrap(),
