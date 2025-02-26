@@ -1,3 +1,12 @@
+//! Jet GRPC implementation that handles transaction routing between:
+//! cascade-router -> jet-gateway -> jet
+//!
+//! The system supports two payload formats:
+//! 1. Legacy format: Simple binary serialized transaction
+//! 2. New format: Structured TransactionWrapper with config and metadata
+//!
+//! This dual-format support ensures backward compatibility while allowing
+//! new features through the structured format.
 use {
     crate::{
         config::ConfigJetGatewayClient,
@@ -5,28 +14,26 @@ use {
             self,
             jet::{increment_send_transaction_error, increment_send_transaction_success},
         },
+        payload::TransactionPayload,
         proto::jet::{
             auth_request, auth_response, jet_gateway_client::JetGatewayClient,
             subscribe_request::Message as SubscribeRequestMessage,
-            subscribe_response::Message as SubscribeResponseMessage, AnswerChallengeRequest,
-            AnswerChallengeResponse, AuthRequest, GetChallengeRequest, Ping, Pong,
-            SubscribeRequest, SubscribeResponse, SubscribeTransaction, SubscribeUpdateLimit,
+            subscribe_response::Message as SubscribeResponseMessage,
+            subscribe_transaction::Payload, AnswerChallengeRequest, AnswerChallengeResponse,
+            AuthRequest, GetChallengeRequest, Ping, Pong, SubscribeRequest, SubscribeResponse,
+            SubscribeTransaction, SubscribeUpdateLimit,
         },
         pubkey_challenger::{append_nonce_and_sign, OneTimeAuthToken},
-        rpc::rpc_solana_like::{RpcServer as _, RpcServerImpl as RpcServerImplSolanaLike},
+        rpc::rpc_solana_like::RpcServerImpl as RpcServerImplSolanaLike,
         util::{ms_since_epoch, IncrementalBackoff},
     },
     anyhow::Context,
-    base64::{prelude::BASE64_STANDARD, Engine},
     futures::{
         future::FutureExt,
         sink::{Sink, SinkExt},
         stream::{Stream, StreamExt},
     },
-    serde::{Deserialize, Serialize},
-    solana_client::rpc_config::RpcSendTransactionConfig,
-    solana_sdk::{signer::Signer, transaction::VersionedTransaction},
-    solana_transaction_status::UiTransactionEncoding,
+    solana_sdk::signer::Signer,
     std::sync::Arc,
     tokio::{
         sync::oneshot,
@@ -47,55 +54,34 @@ pub const DEFAULT_LOCK_KEY: &str = "jet-gateway";
 
 const X_ONE_TIME_AUTH_TOKEN: &str = "x-one-time-auth-token";
 
-/// Represents a transaction payload for gRPC/Protobuf communication in the Jet ecosystem.
-/// Used for transaction routing between cascade-router -> jet-gateway -> jet instances.
-/// The payload is serialized to JSON when transmitted via Protobuf.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Payload {
-    pub transaction: String, // encoded transaction as Json, JsonParsed, Base64 and Base58 (default)
-    pub config: RpcSendTransactionConfig, // solana defaults configuration
-    pub timestamp: Option<u64>,
+pub struct GrpcTransactionHandler {
+    tx_sender: RpcServerImplSolanaLike,
 }
 
-impl Payload {
-    /// Solana have the default encoding as Base58, but we prefer using Base64 when
-    /// we create our own Payloads, because it's way faster.
-    /// Supported encoding methods: (Base64 and Base58)
-    pub fn new(
-        transaction: &VersionedTransaction,
-        mut config: RpcSendTransactionConfig,
-    ) -> anyhow::Result<Self> {
-        let encoding = match config.encoding {
-            Some(UiTransactionEncoding::Base58) => UiTransactionEncoding::Base58,
-            Some(UiTransactionEncoding::Base64) => UiTransactionEncoding::Base64,
-            None => UiTransactionEncoding::Base64,
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Only Base58 and Base64 encodings are supported"
-                ))
-            }
-        };
-
-        let serialized_transaction = bincode::serialize(transaction)?;
-        let encoded_transaction = match encoding {
-            UiTransactionEncoding::Base58 => bs58::encode(serialized_transaction).into_string(),
-            _ => BASE64_STANDARD.encode(serialized_transaction),
-        };
-
-        config.encoding = Some(encoding);
-        Ok(Self {
-            transaction: encoded_transaction,
-            config,
-            timestamp: None,
-        })
+impl GrpcTransactionHandler {
+    pub fn new(tx_sender: RpcServerImplSolanaLike) -> Self {
+        Self { tx_sender }
     }
 
-    pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(Into::into)
-    }
+    /// Processes incoming transactions in either legacy or new format.
+    /// - For legacy format: Directly deserializes and sends the transaction
+    /// - For new format: Extracts config and metadata before sending
+    pub async fn handle_transaction(
+        &self,
+        transaction: SubscribeTransaction,
+    ) -> anyhow::Result<String> {
+        let payload = match transaction.payload {
+            Some(Payload::LegacyPayload(bytes)) => TransactionPayload::Legacy(bytes),
+            Some(Payload::NewPayload(wrapper)) => TransactionPayload::New(wrapper),
+            None => return Err(anyhow::anyhow!("Empty transaction payload")),
+        };
 
-    pub fn decode(payload: &[u8]) -> anyhow::Result<Self> {
-        serde_json::from_slice(payload).map_err(Into::into)
+        let (transaction, config) = payload.decode()?;
+
+        self.tx_sender
+            .handle_internal_transaction(transaction, config)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send transaction: {}", e))
     }
 }
 
@@ -226,9 +212,9 @@ impl GrpcServer {
         const MAX_SEND_TRANSACTIONS: usize = 10;
         const LIMIT_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
-        // let identity = identity.to_bytes().to_vec();
         let mut backoff = IncrementalBackoff::default();
-        let mut tasks = JoinSet::new();
+        let mut tasks = JoinSet::<anyhow::Result<()>>::new();
+
         loop {
             backoff.maybe_tick().await;
 
@@ -251,11 +237,12 @@ impl GrpcServer {
                 }
             };
 
-            let mut interval = interval(LIMIT_UPDATE_INTERVAL);
+            let mut limit_interval = interval(LIMIT_UPDATE_INTERVAL);
+
             loop {
                 if let Err(error) = async {
                     tokio::select! {
-                        _ = interval.tick() => {
+                        _ = limit_interval.tick() => {
                             let messages_per100ms = config
                                 .max_streams
                                 .unwrap_or_else(metrics::jet::cluster_identity_stake_get_max_streams);
@@ -264,47 +251,55 @@ impl GrpcServer {
                             };
                             sink.send(message).await.context("failed to send limit value")
                         }
-                        // If we use tokio_stream::StreamExt, `next` is Cancel safe, so `if` statement can cancel the future without losing any data.
                         message = stream.next(), if tasks.len() < MAX_SEND_TRANSACTIONS => {
-                            match message
+                            let message = message
                                 .ok_or(anyhow::anyhow!("stream finished"))?
                                 .context("failed to receive message")?
                                 .message
-                                .ok_or(anyhow::anyhow!("no message in response"))? {
-                                    SubscribeResponseMessage::Ping(Ping { id }) => {
-                                        let message = SubscribeRequest {
-                                            message: Some(SubscribeRequestMessage::Pong(Pong { id })),
-                                        };
-                                        sink.send(message).await.context("failed to send pong response")
-                                    },
-                                    SubscribeResponseMessage::Pong(Pong { id: _ }) => Ok(()),
-                                    SubscribeResponseMessage::Transaction(SubscribeTransaction { payload }) => {
-                                        let Payload {
-                                            transaction,
-                                            config,
-                                            timestamp,
-                                        } = Payload::decode(&payload).context("failed to decode message")?;
-                                        // Calculate latency if timestamp exists
-                                        if let Some(gateway_timestamp) = timestamp {
-                                            let now = ms_since_epoch();
-                                            let latency = now.saturating_sub(gateway_timestamp);
-                                            metrics::jet::observe_forwarded_txn_latency(latency as f64);
+                                .ok_or(anyhow::anyhow!("no message in response"))?;
+
+                            match message {
+                                SubscribeResponseMessage::Ping(Ping { id }) => {
+                                    let message = SubscribeRequest {
+                                        message: Some(SubscribeRequestMessage::Pong(Pong { id })),
+                                    };
+                                    sink.send(message).await.context("failed to send pong response")
+                                },
+                                SubscribeResponseMessage::Pong(_) => Ok(()),
+                                SubscribeResponseMessage::Transaction(transaction) => {
+                                    let timestamp = transaction.payload.as_ref().and_then(|p| {
+                                        if let Payload::NewPayload(wrapper) = p {
+                                            wrapper.timestamp
+                                        } else {
+                                            None
                                         }
-                                        let tx_sender = tx_sender.clone();
-                                        tasks.spawn(async move {
-                                            tx_sender.send_transaction(transaction, Some(config))
-                                                .await
-                                                .context(format!("config.encoding={:?}", config.encoding))
-                                        });
+                                    });
+
+                                    let tx_sender = tx_sender.clone();
+                                    tasks.spawn(async move {
+                                        let handler = GrpcTransactionHandler::new(tx_sender);
+                                        match handler.handle_transaction(transaction).await {
+                                            Ok(_) => {
+                                                if let Some(gateway_timestamp) = timestamp {
+                                                    let latency = ms_since_epoch().saturating_sub(gateway_timestamp);
+                                                    metrics::jet::observe_forwarded_txn_latency(latency as f64);
+                                                }
+                                                increment_send_transaction_success();
+                                            }
+                                            Err(e) => {
+                                                increment_send_transaction_error();
+                                                error!(?e, "Failed to handle transaction");
+                                            }
+                                        }
                                         Ok(())
-                                    },
+                                    });
+                                    Ok(())
                                 }
+                            }
                         }
-                        // Join next is cancel safe
                         Some(result) = tasks.join_next() => {
                             let result = result.expect("failed to join send_transaction task");
                             if result.is_err() {
-                                // On error we don't want to break.
                                 increment_send_transaction_error();
                                 error!(?result, "failed to send transaction");
                             } else {

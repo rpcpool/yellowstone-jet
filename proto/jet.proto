@@ -87,28 +87,15 @@ message PublishTransaction {
 
 message TransactionWrapper {
   bytes transaction = 1;
-  TransactionConfig config = 2;
+  optional TransactionConfig config = 2;
   optional uint64 timestamp = 3;
 }
 
 message TransactionConfig {
   bool skip_preflight = 1;
   bool skip_sanitize = 2;
-  string preflight_commitment = 3;
-  string encoding = 4;
-  uint32 max_retries = 5;
-  uint64 min_context_slot = 6;
-  Blocklist blocklist = 7;
-}
-
-message Blocklist {
-  string addresses = 1;  // Comma-separated list of addresses
-  BlocklistMode mode = 2;
-}
-
-enum BlocklistMode {
-  DENY = 0;  // Default: deny listed addresses
-  ALLOW = 1;  // Allow only listed addresses
+  optional uint32 max_retries = 3;
+  repeated string blocklist_pdas = 4;
 }
 
 message PublishResponse {
