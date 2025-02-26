@@ -20,14 +20,14 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{signal, SignalKind},
-        sync::{broadcast, oneshot},
+        sync::{broadcast, oneshot, RwLock},
         task::JoinHandle,
         time::{sleep, Duration},
     },
     tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
-        cluster_tpu_info::ClusterTpuInfo,
+        cluster_tpu_info::{ClusterTpuInfo, ClusterTpuInfoInner},
         config::{load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream},
         grpc_geyser::GeyserSubscriber,
         grpc_jet::GrpcServer,
@@ -240,6 +240,13 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     if let Some(identity) = config.identity.expected {
         metrics::quic_set_indetity_expected(identity);
     }
+    config
+        .yellowstone_blocklist
+        .set_lists(config.upstream.rpc.clone())
+        .await?;
+
+    let yellowstone_blocklist = Arc::new(config.yellowstone_blocklist);
+
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
         shutdown_geyser_rx,
@@ -248,13 +255,18 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             .upstream
             .secondary_grpc
             .unwrap_or(config.upstream.primary_grpc),
+        Arc::clone(&yellowstone_blocklist),
     );
     let blockhash_queue = BlockhashQueue::new(&geyser);
-    let cluster_tpu_info = ClusterTpuInfo::new(
+    let inner_cluster_tpu_info =
+        RwLock::new(ClusterTpuInfoInner::new(config.upstream.rpc.clone()).await);
+    let (cluster_tpu_info, cluster_tpu_info_tasks) = ClusterTpuInfo::new(
         config.upstream.rpc.clone(),
         &geyser,
+        Arc::new(inner_cluster_tpu_info),
         config.upstream.cluster_nodes_update_interval,
         config.blocklist,
+        yellowstone_blocklist,
     )
     .await;
     let rooted_transactions = RootedTransactions::new(&geyser).await?;
@@ -385,16 +397,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         }
     });
 
-    tg.spawn_with_shutdown("cluster_tpu_info", |mut stop| async move {
-        tokio::select! {
-            result = cluster_tpu_info.clone().wait_shutdown() => {
-                result.expect("cluster_tpu_info");
-            },
-            _ = &mut stop => {
-                cluster_tpu_info.shutdown();
-                cluster_tpu_info.wait_shutdown().await.expect("cluster_tpu_info shutdown");
-            },
-        }
+    tg.spawn_cancelable("cluster_tpu_info", async move {
+        cluster_tpu_info_tasks.await.expect("cluster_tpu_info");
     });
 
     tg.spawn_with_shutdown("rooted_transactions", |mut stop| async move {

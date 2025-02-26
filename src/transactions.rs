@@ -3,7 +3,7 @@ use {
         blockhash_queue::BlockhashQueue,
         config::ConfigSendTransactionService,
         grpc_geyser::{
-            GeyserSubscriber, GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived,
+            GeyserStreams, GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived,
         },
         metrics::jet as metrics,
         quic::QuicClient,
@@ -71,7 +71,10 @@ impl WaitShutdown for RootedTransactions {
 }
 
 impl RootedTransactions {
-    pub async fn new(grpc: &GeyserSubscriber) -> anyhow::Result<Self> {
+    pub async fn new<G>(grpc: &G) -> anyhow::Result<Self>
+    where
+        G: GeyserStreams + Send + Sync + 'static,
+    {
         let shutdown = Arc::new(Notify::new());
 
         let (signature_updates_tx, signature_updates_rx) = mpsc::unbounded_channel();
@@ -226,6 +229,7 @@ pub struct SendTransactionRequest {
     pub transaction: VersionedTransaction,
     pub wire_transaction: Vec<u8>,
     pub max_retries: Option<usize>,
+    pub list_pda_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +306,7 @@ struct SendTransactionInfo {
     max_retries: usize,
     last_valid_block_height: BlockHeight,
     landed: bool,
+    list_pda_keys: Vec<String>,
 }
 
 impl SendTransactionInfo {
@@ -405,6 +410,7 @@ impl SendTransactionsPoolTask {
             transaction,
             wire_transaction,
             max_retries,
+            list_pda_keys,
         }: SendTransactionRequest,
     ) {
         let max_retries = max_retries
@@ -457,6 +463,7 @@ impl SendTransactionsPoolTask {
             max_retries,
             last_valid_block_height,
             landed,
+            list_pda_keys: list_pda_keys.clone(),
         };
         let update_existed = self.transactions.insert(signature, info).is_some();
         if !update_existed {
@@ -481,7 +488,7 @@ impl SendTransactionsPoolTask {
             self.schedule_transaction_retry(signature, retry_timestamp)
                 .await;
         } else {
-            self.spawn_send_transaction(id, signature, wire_transaction);
+            self.spawn_send_transaction(id, signature, wire_transaction, list_pda_keys);
         }
     }
 
@@ -500,6 +507,7 @@ impl SendTransactionsPoolTask {
         id: SendTransactionInfoId,
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
+        list_pda_keys: Vec<String>,
     ) {
         let quic_client = self.quic_client.clone();
         let leader_forward_count = self.config.leader_forward_count;
@@ -508,7 +516,13 @@ impl SendTransactionsPoolTask {
             info!(id, %signature, "trying to send transaction");
 
             quic_client
-                .send_transaction(id, signature, wire_transaction, leader_forward_count)
+                .send_transaction(
+                    id,
+                    signature,
+                    wire_transaction,
+                    leader_forward_count,
+                    list_pda_keys,
+                )
                 .await;
 
             SendTransactionTaskResult {
@@ -596,6 +610,7 @@ impl SendTransactionsPoolTask {
                         info.id,
                         info.signature,
                         Arc::clone(&info.wire_transaction),
+                        info.list_pda_keys.clone(),
                     );
                 } else {
                     self.schedule_transaction_retry(signature, retry_timestamp)

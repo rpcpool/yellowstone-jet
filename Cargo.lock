@@ -5387,6 +5387,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-yellowstone-blocklist"
+version = "0.1.0"
+source = "git+https://github.com/rpcpool/solana-yellowstone-blocklist.git#0329bc965aa1ae667d5fe03bee295f12deb82413"
+dependencies = [
+ "bincode",
+ "borsh 1.5.5",
+ "bytemuck",
+ "getrandom 0.1.16",
+ "serde",
+ "serde_derive",
+ "solana-program",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "solana-zk-token-sdk"
 version = "2.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6854,6 +6869,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bincode",
+ "borsh 1.5.5",
  "bs58",
  "bytes",
  "cargo-lock",
@@ -6893,6 +6909,7 @@ dependencies = [
  "solana-tpu-client",
  "solana-transaction-status",
  "solana-version 2.1.11 (registry+https://github.com/rust-lang/crates.io-index)",
+ "solana-yellowstone-blocklist",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",

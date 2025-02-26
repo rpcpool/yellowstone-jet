@@ -434,6 +434,7 @@ pub mod rpc_solana_like {
                 transaction,
                 wire_transaction,
                 max_retries,
+                list_pda_keys: vec![], // This is temporal, I think I'll need the proto file
             }) {
                 return Err(ErrorObject::owned(
                     INTERNAL_ERROR_CODE,

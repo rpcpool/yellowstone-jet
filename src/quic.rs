@@ -65,6 +65,7 @@ pub trait UpcomingLeaderSchedule {
         &self,
         leader_forward_lookahead: usize,
         extra_tpu_forward: Vec<TpuInfo>,
+        list_pda_keys: Vec<String>,
     ) -> BoxFuture<'_, Vec<TpuInfo>>;
 }
 
@@ -73,10 +74,11 @@ impl UpcomingLeaderSchedule for ClusterTpuInfo {
         &self,
         leader_forward_lookahead: usize,
         extra_tpu_forward: Vec<TpuInfo>,
+        list_pda_keys: Vec<String>,
     ) -> BoxFuture<'_, Vec<TpuInfo>> {
         let extra_tpu_forward = extra_tpu_forward.into_iter().collect::<Vec<_>>();
         async move {
-            self.get_leader_tpus(leader_forward_lookahead, extra_tpu_forward)
+            self.get_leader_tpus(leader_forward_lookahead, extra_tpu_forward, &list_pda_keys)
                 .await
         }
         .boxed()
@@ -121,10 +123,15 @@ impl QuicClient {
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
         leader_forward_count: usize,
+        list_pda_keys: Vec<String>,
     ) {
         let mut tpus_info = self
             .upcoming_leader_schedule
-            .get_leader_tpus(leader_forward_count, self.extra_tpu_forward.clone())
+            .get_leader_tpus(
+                leader_forward_count,
+                self.extra_tpu_forward.clone(),
+                list_pda_keys,
+            )
             .await;
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
