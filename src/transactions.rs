@@ -53,9 +53,6 @@ pub type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
 pub trait RootedTransactionSignatures {
     async fn subscribe_signature(&self, signature: Signature);
     async fn unsubscribe_signature(&self, signature: &Signature);
-    async fn subscribe_signature_updates(
-        &self,
-    ) -> Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>>;
     async fn get_transaction_commitment(&self, signature: Signature) -> Option<CommitmentLevel>;
 }
 
@@ -130,7 +127,7 @@ pub struct RootedTransactionsInner {
     slots: HashMap<Slot, RootedTransactionsSlotInfo>,
     transactions: HashMap<Signature, Slot>,
     watch_signatures: HashSet<Signature>,
-    signature_updates_rx: Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>>,
+    // signature_updates_rx: Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,36 +169,34 @@ impl RootedTransactionSignatures for RootedTransactions {
         let mut locked = self.inner.write().await;
         locked.watch_signatures.remove(signature);
     }
-
-    async fn subscribe_signature_updates(
-        &self,
-    ) -> Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>> {
-        let mut locked = self.inner.write().await;
-        locked.signature_updates_rx.take()
-    }
 }
 
 #[deprecated(note = "uses GrpcTxSubscribeAdapter instead")]
 impl RootedTransactions {
-    pub async fn new(grpc: &GeyserSubscriber) -> anyhow::Result<Self> {
+    ///
+    /// Creates a new rooted transactions service
+    ///
+    /// Arguments:
+    ///
+    /// * `grpc_rx` - gRPC sending transaction updates
+    /// * `tx_status_update_tx` - the channel sink where we send filtered transaction updates to.
+    ///
+    pub async fn new(
+        grpc_rx: mpsc::Receiver<GrpcUpdateMessage>,
+        tx_status_update_tx: mpsc::UnboundedSender<RootedTransactionsUpdateSignature>,
+    ) -> anyhow::Result<Self> {
         let shutdown = Arc::new(Notify::new());
 
-        let (signature_updates_tx, signature_updates_rx) = mpsc::unbounded_channel();
-        let inner = Arc::new(RwLock::new(RootedTransactionsInner {
-            signature_updates_rx: Some(signature_updates_rx),
-            ..Default::default()
-        }));
+        let shared = Default::default();
 
         Ok(Self {
-            inner: Arc::clone(&inner),
+            inner: Arc::clone(&shared),
             shutdown: Arc::clone(&shutdown),
             join_handle: Self::spawn(Self::start_loop(
                 shutdown,
-                grpc.subscribe_transactions().await.ok_or(anyhow::anyhow!(
-                    "RootedTransactions: failed to subscribe on updates from gRPC"
-                ))?,
-                inner,
-                signature_updates_tx,
+                grpc_rx,
+                shared,
+                tx_status_update_tx,
             )),
         })
     }
@@ -322,19 +317,16 @@ impl SendTransactionsPool {
         block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
         rooted_transactions: Arc<dyn RootedTransactionSignatures + Send + Sync + 'static>,
         tx_sender: Arc<dyn TxChannel + Send + Sync + 'static>,
+        tx_status_update_rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
     ) -> (Self, impl Future<Output = ()>) {
         let (new_transactions_tx, new_transactions_rx) = mpsc::unbounded_channel();
-        let signature_updates = rooted_transactions
-            .subscribe_signature_updates()
-            .await
-            .expect("failed to subscribe on signature updates");
         let task = SendTransactionsPoolTask {
             config,
             block_height_service,
             rooted_transactions,
             tx_channel: tx_sender,
             new_transactions_rx,
-            signature_updates,
+            tx_status_update_rx,
             transactions: HashMap::new(),
             retry_schedule: BTreeMap::new(),
             connecting_map: Default::default(),
@@ -506,7 +498,7 @@ pub struct SendTransactionsPoolTask {
     send_tasks: JoinSet<SendTransactionTaskResult>,
 
     new_transactions_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
-    signature_updates: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
+    tx_status_update_rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
 
     transactions: HashMap<Signature, SendTransactionInfo>,
     retry_schedule: BTreeMap<Instant, VecDeque<Signature>>,
@@ -556,7 +548,7 @@ impl SendTransactionsPoolTask {
                 _ = tokio::time::sleep_until(next_retry_deadline) => {
                     self.retry_next_in_schedule().await;
                 }
-                maybe_signature_update = self.signature_updates.recv() => {
+                maybe_signature_update = self.tx_status_update_rx.recv() => {
                     match maybe_signature_update {
                         Some((signature, commitment)) => self.update_signature(signature, commitment).await,
                         None => {
@@ -888,9 +880,7 @@ impl SendTransactionsPoolTask {
 
 pub mod testkit {
     use {
-        super::{
-            RootedTransactionSignatures, RootedTransactionsInner, RootedTransactionsUpdateSignature,
-        },
+        super::{RootedTransactionSignatures, RootedTransactionsInner},
         crate::util::CommitmentLevel,
         solana_sdk::signature::Signature,
         std::sync::Arc,
@@ -911,7 +901,6 @@ pub mod testkit {
             let (signature_updates_tx, signature_updates_rx) = mpsc::unbounded_channel();
 
             let rooted_transactions_inner = RootedTransactionsInner {
-                signature_updates_rx: Some(signature_updates_rx),
                 ..Default::default()
             };
 
@@ -945,12 +934,6 @@ pub mod testkit {
         async fn unsubscribe_signature(&self, signature: &Signature) {
             let mut locked = self.inner.write().await;
             locked.watch_signatures.remove(signature);
-        }
-        async fn subscribe_signature_updates(
-            &self,
-        ) -> Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>> {
-            let mut locked = self.inner.write().await;
-            locked.signature_updates_rx.take()
         }
         async fn get_transaction_commitment(
             &self,

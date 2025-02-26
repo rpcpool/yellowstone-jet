@@ -15,7 +15,7 @@ use {
         time::Duration,
     },
     testkit::default_config_transaction,
-    tokio::sync::{broadcast, oneshot, Barrier, RwLock},
+    tokio::sync::{broadcast, mpsc, oneshot, Barrier, RwLock},
     yellowstone_jet::{
         blockhash_queue::testkit::MockBlockhashQueue,
         setup_tracing,
@@ -202,11 +202,13 @@ async fn test_transaction_send_successful_lifecycle() {
 
     block_height_service.increase_block_height(tx_hash).await;
 
+    let (_tx_status_update_tx, tx_status_update_rx) = mpsc::unbounded_channel();
     let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
         default_config_transaction(),
         Arc::new(block_height_service),
         Arc::new(rooted_transactions),
         Arc::new(mock_tx_sender),
+        tx_status_update_rx,
     )
     .await;
 
@@ -239,11 +241,13 @@ async fn flushing_without_any_tx_in_queue_should_be_noop() {
     block_height_service.increase_block_height(tx_hash).await;
 
     let spy_tx_sender = SpyTxChannel::default();
+    let (_tx_status_update_tx, tx_status_update_rx) = mpsc::unbounded_channel();
     let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
         default_config_transaction(),
         Arc::new(block_height_service),
         Arc::new(rooted_transactions),
         Arc::new(spy_tx_sender.clone()),
+        tx_status_update_rx,
     )
     .await;
 
@@ -316,11 +320,13 @@ async fn it_should_flush_pending_tx() {
         barrier: Arc::clone(&barrier),
     };
 
+    let (_tx_status_update_tx, tx_status_update_rx) = mpsc::unbounded_channel();
     let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
         default_config_transaction(),
         Arc::new(block_height_service),
         Arc::new(rooted_transactions),
         Arc::new(mock_tx_sender.clone()),
+        tx_status_update_rx,
     )
     .await;
 
@@ -381,11 +387,13 @@ async fn it_should_retry_failed_send_transactions() {
     let spy_tx_sender = SpyTxChannel::default();
     spy_tx_sender.set_mode(SpyTxChannelMode::FailSend);
 
+    let (_tx_status_update_tx, tx_status_update_rx) = mpsc::unbounded_channel();
     let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
         default_config_transaction(),
         Arc::new(block_height_service),
         Arc::new(rooted_transactions),
         Arc::new(spy_tx_sender.clone()),
+        tx_status_update_rx,
     )
     .await;
 

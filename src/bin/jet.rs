@@ -20,7 +20,7 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{signal, SignalKind},
-        sync::{broadcast, oneshot},
+        sync::{broadcast, mpsc, oneshot},
         task::JoinHandle,
     },
     tracing::{info, warn},
@@ -270,7 +270,14 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         config.blocklist,
     )
     .await;
-    let rooted_transactions = RootedTransactions::new(&geyser).await?;
+
+    let (tx_status_update_tx, tx_status_update_rx) = mpsc::unbounded_channel();
+    let rooted_tx_geyser_rx = geyser
+        .subscribe_transactions()
+        .await
+        .expect("failed to subscribe geyser transactions");
+    let rooted_transactions =
+        RootedTransactions::new(rooted_tx_geyser_rx, tx_status_update_tx).await?;
 
     let identity_flusher_wg = IdentityFlusherWaitGroup::default();
 
@@ -295,6 +302,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(blockhash_queue.clone()),
         Arc::new(rooted_transactions.clone()),
         Arc::new(quic_tx_sender.clone()),
+        tx_status_update_rx,
     )
     .await;
 
