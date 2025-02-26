@@ -2,22 +2,17 @@ use {
     crate::{
         blockhash_queue::BlockHeighService,
         config::ConfigSendTransactionService,
-        grpc_geyser::{
-            GeyserSubscriber, GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived,
-        },
+        grpc_geyser::{GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived},
         metrics::jet as metrics,
         quic::{QuicClient, QuicSendTxPermit},
         quic_solana::IdentityFlusher,
         solana::get_durable_nonce,
-        util::{
-            BlockHeight, CommitmentLevel, WaitShutdown, WaitShutdownJoinHandleResult,
-            WaitShutdownSharedJoinHandle,
-        },
+        util::{BlockHeight, CommitmentLevel},
     },
-    futures::future::{BoxFuture, Join},
+    futures::future::BoxFuture,
     solana_sdk::{
         clock::{Slot, MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES},
-        signature::{self, Signature},
+        signature::Signature,
         transaction::VersionedTransaction,
     },
     std::{
@@ -33,9 +28,9 @@ use {
     tokio::{
         sync::{
             mpsc::{self},
-            oneshot, Notify, RwLock,
+            oneshot, RwLock,
         },
-        task::{self, AbortHandle, JoinSet},
+        task::{self, JoinSet},
         time::Instant,
     },
     tracing::{debug, error, info, instrument},
@@ -49,77 +44,16 @@ pub struct RootedTransactionsSlotInfo {
 
 pub type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
 
+///
+/// Base trait for Rooted transaction update notifier
+///
 #[async_trait::async_trait]
-pub trait RootedTransactionSignatures {
-    async fn subscribe_signature(&self, signature: Signature);
-    async fn unsubscribe_signature(&self, signature: &Signature);
-    async fn get_transaction_commitment(&self, signature: Signature) -> Option<CommitmentLevel>;
-}
-
-pub struct WatchSignatureCommand {
-    signature: Signature,
-    callback: oneshot::Sender<OwnedTxSubscription>,
-}
-
-pub struct UnwatchSignatureCommand {
-    signature: Signature,
-}
-
-pub enum TxStatusSubscriptionCommand {
-    WatchSignature(WatchSignatureCommand),
-    UnwatchSignature(UnwatchSignatureCommand),
-}
-
-pub struct TransactionStatusReceiver {
-    ///
-    /// Watched signatures and their commitment level
-    ///
-    rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
-    ///
-    /// Command-and-Control channel to send commands to the subscription
-    ///
-    cnc_tx: mpsc::UnboundedSender<TxStatusSubscriptionCommand>,
-}
-
-///
-/// Owned transaction subscription proof, that can be used to unsubscribe.
-///
-/// Once all references to this object are dropped, the subscription will be automatically unsubscribed.
-///
-pub struct OwnedTxSubscription {
-    signature: Signature,
-    cnc_tx: mpsc::UnboundedSender<TxStatusSubscriptionCommand>,
-}
-
-impl Drop for OwnedTxSubscription {
-    fn drop(&mut self) {
-        let unwatch_signature_cmd = UnwatchSignatureCommand {
-            signature: self.signature,
-        };
-        let _ = self
-            .cnc_tx
-            .send(TxStatusSubscriptionCommand::UnwatchSignature(
-                unwatch_signature_cmd,
-            ));
-    }
-}
-
-impl TransactionStatusReceiver {
-    async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)> {
-        self.rx.recv().await
-    }
-
-    async fn watch_signature(&mut self, signature: Signature) -> OwnedTxSubscription {
-        let (tx, rx) = oneshot::channel();
-        let watch_cmd = WatchSignatureCommand {
-            signature,
-            callback: tx,
-        };
-        self.cnc_tx
-            .send(TxStatusSubscriptionCommand::WatchSignature(watch_cmd))
-            .expect("failed to send watch command");
-        rx.await.expect("failed to receive watch command result")
-    }
+pub trait RootedTxReceiver {
+    async fn subscribe_signature(&mut self, signature: Signature);
+    async fn unsubscribe_signature(&mut self, signature: Signature);
+    async fn get_transaction_commitment(&mut self, signature: Signature)
+        -> Option<CommitmentLevel>;
+    async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)>;
 }
 
 #[derive(Debug, Default)]
@@ -127,30 +61,23 @@ pub struct RootedTransactionsInner {
     slots: HashMap<Slot, RootedTransactionsSlotInfo>,
     transactions: HashMap<Signature, Slot>,
     watch_signatures: HashSet<Signature>,
-    // signature_updates_rx: Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RootedTransactions {
+///
+/// Rooted transaction receiver that uses gRPC dragonsmouth API to receive transaction updates
+///
+#[derive(Debug)]
+pub struct GrpcRootedTxReceiver {
     inner: Arc<RwLock<RootedTransactionsInner>>,
-    shutdown: Arc<Notify>,
-    join_handle: WaitShutdownSharedJoinHandle,
-}
-
-impl WaitShutdown for RootedTransactions {
-    fn shutdown(&self) {
-        self.shutdown.notify_one();
-    }
-
-    async fn wait_shutdown_future(self) -> WaitShutdownJoinHandleResult {
-        let mut locked = self.join_handle.lock().await;
-        locked.deref_mut().await
-    }
+    rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
 }
 
 #[async_trait::async_trait]
-impl RootedTransactionSignatures for RootedTransactions {
-    async fn get_transaction_commitment(&self, signature: Signature) -> Option<CommitmentLevel> {
+impl RootedTxReceiver for GrpcRootedTxReceiver {
+    async fn get_transaction_commitment(
+        &mut self,
+        signature: Signature,
+    ) -> Option<CommitmentLevel> {
         let locked = self.inner.read().await;
         locked
             .transactions
@@ -160,64 +87,55 @@ impl RootedTransactionSignatures for RootedTransactions {
             .map(|info| info.commitment)
     }
 
-    async fn subscribe_signature(&self, signature: Signature) {
+    async fn subscribe_signature(&mut self, signature: Signature) {
         let mut locked = self.inner.write().await;
         locked.watch_signatures.insert(signature);
     }
 
-    async fn unsubscribe_signature(&self, signature: &Signature) {
+    async fn unsubscribe_signature(&mut self, signature: Signature) {
         let mut locked = self.inner.write().await;
-        locked.watch_signatures.remove(signature);
+        locked.watch_signatures.remove(&signature);
+    }
+
+    async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)> {
+        self.rx.recv().await
     }
 }
 
-#[deprecated(note = "uses GrpcTxSubscribeAdapter instead")]
-impl RootedTransactions {
+impl GrpcRootedTxReceiver {
     ///
     /// Creates a new rooted transactions service
     ///
     /// Arguments:
     ///
     /// * `grpc_rx` - gRPC sending transaction updates
-    /// * `tx_status_update_tx` - the channel sink where we send filtered transaction updates to.
     ///
-    pub async fn new(
-        grpc_rx: mpsc::Receiver<GrpcUpdateMessage>,
-        tx_status_update_tx: mpsc::UnboundedSender<RootedTransactionsUpdateSignature>,
-    ) -> anyhow::Result<Self> {
-        let shutdown = Arc::new(Notify::new());
-
+    pub fn new(grpc_rx: mpsc::Receiver<GrpcUpdateMessage>) -> (Self, impl Future) {
         let shared = Default::default();
-
-        Ok(Self {
-            inner: Arc::clone(&shared),
-            shutdown: Arc::clone(&shutdown),
-            join_handle: Self::spawn(Self::start_loop(
-                shutdown,
-                grpc_rx,
-                shared,
-                tx_status_update_tx,
-            )),
-        })
+        let (tx, rx) = mpsc::unbounded_channel();
+        let loop_fut = Self::start_loop(grpc_rx, Arc::clone(&shared), tx);
+        let this = Self {
+            inner: shared,
+            rx: rx,
+        };
+        (this, loop_fut)
     }
 
     async fn start_loop(
-        shutdown: Arc<Notify>,
         mut grpc_rx: mpsc::Receiver<GrpcUpdateMessage>,
         inner: Arc<RwLock<RootedTransactionsInner>>,
         signature_updates_tx: mpsc::UnboundedSender<RootedTransactionsUpdateSignature>,
-    ) -> anyhow::Result<()> {
+    ) {
         let mut transactions_bulk = vec![];
         loop {
             let slot_update = tokio::select! {
-                _ = shutdown.notified() => return Ok(()),
                 message = grpc_rx.recv() => match message {
                     Some(GrpcUpdateMessage::Transaction(transaction)) => {
                         transactions_bulk.push(transaction);
                         continue;
                     }
                     Some(GrpcUpdateMessage::Slot(slot)) => slot,
-                    None => anyhow::bail!("RootedTransactions: gRPC streamed closed"),
+                    None => panic!("RootedTransactions: gRPC streamed closed"),
                 }
             };
 
@@ -231,21 +149,19 @@ impl RootedTransactions {
             } = locked.deref_mut();
             let ts = Instant::now();
 
-            macro_rules! send_update {
-                ($signature:expr, $commitment:expr) => {
-                    if watch_signatures.contains($signature) {
-                        if signature_updates_tx.send((*$signature, $commitment)).is_err() {
-                            error!(signature=%$signature, "failed to send an update");
-                        }
-                    }
-                };
-            }
-
             // Update slot commitment
             let entry = slots.entry(slot_update.slot).or_default();
             entry.slot = Some(slot_update);
             for signature in entry.transactions.iter() {
-                send_update!(signature, slot_update.commitment);
+                if watch_signatures.contains(signature) {
+                    if signature_updates_tx
+                        .send((*signature, slot_update.commitment))
+                        .is_err()
+                    {
+                        // The loop shutdown when the receiver is closed
+                        return;
+                    }
+                }
             }
 
             // Removed outdated slots
@@ -281,7 +197,15 @@ impl RootedTransactions {
                 let entry = slots.entry(slot).or_default();
                 if entry.transactions.insert(signature) {
                     if let Some(slot) = &entry.slot {
-                        send_update!(&signature, slot.commitment);
+                        if watch_signatures.contains(&signature) {
+                            if signature_updates_tx
+                                .send((signature, slot.commitment))
+                                .is_err()
+                            {
+                                // The loop shutdown when the receiver is closed
+                                return;
+                            }
+                        }
                     }
                     transactions.insert(signature, slot);
                 }
@@ -315,18 +239,16 @@ impl SendTransactionsPool {
     pub async fn spawn(
         config: ConfigSendTransactionService,
         block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
-        rooted_transactions: Arc<dyn RootedTransactionSignatures + Send + Sync + 'static>,
+        rooted_transactions_rx: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
         tx_sender: Arc<dyn TxChannel + Send + Sync + 'static>,
-        tx_status_update_rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
     ) -> (Self, impl Future<Output = ()>) {
         let (new_transactions_tx, new_transactions_rx) = mpsc::unbounded_channel();
         let task = SendTransactionsPoolTask {
             config,
             block_height_service,
-            rooted_transactions,
+            rooted_transactions: rooted_transactions_rx,
             tx_channel: tx_sender,
             new_transactions_rx,
-            tx_status_update_rx,
             transactions: HashMap::new(),
             retry_schedule: BTreeMap::new(),
             connecting_map: Default::default(),
@@ -482,7 +404,7 @@ pub struct TransactionInfo {
 pub struct SendTransactionsPoolTask {
     config: ConfigSendTransactionService,
     block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
-    rooted_transactions: Arc<dyn RootedTransactionSignatures + Send + Sync + 'static>,
+    rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
     tx_channel: Arc<dyn TxChannel + Send + Sync + 'static>,
 
     /// Connecting map holds pending connection request with the underlying tx sender.
@@ -498,8 +420,7 @@ pub struct SendTransactionsPoolTask {
     send_tasks: JoinSet<SendTransactionTaskResult>,
 
     new_transactions_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
-    tx_status_update_rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
-
+    // tx_status_update_rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
     transactions: HashMap<Signature, SendTransactionInfo>,
     retry_schedule: BTreeMap<Instant, VecDeque<Signature>>,
 }
@@ -548,7 +469,7 @@ impl SendTransactionsPoolTask {
                 _ = tokio::time::sleep_until(next_retry_deadline) => {
                     self.retry_next_in_schedule().await;
                 }
-                maybe_signature_update = self.tx_status_update_rx.recv() => {
+                maybe_signature_update = self.rooted_transactions.recv() => {
                     match maybe_signature_update {
                         Some((signature, commitment)) => self.update_signature(signature, commitment).await,
                         None => {
@@ -763,7 +684,7 @@ impl SendTransactionsPoolTask {
     async fn remove_transaction(&mut self, signature: Signature, reason: &'static str) {
         let removed_tx = self.transactions.remove(&signature);
         self.rooted_transactions
-            .unsubscribe_signature(&signature)
+            .unsubscribe_signature(signature)
             .await;
         if let Some(info) = removed_tx {
             info!(id = info.id, %signature, reason, "remove transaction");
@@ -863,7 +784,7 @@ impl SendTransactionsPoolTask {
         if commitment == CommitmentLevel::Finalized {
             if let Some(info) = self.transactions.remove(&signature) {
                 self.rooted_transactions
-                    .unsubscribe_signature(&signature)
+                    .unsubscribe_signature(signature)
                     .await;
                 info!(id = info.id, %signature, "remove transaction: reached finalized commitment");
                 metrics::sts_pool_set_size(self.transactions.len());
@@ -880,63 +801,49 @@ impl SendTransactionsPoolTask {
 
 pub mod testkit {
     use {
-        super::{RootedTransactionSignatures, RootedTransactionsInner},
+        super::{RootedTransactionsInner, RootedTxReceiver},
         crate::util::CommitmentLevel,
         solana_sdk::signature::Signature,
         std::sync::Arc,
         tokio::sync::{
-            mpsc::{self, UnboundedSender},
+            mpsc::{self, UnboundedReceiver},
             RwLock,
         },
     };
 
-    #[derive(Debug, Clone)]
-    pub struct MockRootedTransactions {
+    pub struct MockRootedTransactionsTx {
         inner: Arc<RwLock<RootedTransactionsInner>>,
-        signature_updates_tx: UnboundedSender<(Signature, CommitmentLevel)>,
+        tx: mpsc::UnboundedSender<(Signature, CommitmentLevel)>,
     }
 
-    impl MockRootedTransactions {
-        pub fn new() -> Self {
-            let (signature_updates_tx, signature_updates_rx) = mpsc::unbounded_channel();
-
-            let rooted_transactions_inner = RootedTransactionsInner {
-                ..Default::default()
-            };
-
-            Self {
-                inner: Arc::new(RwLock::new(rooted_transactions_inner)),
-                signature_updates_tx,
-            }
-        }
+    pub struct MockRootedTransactionsRx {
+        inner: Arc<RwLock<RootedTransactionsInner>>,
+        rx: UnboundedReceiver<(Signature, CommitmentLevel)>,
     }
 
-    impl Default for MockRootedTransactions {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl MockRootedTransactions {
-        pub async fn update_signature(&self, signature: Signature, commitment: CommitmentLevel) {
-            self.signature_updates_tx
-                .send((signature, commitment))
-                .expect("Error sending signature update");
-        }
+    pub fn mock_rooted_tx_channel() -> (MockRootedTransactionsTx, MockRootedTransactionsRx) {
+        let shared = Default::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rooted_rx = MockRootedTransactionsRx {
+            inner: Arc::clone(&shared),
+            rx,
+        };
+        let rooted_tx = MockRootedTransactionsTx { inner: shared, tx };
+        (rooted_tx, rooted_rx)
     }
 
     #[async_trait::async_trait]
-    impl RootedTransactionSignatures for MockRootedTransactions {
-        async fn subscribe_signature(&self, signature: Signature) {
+    impl RootedTxReceiver for MockRootedTransactionsRx {
+        async fn subscribe_signature(&mut self, signature: Signature) {
             let mut locked = self.inner.write().await;
             locked.watch_signatures.insert(signature);
         }
-        async fn unsubscribe_signature(&self, signature: &Signature) {
+        async fn unsubscribe_signature(&mut self, signature: Signature) {
             let mut locked = self.inner.write().await;
-            locked.watch_signatures.remove(signature);
+            locked.watch_signatures.remove(&signature);
         }
         async fn get_transaction_commitment(
-            &self,
+            &mut self,
             signature: Signature,
         ) -> Option<CommitmentLevel> {
             let locked = self.inner.read().await;
@@ -946,6 +853,10 @@ pub mod testkit {
                 .and_then(|slot| locked.slots.get(slot))
                 .and_then(|info| info.slot)
                 .map(|info| info.commitment)
+        }
+
+        async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)> {
+            self.rx.recv().await
         }
     }
 }

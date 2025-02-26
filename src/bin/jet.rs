@@ -20,7 +20,7 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{signal, SignalKind},
-        sync::{broadcast, mpsc, oneshot},
+        sync::{broadcast, oneshot},
         task::JoinHandle,
     },
     tracing::{info, warn},
@@ -38,7 +38,7 @@ use {
         setup_tracing,
         stake::StakeInfo,
         task_group::TaskGroup,
-        transactions::{RootedTransactions, SendTransactionsPool},
+        transactions::{GrpcRootedTxReceiver, SendTransactionsPool},
         util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
     },
 };
@@ -271,13 +271,12 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await;
 
-    let (tx_status_update_tx, tx_status_update_rx) = mpsc::unbounded_channel();
     let rooted_tx_geyser_rx = geyser
         .subscribe_transactions()
         .await
         .expect("failed to subscribe geyser transactions");
-    let rooted_transactions =
-        RootedTransactions::new(rooted_tx_geyser_rx, tx_status_update_tx).await?;
+    let (rooted_transactions_rx, rooted_tx_loop_fut) =
+        GrpcRootedTxReceiver::new(rooted_tx_geyser_rx);
 
     let identity_flusher_wg = IdentityFlusherWaitGroup::default();
 
@@ -300,9 +299,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let (send_transactions, send_tx_pool_fut) = SendTransactionsPool::spawn(
         config.send_transaction_service,
         Arc::new(blockhash_queue.clone()),
-        Arc::new(rooted_transactions.clone()),
+        Box::new(rooted_transactions_rx),
         Arc::new(quic_tx_sender.clone()),
-        tx_status_update_rx,
     )
     .await;
 
@@ -428,16 +426,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         }
     });
 
-    tg.spawn_with_shutdown("rooted_transactions", |mut stop| async move {
-        tokio::select! {
-            result = rooted_transactions.clone().wait_shutdown() => {
-                result.expect("rooted_transactions");
-            },
-            _ = &mut stop => {
-                rooted_transactions.shutdown();
-                rooted_transactions.wait_shutdown().await.expect("rooted_transactions shutdown");
-            },
-        }
+    tg.spawn_cancelable("rooted_transactions", async move {
+        rooted_tx_loop_fut.await;
     });
 
     tg.spawn_cancelable("send_transactions_pool", send_tx_pool_fut);
