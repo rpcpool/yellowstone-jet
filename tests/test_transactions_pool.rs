@@ -18,7 +18,6 @@ use {
     tokio::sync::{broadcast, oneshot, Barrier, Notify, RwLock},
     yellowstone_jet::{
         blockhash_queue::testkit::MockBlockhashQueue,
-        setup_tracing,
         transactions::{
             testkit::mock_rooted_tx_channel, BoxedTxChannelPermit, SendTransactionInfoId,
             SendTransactionRequest, SendTransactionsPool, TxChannel, TxChannelPermit,
@@ -138,11 +137,8 @@ impl TxChannel for SpyTxChannel {
         let mode = Arc::clone(&self.mode);
         let curr_mode = { mode.lock().unwrap().clone() };
         self.permit_calls.write().unwrap().push(());
-        match curr_mode {
-            SpyTxChannelMode::FailPermit => {
-                panic!("Error reserving permit");
-            }
-            _ => {}
+        if let SpyTxChannelMode::FailPermit = curr_mode {
+            panic!("Error reserving permit");
         }
         let send_calls = Arc::clone(&self.send_calls);
         let tx_call_notify = self.tx_call_notify.clone();
@@ -519,6 +515,7 @@ async fn it_should_not_retry_tx_that_become_finalized() {
 
     pub struct MockTxChannelPermit {
         send_calls: Arc<RwLock<Vec<Signature>>>,
+        #[allow(dead_code)]
         tx: tokio::sync::mpsc::Sender<(SendTransactionInfoId, Signature, Arc<Vec<u8>>)>,
         blocker: Arc<Notify>,
         barrier: Arc<Barrier>,
@@ -554,7 +551,7 @@ async fn it_should_not_retry_tx_that_become_finalized() {
         }
     }
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let (tx, _rx) = tokio::sync::mpsc::channel(100);
     let blocker = Arc::new(Notify::new());
     let barrier = Arc::new(Barrier::new(2));
     let mock_tx_sender = MockTxSender {

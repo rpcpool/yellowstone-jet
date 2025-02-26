@@ -104,7 +104,7 @@ impl QuicSendTxPermit {
             let send_timeout = self.send_timeout;
             let wire_tx = Arc::clone(&wire_transaction);
             async move {
-                let tpu_info = permit.tpu_info.clone();
+                let tpu_info = permit.tpu_info;
                 let tpu_addr = permit.addr;
                 for _ in 0..send_retry_count {
                     match timeout(send_timeout, permit.send_buffer(&wire_tx)).await {
@@ -182,13 +182,6 @@ impl QuicSendTxPermit {
             .count();
         metrics::sts_tpu_send_inc(success);
     }
-}
-
-pub struct QuicTransactionInfo {
-    id: SendTransactionInfoId,
-    signature: Signature,
-    data: Arc<Vec<u8>>,
-    leader_forward_count: usize,
 }
 
 impl QuicClient {

@@ -115,10 +115,7 @@ impl GrpcRootedTxReceiver {
         let shared = Default::default();
         let (tx, rx) = mpsc::unbounded_channel();
         let loop_fut = Self::start_loop(grpc_rx, Arc::clone(&shared), tx);
-        let this = Self {
-            inner: shared,
-            rx: rx,
-        };
+        let this = Self { inner: shared, rx };
         (this, loop_fut)
     }
 
@@ -636,7 +633,7 @@ impl SendTransactionsPoolTask {
             max_retries,
         }: SendTransactionRequest,
     ) {
-        if self.transactions.get(&signature).is_some() {
+        if self.transactions.contains_key(&signature) {
             info!(%signature, "transaction already in the pool");
             return;
         }
@@ -758,7 +755,7 @@ impl SendTransactionsPoolTask {
     }
 
     async fn schedule_transaction_retry(&mut self, signature: Signature, retry_timestamp: Instant) {
-        if self.transactions.get(&signature).is_none() {
+        if !self.transactions.contains_key(&signature) {
             return;
         }
         let retry_required = if self.config.relay_only_mode {
