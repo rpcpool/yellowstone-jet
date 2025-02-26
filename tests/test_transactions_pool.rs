@@ -15,7 +15,7 @@ use {
         time::Duration,
     },
     testkit::default_config_transaction,
-    tokio::sync::{broadcast, oneshot, Barrier, RwLock},
+    tokio::sync::{broadcast, oneshot, Barrier, Notify, RwLock},
     yellowstone_jet::{
         blockhash_queue::testkit::MockBlockhashQueue,
         setup_tracing,
@@ -455,7 +455,7 @@ async fn it_should_retry_on_failed_permit_tx() {
 }
 
 #[tokio::test]
-async fn it_should_not_retry_finalized_tx() {
+async fn it_should_not_attempt_already_finalized_tx() {
     let block_height_service = MockBlockhashQueue::new();
     let tx_hash = Hash::new_unique();
     let retry_count = 3;
@@ -463,7 +463,7 @@ async fn it_should_not_retry_finalized_tx() {
     block_height_service.increase_block_height(tx_hash).await;
 
     let spy_tx_sender = SpyTxChannel::default();
-    spy_tx_sender.set_mode(SpyTxChannelMode::FailPermit);
+    spy_tx_sender.set_mode(SpyTxChannelMode::FailSend);
 
     let (mocked_rooted_transaction_tx, rooted_transaction_rx) = mock_rooted_tx_channel();
     let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
@@ -497,4 +497,112 @@ async fn it_should_not_retry_finalized_tx() {
     assert_eq!(spy_tx_sender.send_calls_count(), 0);
     assert_eq!(spy_tx_sender.permit_calls_count(), 0);
     assert_eq!(sig, tx1.signature);
+}
+
+#[tokio::test]
+async fn it_should_not_retry_tx_that_become_finalized() {
+    // This test makes sure the transaction is not retry when it becomes finalized mid-flight in the first
+    // send attempt.
+    let block_height_service = MockBlockhashQueue::new();
+    let tx_hash = Hash::new_unique();
+    let retry_count = 3;
+    let tx1 = create_send_transaction_request(tx_hash, retry_count);
+    block_height_service.increase_block_height(tx_hash).await;
+
+    #[derive(Clone)]
+    pub struct MockTxSender {
+        send_calls: Arc<RwLock<Vec<Signature>>>,
+        tx: tokio::sync::mpsc::Sender<(SendTransactionInfoId, Signature, Arc<Vec<u8>>)>,
+        blocker: Arc<Notify>,
+        barrier: Arc<Barrier>,
+    }
+
+    pub struct MockTxChannelPermit {
+        send_calls: Arc<RwLock<Vec<Signature>>>,
+        tx: tokio::sync::mpsc::Sender<(SendTransactionInfoId, Signature, Arc<Vec<u8>>)>,
+        blocker: Arc<Notify>,
+        barrier: Arc<Barrier>,
+    }
+
+    #[async_trait::async_trait]
+    impl TxChannelPermit for MockTxChannelPermit {
+        async fn send_transaction(
+            self,
+            _id: SendTransactionInfoId,
+            _signature: Signature,
+            _wire_transaction: Arc<Vec<u8>>,
+        ) {
+            {
+                self.send_calls.write().await.push(_signature);
+            }
+            self.barrier.wait().await;
+            self.blocker.notified().await;
+            panic!("Error sending transaction");
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TxChannel for MockTxSender {
+        async fn reserve(&self, _leader_forward_count: usize) -> Option<BoxedTxChannelPermit> {
+            let permit = MockTxChannelPermit {
+                send_calls: Arc::clone(&self.send_calls),
+                tx: self.tx.clone(),
+                blocker: Arc::clone(&self.blocker),
+                barrier: Arc::clone(&self.barrier),
+            };
+            Some(BoxedTxChannelPermit::new(permit))
+        }
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let blocker = Arc::new(Notify::new());
+    let barrier = Arc::new(Barrier::new(2));
+    let mock_tx_sender = MockTxSender {
+        tx,
+        send_calls: Default::default(),
+        blocker: Arc::clone(&blocker),
+        barrier: Arc::clone(&barrier),
+    };
+
+    let (mocked_rooted_transaction_tx, rooted_transaction_rx) = mock_rooted_tx_channel();
+    let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
+        default_config_transaction(),
+        Arc::new(block_height_service),
+        Box::new(rooted_transaction_rx),
+        Arc::new(mock_tx_sender.clone()),
+    )
+    .await;
+
+    // Make this tx finalized already
+
+    let _handle = tokio::spawn(send_tx_pool_fut);
+
+    let mut finalized_tx_rx = send_transactions_pool.subscribe_to_finalized_tx();
+    send_transactions_pool
+        .send_transaction(tx1.clone())
+        .expect("Error sending transaction to pool");
+
+    // Waits for the send to be inflight...
+    barrier.wait().await;
+
+    // Send the Finalized notification mid-flight
+    mocked_rooted_transaction_tx
+        .send(
+            tx1.signature,
+            yellowstone_jet::util::CommitmentLevel::Finalized,
+        )
+        .await;
+
+    // Unblock the inflight send.
+    blocker.notify_one();
+
+    // Wait for the finalized tx to be received.
+    let sig = finalized_tx_rx
+        .recv()
+        .await
+        .expect("Error receiving dead letter");
+
+    let total_send_calls = mock_tx_sender.send_calls.read().await.len();
+    assert_eq!(sig, tx1.signature);
+    assert_eq!(total_send_calls, 1);
 }
