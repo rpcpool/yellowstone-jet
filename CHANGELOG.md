@@ -14,6 +14,15 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [10.6.0]
+
+### Features
+- Added support for block leaders from yellowstone-blocklist smart contract
+- Refactor `cluster_tpu_info.rs` and `grpc_geyser.rs`
+
+### Fixes
+- Added tests for blocklist from yellowstone-blocklist
+
 ## [10.5.0]
 
 ### Features

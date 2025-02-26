@@ -292,6 +292,50 @@ async fn test_blocklist_onchain_allowlist_denylist_block_one_tpu() {
     assert!(res[0].leader == leader2);
 }
 
+#[tokio::test]
+async fn blocklist_onchain_takes_prescendence_over_config_blocklist() {
+    let leader1 = Pubkey::new_unique();
+    let leader2 = Pubkey::new_unique();
+    let mut leader_schedule = HashMap::new();
+    leader_schedule.insert(0, leader1);
+    leader_schedule.insert(NUM_CONSECUTIVE_LEADER_SLOTS, leader2);
+    let mut cluster_nodes = HashMap::new();
+    cluster_nodes.insert(leader1, default_rpc_contact_info(&leader1));
+    cluster_nodes.insert(leader2, default_rpc_contact_info(&leader2));
+
+    let mut config_blocklist = ConfigBlocklist::default();
+    config_blocklist.leaders.insert(leader1);
+
+    let yellowstone_blocklist = Arc::new(YellowstoneBlocklist::default());
+
+    yellowstone_blocklist
+        .allow_lists
+        .write()
+        .await
+        .insert(leader2.to_string(), hashset! {leader1});
+
+    let cluster_inner =
+        ClusterTpuInfoInner::test_inner_cluster(leader_schedule, cluster_nodes).await;
+    let mock_cluster_inner = Arc::new(MockClusterInner::new(cluster_inner));
+
+    let (cluster_tpu, _) = ClusterTpuInfo::new(
+        "".to_string(),
+        &MockGrpc::new(),
+        mock_cluster_inner,
+        Duration::from_secs(1),
+        config_blocklist,
+        yellowstone_blocklist,
+    )
+    .await;
+
+    let res = cluster_tpu
+        .get_leader_tpus(2, [], &[leader2.to_string()])
+        .await;
+
+    assert!(res.len() == 1);
+    assert!(res[0].leader == leader1);
+}
+
 struct MockClusterInner {
     inner: RwLock<ClusterTpuInfoInner>,
 }
