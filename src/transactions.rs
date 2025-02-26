@@ -6,7 +6,7 @@ use {
             GeyserSubscriber, GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived,
         },
         metrics::jet as metrics,
-        quic::QuicClient,
+        quic::{QuicClient, QuicSendTxPermit},
         quic_solana::IdentityFlusher,
         solana::get_durable_nonce,
         util::{
@@ -14,28 +14,29 @@ use {
             WaitShutdownSharedJoinHandle,
         },
     },
+    futures::future::{BoxFuture, Join},
     solana_sdk::{
         clock::{Slot, MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES},
-        signature::Signature,
+        signature::{self, Signature},
         transaction::VersionedTransaction,
     },
     std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashMap, HashSet, VecDeque},
         future::Future,
         ops::DerefMut,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
         },
-        time::SystemTime,
+        time::Duration,
     },
     tokio::{
         sync::{
             mpsc::{self},
             oneshot, Notify, RwLock,
         },
-        task::JoinSet,
-        time::{interval, Duration, Instant},
+        task::{self, AbortHandle, JoinSet},
+        time::Instant,
     },
     tracing::{debug, error, info, instrument},
 };
@@ -56,6 +57,72 @@ pub trait RootedTransactionSignatures {
         &self,
     ) -> Option<mpsc::UnboundedReceiver<RootedTransactionsUpdateSignature>>;
     async fn get_transaction_commitment(&self, signature: Signature) -> Option<CommitmentLevel>;
+}
+
+pub struct WatchSignatureCommand {
+    signature: Signature,
+    callback: oneshot::Sender<OwnedTxSubscription>,
+}
+
+pub struct UnwatchSignatureCommand {
+    signature: Signature,
+}
+
+pub enum TxStatusSubscriptionCommand {
+    WatchSignature(WatchSignatureCommand),
+    UnwatchSignature(UnwatchSignatureCommand),
+}
+
+pub struct TransactionStatusReceiver {
+    ///
+    /// Watched signatures and their commitment level
+    ///
+    rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
+    ///
+    /// Command-and-Control channel to send commands to the subscription
+    ///
+    cnc_tx: mpsc::UnboundedSender<TxStatusSubscriptionCommand>,
+}
+
+///
+/// Owned transaction subscription proof, that can be used to unsubscribe.
+///
+/// Once all references to this object are dropped, the subscription will be automatically unsubscribed.
+///
+pub struct OwnedTxSubscription {
+    signature: Signature,
+    cnc_tx: mpsc::UnboundedSender<TxStatusSubscriptionCommand>,
+}
+
+impl Drop for OwnedTxSubscription {
+    fn drop(&mut self) {
+        let unwatch_signature_cmd = UnwatchSignatureCommand {
+            signature: self.signature,
+        };
+        let _ = self
+            .cnc_tx
+            .send(TxStatusSubscriptionCommand::UnwatchSignature(
+                unwatch_signature_cmd,
+            ));
+    }
+}
+
+impl TransactionStatusReceiver {
+    async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)> {
+        self.rx.recv().await
+    }
+
+    async fn watch_signature(&mut self, signature: Signature) -> OwnedTxSubscription {
+        let (tx, rx) = oneshot::channel();
+        let watch_cmd = WatchSignatureCommand {
+            signature,
+            callback: tx,
+        };
+        self.cnc_tx
+            .send(TxStatusSubscriptionCommand::WatchSignature(watch_cmd))
+            .expect("failed to send watch command");
+        rx.await.expect("failed to receive watch command result")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -114,6 +181,7 @@ impl RootedTransactionSignatures for RootedTransactions {
     }
 }
 
+#[deprecated(note = "uses GrpcTxSubscribeAdapter instead")]
 impl RootedTransactions {
     pub async fn new(grpc: &GeyserSubscriber) -> anyhow::Result<Self> {
         let shutdown = Arc::new(Notify::new());
@@ -234,7 +302,7 @@ impl RootedTransactions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SendTransactionRequest {
     pub signature: Signature,
     pub transaction: VersionedTransaction,
@@ -253,7 +321,7 @@ impl SendTransactionsPool {
         config: ConfigSendTransactionService,
         block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
         rooted_transactions: Arc<dyn RootedTransactionSignatures + Send + Sync + 'static>,
-        tx_sender: Arc<dyn TxSender + Send + Sync + 'static>,
+        tx_sender: Arc<dyn TxChannel + Send + Sync + 'static>,
     ) -> (Self, impl Future<Output = ()>) {
         let (new_transactions_tx, new_transactions_rx) = mpsc::unbounded_channel();
         let signature_updates = rooted_transactions
@@ -264,12 +332,15 @@ impl SendTransactionsPool {
             config,
             block_height_service,
             rooted_transactions,
-            tx_sender,
+            tx_channel: tx_sender,
             new_transactions_rx,
             signature_updates,
-            tasks: JoinSet::new(),
             transactions: HashMap::new(),
             retry_schedule: BTreeMap::new(),
+            connecting_map: Default::default(),
+            connecting_tasks: JoinSet::new(),
+            send_map: Default::default(),
+            send_tasks: JoinSet::new(),
         };
 
         let (cnc_tx, cnc_rx) = mpsc::channel(10);
@@ -332,36 +403,7 @@ impl SendTransactionInfo {
 struct SendTransactionTaskResult {
     id: SendTransactionInfoId,
     signature: Signature,
-    retry_timestamp: TransactionRetryTimestamp,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct TransactionRetryTimestamp {
-    timestamp: u128,
-}
-
-impl From<SystemTime> for TransactionRetryTimestamp {
-    fn from(st: SystemTime) -> Self {
-        let elapsed = st
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("failed to calculate timestamp from UNIX_EPOCH");
-        Self {
-            timestamp: elapsed.as_millis() / 10,
-        }
-    }
-}
-
-impl TransactionRetryTimestamp {
-    fn now() -> Self {
-        SystemTime::now().into()
-    }
-
-    fn next(delay: Duration) -> Self {
-        SystemTime::now()
-            .checked_add(delay)
-            .expect("failed to calculate SystemTime")
-            .into()
-    }
+    retry_timestamp: Instant,
 }
 
 pub enum SendTransactionPoolCommand {
@@ -369,40 +411,105 @@ pub enum SendTransactionPoolCommand {
 }
 
 #[async_trait::async_trait]
-pub trait TxSender {
+pub trait TxChannelPermit {
     async fn send_transaction(
-        &self,
+        self,
         id: SendTransactionInfoId,
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
-        leader_forward_count: usize,
     ) -> ();
 }
 
+pub struct BoxedTxChannelPermit {
+    inner: Box<
+        dyn FnOnce(SendTransactionInfoId, Signature, Arc<Vec<u8>>) -> BoxFuture<'static, ()> + Send,
+    >,
+}
+
+impl BoxedTxChannelPermit {
+    pub fn new<T>(pointee: T) -> Self
+    where
+        T: TxChannelPermit + Send + 'static,
+    {
+        Self {
+            inner: Box::new(move |id, sig, wire_tx| pointee.send_transaction(id, sig, wire_tx)),
+        }
+    }
+}
+
 #[async_trait::async_trait]
-impl TxSender for QuicClient {
+impl TxChannelPermit for BoxedTxChannelPermit {
     async fn send_transaction(
-        &self,
+        self,
         id: SendTransactionInfoId,
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
-        leader_forward_count: usize,
     ) {
-        QuicClient::send_transaction(self, id, signature, wire_transaction, leader_forward_count)
-            .await
+        (self.inner)(id, signature, wire_transaction).await;
     }
+}
+
+///
+/// Back-pressured transaction channel
+///
+#[async_trait::async_trait]
+pub trait TxChannel {
+    ///
+    /// Reserve a permit to send a transaction
+    ///
+    async fn reserve(&self, leader_foward_count: usize) -> Option<BoxedTxChannelPermit>;
+}
+
+#[async_trait::async_trait]
+impl TxChannelPermit for QuicSendTxPermit {
+    async fn send_transaction(
+        self,
+        id: SendTransactionInfoId,
+        signature: Signature,
+        wire_transaction: Arc<Vec<u8>>,
+    ) {
+        QuicSendTxPermit::send_transaction(self, id, signature, wire_transaction).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl TxChannel for QuicClient {
+    async fn reserve(&self, leader_foward_count: usize) -> Option<BoxedTxChannelPermit> {
+        QuicClient::reserve_send_permit(self, leader_foward_count)
+            .await
+            .map(BoxedTxChannelPermit::new)
+    }
+}
+
+pub struct TransactionInfo {
+    pub id: SendTransactionInfoId,
+    pub signature: Signature,
+    pub wire_transaction: Arc<Vec<u8>>,
 }
 
 pub struct SendTransactionsPoolTask {
     config: ConfigSendTransactionService,
     block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
     rooted_transactions: Arc<dyn RootedTransactionSignatures + Send + Sync + 'static>,
-    tx_sender: Arc<dyn TxSender + Send + Sync + 'static>,
+    tx_channel: Arc<dyn TxChannel + Send + Sync + 'static>,
+
+    /// Connecting map holds pending connection request with the underlying tx sender.
+    /// We split connection handling from transaction sending logic for flushing purposes.
+    connecting_map: HashMap<task::Id, TransactionInfo>,
+    /// Connecting task are stored in its seperated joinset.
+    connecting_tasks: JoinSet<Option<BoxedTxChannelPermit>>,
+
+    /// Send map holds pending send request with the underlying tx sender.
+    /// Pending sends are transaction that acquired a TxSenderPermit prior to be send.
+    send_map: HashMap<task::Id, (SendTransactionInfoId, Signature)>,
+    /// Send task are stored in its seperated joinset.
+    send_tasks: JoinSet<SendTransactionTaskResult>,
+
     new_transactions_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
     signature_updates: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
-    tasks: JoinSet<SendTransactionTaskResult>,
+
     transactions: HashMap<Signature, SendTransactionInfo>,
-    retry_schedule: BTreeMap<TransactionRetryTimestamp, Vec<Signature>>,
+    retry_schedule: BTreeMap<Instant, VecDeque<Signature>>,
 }
 
 impl SendTransactionsPoolTask {
@@ -410,9 +517,13 @@ impl SendTransactionsPoolTask {
         mut self,
         mut cnc_rx: mpsc::Receiver<SendTransactionPoolCommand>, // command-and-control channel
     ) {
-        let mut retry_interval = interval(Duration::from_millis(10));
-
+        // let mut retry_interval = interval(Duration::from_millis(10));
         loop {
+            metrics::sts_pool_set_size(self.transactions.len());
+
+            let next_retry_deadline = self
+                .next_retry_deadline()
+                .unwrap_or(Instant::now() + self.config.retry_rate);
             tokio::select! {
                 maybe = cnc_rx.recv() => {
                     match maybe {
@@ -423,25 +534,28 @@ impl SendTransactionsPoolTask {
                         None => break,
                     }
                 },
-                maybe_newtx = self.new_transactions_rx.recv() => {
-                    match maybe_newtx {
+                _ = tokio::time::sleep_until(next_retry_deadline) => {
+                    self.retry_next_in_schedule().await;
+                }
+
+                maybe = self.new_transactions_rx.recv(), if next_retry_deadline.elapsed() == Duration::ZERO => {
+                    match maybe {
                         Some(newtx) => self.add_new_transaction(newtx).await,
                         None => {
-                            tracing::warn!("new transactions channel is closed");
-                            break
+                            error!("new transactions channel is closed");
+                            break;
                         }
                     }
-                },
-                Some(result) = self.tasks.join_next() => {
-                    match result {
-                        Ok(ok) => self.handle_joined_task(ok).await,
-                        Err(error) => error!("failed to join send task: {error:?}"),
-                    };
-                    metrics::sts_inflight_set_size(self.tasks.len());
-                },
-                _ = retry_interval.tick() => {
-                    self.retry_scheduled_transactions().await
-                },
+                }
+                Some(result) = self.connecting_tasks.join_next_with_id() => {
+                    self.handle_connecting_result(result).await;
+                }
+                Some(result) = self.send_tasks.join_next_with_id() => {
+                    self.handle_send_result(result).await;
+                }
+                _ = tokio::time::sleep_until(next_retry_deadline) => {
+                    self.retry_next_in_schedule().await;
+                }
                 maybe_signature_update = self.signature_updates.recv() => {
                     match maybe_signature_update {
                         Some((signature, commitment)) => self.update_signature(signature, commitment).await,
@@ -455,13 +569,111 @@ impl SendTransactionsPoolTask {
         }
     }
 
+    async fn handle_connecting_result(
+        &mut self,
+        result: Result<(task::Id, Option<BoxedTxChannelPermit>), task::JoinError>,
+    ) {
+        match result {
+            Ok((task_id, maybe_permit)) => {
+                let tx_info = self
+                    .connecting_map
+                    .remove(&task_id)
+                    .expect("unknown task id");
+                match maybe_permit {
+                    Some(permit) => self.spawn_send(permit, tx_info),
+                    None => {
+                        error!("upcoming leaders unavailable");
+                    }
+                }
+            }
+            Err(e) => {
+                let task_id = e.id();
+                error!("connecting task panic with {:?}", e);
+                let tx_info = self
+                    .connecting_map
+                    .remove(&task_id)
+                    .expect("unknown task id");
+                self.schedule_transaction_retry(
+                    tx_info.signature,
+                    Instant::now() + self.config.retry_rate,
+                )
+                .await;
+            }
+        }
+    }
+
+    fn spawn_send(&mut self, permit: BoxedTxChannelPermit, tx_info: TransactionInfo) {
+        let retry_rate = self.config.retry_rate;
+        let abort_handle = self.send_tasks.spawn(async move {
+            permit
+                .send_transaction(tx_info.id, tx_info.signature, tx_info.wire_transaction)
+                .await;
+            SendTransactionTaskResult {
+                id: tx_info.id,
+                signature: tx_info.signature,
+                retry_timestamp: Instant::now() + retry_rate,
+            }
+        });
+        self.send_map
+            .insert(abort_handle.id(), (tx_info.id, tx_info.signature));
+    }
+
+    async fn handle_send_result(
+        &mut self,
+        result: Result<(task::Id, SendTransactionTaskResult), task::JoinError>,
+    ) {
+        let send_tx_result = match result {
+            Ok((task_id, result)) => {
+                let _ = self.send_map.remove(&task_id).expect("unknown task id");
+                result
+            }
+            Err(e) => {
+                let task_id = e.id();
+                let (tx_id, tx_sig) = self.send_map.remove(&task_id).expect("unknown task id");
+                error!("send task for tx {tx_sig} panic with {e:?}");
+                SendTransactionTaskResult {
+                    retry_timestamp: Instant::now() + self.config.retry_rate,
+                    id: tx_id,
+                    signature: tx_sig,
+                }
+            }
+        };
+
+        if let Some(info) = self.transactions.get_mut(&send_tx_result.signature) {
+            if info.id == send_tx_result.id {
+                info.total_retries += 1;
+                self.schedule_transaction_retry(
+                    send_tx_result.signature,
+                    send_tx_result.retry_timestamp,
+                )
+                .await;
+            }
+        }
+    }
+
+    ///
+    /// Flush will :
+    ///
+    /// 1. interrupt any connection attempt prior to calling this method.
+    /// 2. Wait for all pending send tasks to complete.
+    /// 3. Reschedule the managed retry attempt of each send transaction.
+    /// 4. Resechdule the connection attempt interrupt at step (1).
+    ///
     async fn flush_transactions(&mut self) {
-        while let Some(result) = self.tasks.join_next().await {
-            match result {
-                Ok(ok) => self.handle_joined_task(ok).await,
-                Err(error) => error!("failed to join send task: {error:?}"),
-            };
-            metrics::sts_inflight_set_size(self.tasks.len());
+        self.connecting_tasks.abort_all();
+        let connectiong_map = std::mem::take(&mut self.connecting_map);
+
+        for tx_info in connectiong_map.into_values() {
+            // This is not good practice, but this code work because how ConnectionCacheIdentity flusher is implemented.
+            // When the connection cache identity manager starts the flushing process, it clears out all connections certificates
+            // AND it prevents concurrent connection from happening while the flush is in process.
+            // Doing spawn_connect will not block the current flush process and they will internally wait for
+            // new connection to be available.
+            self.spawn_connect(tx_info.id, tx_info.signature, tx_info.wire_transaction);
+        }
+
+        while let Some(result) = self.send_tasks.join_next_with_id().await {
+            self.handle_send_result(result).await;
         }
     }
 
@@ -475,6 +687,7 @@ impl SendTransactionsPoolTask {
             max_retries,
         }: SendTransactionRequest,
     ) {
+        // Resolve the proper max retries
         let max_retries = max_retries
             .or(self.config.default_max_retries)
             .unwrap_or(self.config.service_max_retries)
@@ -503,6 +716,8 @@ impl SendTransactionsPoolTask {
             .rooted_transactions
             .get_transaction_commitment(signature)
             .await;
+
+        // If the transaction is finalized we
         if tx_commitment == Some(CommitmentLevel::Finalized) {
             info!(%signature, "new transaction already finalized");
             return;
@@ -545,11 +760,11 @@ impl SendTransactionsPoolTask {
         );
 
         if landed {
-            let retry_timestamp = TransactionRetryTimestamp::next(self.config.retry_rate);
+            let retry_timestamp = Instant::now() + self.config.retry_rate;
             self.schedule_transaction_retry(signature, retry_timestamp)
                 .await;
         } else {
-            self.spawn_send_transaction(id, signature, wire_transaction);
+            self.spawn_connect(id, signature, wire_transaction);
         }
     }
 
@@ -563,54 +778,28 @@ impl SendTransactionsPoolTask {
         }
     }
 
-    fn spawn_send_transaction(
+    fn spawn_connect(
         &mut self,
         id: SendTransactionInfoId,
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
     ) {
-        let tx_sender = Arc::clone(&self.tx_sender);
         let leader_forward_count = self.config.leader_forward_count;
-        let retry_timestamp = TransactionRetryTimestamp::next(self.config.retry_rate);
-
-        self.tasks.spawn(async move {
-            info!(id, %signature, "trying to send transaction");
-
-            tx_sender
-                .send_transaction(id, signature, wire_transaction, leader_forward_count)
-                .await;
-
-            SendTransactionTaskResult {
+        let tx_channel = Arc::clone(&self.tx_channel);
+        let abort_handle = self
+            .connecting_tasks
+            .spawn(async move { tx_channel.reserve(leader_forward_count).await });
+        self.connecting_map.insert(
+            abort_handle.id(),
+            TransactionInfo {
                 id,
                 signature,
-                retry_timestamp,
-            }
-        });
-        metrics::sts_inflight_set_size(self.tasks.len());
+                wire_transaction,
+            },
+        );
     }
 
-    async fn handle_joined_task(
-        &mut self,
-        SendTransactionTaskResult {
-            id,
-            signature,
-            retry_timestamp,
-        }: SendTransactionTaskResult,
-    ) {
-        if let Some(info) = self.transactions.get_mut(&signature) {
-            if info.id == id {
-                info.total_retries += 1;
-                self.schedule_transaction_retry(signature, retry_timestamp)
-                    .await;
-            }
-        }
-    }
-
-    async fn schedule_transaction_retry(
-        &mut self,
-        signature: Signature,
-        retry_timestamp: TransactionRetryTimestamp,
-    ) {
+    async fn schedule_transaction_retry(&mut self, signature: Signature, retry_timestamp: Instant) {
         let retry_required = if self.config.relay_only_mode {
             self.transactions
                 .get(&signature)
@@ -624,55 +813,57 @@ impl SendTransactionsPoolTask {
             self.retry_schedule
                 .entry(retry_timestamp)
                 .or_default()
-                .push(signature);
+                .push_back(signature);
         } else {
             self.remove_transaction(signature, "max_retries reached")
                 .await;
         }
     }
 
-    #[instrument(skip_all)]
-    async fn retry_scheduled_transactions(&mut self) {
-        let st_now = TransactionRetryTimestamp::now();
-        let mut scheduled = vec![];
-        loop {
-            match self.retry_schedule.keys().next().copied() {
-                Some(st) if st <= st_now => {
-                    scheduled.push(self.retry_schedule.remove(&st));
-                }
-                _ => break,
-            }
-        }
+    ///
+    /// Returns the next retry deadline if any.
+    ///
+    fn next_retry_deadline(&self) -> Option<Instant> {
+        self.retry_schedule.keys().next().cloned()
+    }
 
-        let maybe_block_height = self
-            .block_height_service
-            .get_block_height_for_commitment(CommitmentLevel::Confirmed)
-            .await;
+    ///
+    /// Tries to retry the next transaction in the schedule
+    ///
+    /// If the transaction has expired due to block height, it will be removed and the permit will be returned.
+    async fn retry_next_in_schedule(&mut self) {
+        if let Some(mut entry) = self.retry_schedule.first_entry() {
+            if let Some(signature) = entry.get_mut().pop_front() {
+                if let Some(info) = self.transactions.get(&signature) {
+                    let latest_block_height = self
+                        .block_height_service
+                        .get_block_height_for_commitment(CommitmentLevel::Confirmed)
+                        .await;
+                    if let Some(block_height) = latest_block_height {
+                        if info.last_valid_block_height < block_height {
+                            self.remove_transaction(signature, "block_height expired")
+                                .await;
+                            return;
+                        }
+                    }
 
-        let retry_timestamp = TransactionRetryTimestamp::next(self.config.retry_rate);
-        for signature in scheduled.into_iter().flatten().flatten() {
-            if let Some(info) = self.transactions.get(&signature) {
-                if let Some(block_height) = maybe_block_height {
-                    if info.last_valid_block_height < block_height {
-                        self.remove_transaction(signature, "block_height expired")
+                    if info.total_retries <= info.max_retries {
+                        self.spawn_connect(
+                            info.id,
+                            info.signature,
+                            Arc::clone(&info.wire_transaction),
+                        );
+                    } else {
+                        let retry_timestamp = Instant::now() + self.config.retry_rate;
+                        self.schedule_transaction_retry(signature, retry_timestamp)
                             .await;
-                        continue;
                     }
                 }
-
-                if info.total_retries <= info.max_retries {
-                    self.spawn_send_transaction(
-                        info.id,
-                        info.signature,
-                        Arc::clone(&info.wire_transaction),
-                    );
-                } else {
-                    self.schedule_transaction_retry(signature, retry_timestamp)
-                        .await;
-                }
+            } else {
+                // If the queue is empty, remove the key
+                self.retry_schedule.pop_first();
             }
         }
-        metrics::sts_pool_set_size(self.transactions.len());
     }
 
     #[instrument(skip_all, fields(signature = %signature, commitment = ?commitment))]

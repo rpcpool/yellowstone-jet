@@ -1,6 +1,7 @@
 mod testkit;
 
 use {
+    core::panic,
     solana_sdk::{
         hash::Hash,
         message::{v0, VersionedMessage},
@@ -10,16 +11,17 @@ use {
         transaction::VersionedTransaction,
     },
     std::{
-        sync::{Arc, RwLock as StdRwLock},
+        sync::{Arc, Mutex, RwLock as StdRwLock},
         time::Duration,
     },
     testkit::default_config_transaction,
-    tokio::sync::{oneshot, RwLock},
+    tokio::sync::{broadcast, oneshot, Barrier, RwLock},
     yellowstone_jet::{
         blockhash_queue::testkit::MockBlockhashQueue,
+        setup_tracing,
         transactions::{
-            testkit::MockRootedTransactions, SendTransactionInfoId, SendTransactionRequest,
-            SendTransactionsPool, TxSender,
+            testkit::MockRootedTransactions, BoxedTxChannelPermit, SendTransactionInfoId,
+            SendTransactionRequest, SendTransactionsPool, TxChannel, TxChannelPermit,
         },
     },
 };
@@ -53,30 +55,95 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
 }
 
 #[derive(Clone, Default)]
-struct SpyTxSender {
-    #[allow(clippy::type_complexity)]
-    calls: Arc<StdRwLock<Vec<(SendTransactionInfoId, Signature, Arc<Vec<u8>>, usize)>>>,
+enum SpyTxChannelMode {
+    FailSend,
+    FailPermit,
+    #[default]
+    Succeed,
 }
 
-impl SpyTxSender {
-    fn call_count(&self) -> usize {
-        self.calls.read().unwrap().len()
+#[derive(Clone)]
+struct SpyTxChannel {
+    #[allow(clippy::type_complexity)]
+    calls: Arc<StdRwLock<Vec<(SendTransactionInfoId, Signature, Arc<Vec<u8>>)>>>,
+    mode: Arc<Mutex<SpyTxChannelMode>>,
+    tx_call_notify: broadcast::Sender<Signature>,
+}
+
+impl Default for SpyTxChannel {
+    fn default() -> Self {
+        let (tx_call_notify, _) = broadcast::channel(10);
+        Self {
+            calls: Arc::new(StdRwLock::new(Vec::new())),
+            mode: Arc::new(Mutex::new(SpyTxChannelMode::Succeed)),
+            tx_call_notify,
+        }
     }
 }
 
+impl SpyTxChannel {
+    fn call_count(&self) -> usize {
+        self.calls.read().unwrap().len()
+    }
+
+    fn set_mode(&self, mode: SpyTxChannelMode) {
+        *self.mode.lock().unwrap() = mode;
+    }
+
+    fn subscribe_calls(&self) -> broadcast::Receiver<Signature> {
+        self.tx_call_notify.subscribe()
+    }
+}
+
+struct SpyTxChannelPermit {
+    calls: Arc<StdRwLock<Vec<(SendTransactionInfoId, Signature, Arc<Vec<u8>>)>>>,
+    mode: Arc<Mutex<SpyTxChannelMode>>,
+    tx_call_notify: broadcast::Sender<Signature>,
+}
+
 #[async_trait::async_trait]
-impl TxSender for SpyTxSender {
+impl TxChannelPermit for SpyTxChannelPermit {
     async fn send_transaction(
-        &self,
+        self,
         id: SendTransactionInfoId,
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
-        leader_forward_count: usize,
     ) {
         self.calls
             .write()
             .unwrap()
-            .push((id, signature, wire_transaction, leader_forward_count));
+            .push((id, signature, wire_transaction));
+
+        let _ = self.tx_call_notify.send(signature);
+        let mode = { self.mode.lock().unwrap().clone() };
+        match mode {
+            SpyTxChannelMode::FailSend => {
+                panic!("Error sending transaction");
+            }
+            SpyTxChannelMode::Succeed => {}
+            _ => unreachable!("Invalid mode"),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TxChannel for SpyTxChannel {
+    async fn reserve(&self, _leader_forward_count: usize) -> Option<BoxedTxChannelPermit> {
+        let mode = Arc::clone(&self.mode);
+        let curr_mode = { mode.lock().unwrap().clone() };
+        match curr_mode {
+            SpyTxChannelMode::FailPermit => {
+                panic!("Error reserving permit");
+            }
+            _ => {}
+        }
+        let calls = Arc::clone(&self.calls);
+        let tx_call_notify = self.tx_call_notify.clone();
+        Some(BoxedTxChannelPermit::new(SpyTxChannelPermit {
+            calls,
+            mode,
+            tx_call_notify,
+        }))
     }
 }
 
@@ -85,22 +152,35 @@ async fn test_transaction_send_successful_lifecycle() {
     let (tx, mut tx_recv) = tokio::sync::mpsc::channel(100);
 
     pub struct MockTxSender {
-        tx: tokio::sync::mpsc::Sender<(SendTransactionInfoId, Signature, Arc<Vec<u8>>, usize)>,
+        tx: tokio::sync::mpsc::Sender<(SendTransactionInfoId, Signature, Arc<Vec<u8>>)>,
+    }
+
+    pub struct MockTxChannelPermit {
+        tx: tokio::sync::mpsc::Sender<(SendTransactionInfoId, Signature, Arc<Vec<u8>>)>,
     }
 
     #[async_trait::async_trait]
-    impl TxSender for MockTxSender {
+    impl TxChannelPermit for MockTxChannelPermit {
         async fn send_transaction(
-            &self,
+            self,
             id: SendTransactionInfoId,
             signature: Signature,
             wire_transaction: Arc<Vec<u8>>,
-            leader_forward_count: usize,
         ) {
             self.tx
-                .send((id, signature, wire_transaction, leader_forward_count))
+                .send((id, signature, wire_transaction))
                 .await
                 .expect("Error sending transaction");
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TxChannel for MockTxSender {
+        async fn reserve(&self, _leader_forward_count: usize) -> Option<BoxedTxChannelPermit> {
+            let permit = MockTxChannelPermit {
+                tx: self.tx.clone(),
+            };
+            Some(BoxedTxChannelPermit::new(permit))
         }
     }
 
@@ -108,7 +188,7 @@ async fn test_transaction_send_successful_lifecycle() {
 
     let (spy_tx, spy_rx) = oneshot::channel();
     let h1 = tokio::spawn(async move {
-        let (_, _sig, wire_tx, _) = tx_recv.recv().await.expect("Channel was closed");
+        let (_, _sig, wire_tx) = tx_recv.recv().await.expect("Channel was closed");
         let transaction = bincode::deserialize::<VersionedTransaction>(&wire_tx)
             .expect("Error deserializing from bincode");
         spy_tx.send(transaction).expect("Error sending transaction");
@@ -158,7 +238,7 @@ async fn flushing_without_any_tx_in_queue_should_be_noop() {
 
     block_height_service.increase_block_height(tx_hash).await;
 
-    let spy_tx_sender = SpyTxSender::default();
+    let spy_tx_sender = SpyTxChannel::default();
     let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
         default_config_transaction(),
         Arc::new(block_height_service),
@@ -168,7 +248,6 @@ async fn flushing_without_any_tx_in_queue_should_be_noop() {
     .await;
 
     let _handle = tokio::spawn(send_tx_pool_fut);
-
     // Should not fail
     send_transactions_pool.flush().await;
     assert_eq!(spy_tx_sender.call_count(), 0);
@@ -181,40 +260,60 @@ async fn it_should_flush_pending_tx() {
     let tx_hash = Hash::new_unique();
 
     block_height_service.increase_block_height(tx_hash).await;
-
-    #[derive(Clone)]
-    struct BlockingMockTxSender {
-        wait: Arc<tokio::sync::Notify>,
+    struct BlockingMockTxSendPermit {
         calls: Arc<RwLock<Vec<Signature>>>,
+        wait: Arc<tokio::sync::Notify>,
+        barrier: Arc<Barrier>,
     }
 
     #[async_trait::async_trait]
-    impl TxSender for BlockingMockTxSender {
+    impl TxChannelPermit for BlockingMockTxSendPermit {
         async fn send_transaction(
-            &self,
+            self,
             _id: SendTransactionInfoId,
-            _signature: Signature,
+            signature: Signature,
             _wire_transaction: Arc<Vec<u8>>,
-            _leader_forward_count: usize,
         ) {
+            self.barrier.wait().await;
             self.wait.notified().await;
-            {
-                let mut calls = self.calls.write().await;
-                calls.push(_signature);
-            }
+            self.calls.write().await.push(signature);
         }
     }
 
-    impl BlockingMockTxSender {
+    #[derive(Clone)]
+    struct BlockingMockTxChannel {
+        wait: Arc<tokio::sync::Notify>,
+        calls: Arc<RwLock<Vec<Signature>>>,
+        barrier: Arc<Barrier>,
+    }
+
+    #[async_trait::async_trait]
+    impl TxChannel for BlockingMockTxChannel {
+        async fn reserve(&self, _leader_forward_count: usize) -> Option<BoxedTxChannelPermit> {
+            let calls = Arc::clone(&self.calls);
+            let wait = Arc::clone(&self.wait);
+            let barrier = Arc::clone(&self.barrier);
+            let permit = BlockingMockTxSendPermit {
+                calls,
+                wait,
+                barrier,
+            };
+            Some(BoxedTxChannelPermit::new(permit))
+        }
+    }
+
+    impl BlockingMockTxChannel {
         async fn calls(&self) -> Vec<Signature> {
             self.calls.read().await.clone()
         }
     }
 
     let unblock_signal = Arc::new(tokio::sync::Notify::new());
-    let mock_tx_sender = BlockingMockTxSender {
+    let barrier = Arc::new(Barrier::new(3 + 1)); // 3 = number of tasks, 1 = main test thread
+    let mock_tx_sender = BlockingMockTxChannel {
         wait: Arc::clone(&unblock_signal),
         calls: Arc::new(RwLock::new(Vec::new())),
+        barrier: Arc::clone(&barrier),
     };
 
     let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
@@ -247,6 +346,7 @@ async fn it_should_flush_pending_tx() {
         .expect("Error sending transaction to pool");
 
     // Flush will be blocking
+    barrier.wait().await;
     let send_tx_pool2 = send_transactions_pool.clone();
     let flush_handle = tokio::spawn(async move {
         send_tx_pool2.flush().await;
@@ -268,3 +368,85 @@ async fn it_should_flush_pending_tx() {
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(actual_sig_set, expected_sig_set);
 }
+
+#[tokio::test]
+async fn it_should_retry_failed_send_transactions() {
+    let rooted_transactions = MockRootedTransactions::new();
+    let block_height_service = MockBlockhashQueue::new();
+    let tx_hash = Hash::new_unique();
+    let retry_count = 3;
+    let tx1 = create_send_transaction_request(tx_hash, retry_count);
+    block_height_service.increase_block_height(tx_hash).await;
+
+    let spy_tx_sender = SpyTxChannel::default();
+    spy_tx_sender.set_mode(SpyTxChannelMode::FailSend);
+
+    let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
+        default_config_transaction(),
+        Arc::new(block_height_service),
+        Arc::new(rooted_transactions),
+        Arc::new(spy_tx_sender.clone()),
+    )
+    .await;
+
+    let _handle = tokio::spawn(send_tx_pool_fut);
+
+    let mut calls_rx = spy_tx_sender.subscribe_calls();
+    send_transactions_pool
+        .send_transaction(tx1.clone())
+        .expect("Error sending transaction to pool");
+
+    let mut actual_retry_cnt = 0;
+    while let Ok(sig) = calls_rx.recv().await {
+        tracing::info!("Received signature: {:?}", sig);
+        assert!(sig == tx1.signature);
+        actual_retry_cnt += 1;
+        if actual_retry_cnt == retry_count {
+            break;
+        }
+    }
+
+    assert_eq!(actual_retry_cnt, retry_count);
+    assert_eq!(spy_tx_sender.call_count(), 3);
+}
+
+// #[tokio::test]
+// async fn it_should_retry_failed_permit_tx() {
+//     let rooted_transactions = MockRootedTransactions::new();
+//     let block_height_service = MockBlockhashQueue::new();
+//     let tx_hash = Hash::new_unique();
+//     let retry_count = 3;
+//     let tx1 = create_send_transaction_request(tx_hash, retry_count);
+//     block_height_service.increase_block_height(tx_hash).await;
+
+//     let spy_tx_sender = SpyTxChannel::default();
+//     spy_tx_sender.set_mode(SpyTxChannelMode::FailPermit);
+
+//     let (send_transactions_pool, send_tx_pool_fut) = SendTransactionsPool::spawn(
+//         default_config_transaction(),
+//         Arc::new(block_height_service),
+//         Arc::new(rooted_transactions),
+//         Arc::new(spy_tx_sender.clone()),
+//     )
+//     .await;
+
+//     let _handle = tokio::spawn(send_tx_pool_fut);
+
+//     let mut calls_rx = spy_tx_sender.subscribe_calls();
+//     send_transactions_pool
+//         .send_transaction(tx1.clone())
+//         .expect("Error sending transaction to pool");
+
+//     let mut actual_retry_cnt = 0;
+//     while let Ok(sig) = calls_rx.recv().await {
+//         tracing::info!("Received signature: {:?}", sig);
+//         assert!(sig == tx1.signature);
+//         actual_retry_cnt += 1;
+//         if actual_retry_cnt == retry_count {
+//             break;
+//         }
+//     }
+
+//     assert_eq!(actual_retry_cnt, retry_count);
+//     assert_eq!(spy_tx_sender.call_count(), 3);
+// }
