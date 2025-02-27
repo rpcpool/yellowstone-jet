@@ -20,21 +20,35 @@ use {
         util::ms_since_epoch,
     },
     anyhow::{Context, Result},
+    base64::prelude::{Engine, BASE64_STANDARD},
+    serde::{Deserialize, Serialize},
     solana_client::rpc_config::RpcSendTransactionConfig,
     solana_sdk::transaction::VersionedTransaction,
     solana_transaction_status::UiTransactionEncoding,
 };
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LegacyPayload {
+    pub transaction: String, // base58/base64 encoded transaction
+    pub config: RpcSendTransactionConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<u64>,
+}
+
 #[derive(Debug)]
 pub enum TransactionPayload {
-    Legacy(Vec<u8>),
+    Legacy(LegacyPayload),
     New(TransactionWrapper),
 }
 
 impl TransactionPayload {
     pub fn from_proto(tx: PublishTransaction) -> Result<Self> {
         match tx.payload {
-            Some(Payload::LegacyPayload(bytes)) => Ok(Self::Legacy(bytes)),
+            Some(Payload::LegacyPayload(bytes)) => {
+                let legacy = serde_json::from_slice(&bytes)
+                    .context("Failed to deserialize legacy JSON payload")?;
+                Ok(Self::Legacy(legacy))
+            }
             Some(Payload::NewPayload(wrapper)) => Ok(Self::New(wrapper)),
             None => Err(anyhow::anyhow!("Empty transaction payload")),
         }
@@ -42,8 +56,10 @@ impl TransactionPayload {
 
     pub fn to_proto(&self) -> PublishTransaction {
         match self {
-            Self::Legacy(bytes) => PublishTransaction {
-                payload: Some(Payload::LegacyPayload(bytes.clone())),
+            Self::Legacy(legacy) => PublishTransaction {
+                payload: Some(Payload::LegacyPayload(
+                    serde_json::to_vec(legacy).expect("Failed to serialize legacy payload"),
+                )),
             },
             Self::New(wrapper) => PublishTransaction {
                 payload: Some(Payload::NewPayload(wrapper.clone())),
@@ -53,10 +69,25 @@ impl TransactionPayload {
 
     pub fn decode(&self) -> Result<(VersionedTransaction, Option<RpcSendTransactionConfig>)> {
         match self {
-            Self::Legacy(bytes) => {
-                let tx = bincode::deserialize(bytes)
-                    .context("Failed to deserialize legacy transaction")?;
-                Ok((tx, None))
+            Self::Legacy(legacy) => {
+                let tx_bytes =
+                    match legacy
+                        .config
+                        .encoding
+                        .unwrap_or(UiTransactionEncoding::Base58)
+                    {
+                        UiTransactionEncoding::Base58 => bs58::decode(&legacy.transaction)
+                            .into_vec()
+                            .context("Failed to decode base58 transaction")?,
+                        UiTransactionEncoding::Base64 => BASE64_STANDARD
+                            .decode(&legacy.transaction)
+                            .context("Failed to decode base64 transaction")?,
+                        _ => return Err(anyhow::anyhow!("Unsupported encoding in legacy payload")),
+                    };
+
+                let tx =
+                    bincode::deserialize(&tx_bytes).context("Failed to deserialize transaction")?;
+                Ok((tx, Some(legacy.config.clone())))
             }
             Self::New(wrapper) => {
                 let tx = bincode::deserialize(&wrapper.transaction)
@@ -66,6 +97,7 @@ impl TransactionPayload {
             }
         }
     }
+
     pub fn from_transaction(
         transaction: &VersionedTransaction,
         config: RpcSendTransactionConfig,
@@ -81,20 +113,17 @@ impl TransactionPayload {
             }
         }
 
-        let serialized_transaction = bincode::serialize(transaction)?;
-
-        let wrapper = TransactionWrapper {
-            transaction: serialized_transaction,
-            config: Some(TransactionConfig {
-                max_retries: config.max_retries.map(|r| r as u32),
-                blocklist_pdas: vec![],
-                skip_preflight: config.skip_preflight,
-                skip_sanitize: config.skip_sanitize,
-            }),
-            timestamp: Some(ms_since_epoch()),
+        let tx_bytes = bincode::serialize(transaction)?;
+        let tx_str = match encoding {
+            UiTransactionEncoding::Base58 => bs58::encode(tx_bytes).into_string(),
+            _ => BASE64_STANDARD.encode(tx_bytes),
         };
 
-        Ok(Self::New(wrapper))
+        Ok(Self::Legacy(LegacyPayload {
+            transaction: tx_str,
+            config,
+            timestamp: Some(ms_since_epoch()),
+        }))
     }
 }
 
@@ -129,18 +158,30 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_compatibility() {
+    fn test_legacy_format() {
         let tx = VersionedTransaction::default();
-        let legacy_bytes = bincode::serialize(&tx).unwrap();
+        let config = RpcSendTransactionConfig {
+            encoding: Some(UiTransactionEncoding::Base58),
+            skip_preflight: true,
+            skip_sanitize: true,
+            ..Default::default()
+        };
 
-        let payload = TransactionPayload::Legacy(legacy_bytes);
+        // Create legacy payload
+        let payload = TransactionPayload::from_transaction(&tx, config.clone()).unwrap();
+
+        // Convert to proto and back
         let proto_tx = payload.to_proto();
         let decoded = TransactionPayload::from_proto(proto_tx).unwrap();
 
-        let (decoded_tx, config) = decoded.decode().unwrap();
-        assert!(config.is_none());
+        // Verify transaction and config preserved
+        let (decoded_tx, decoded_config) = decoded.decode().unwrap();
         assert_eq!(decoded_tx.signatures, tx.signatures);
+        assert!(decoded_config.is_some());
+        let decoded_config = decoded_config.unwrap();
+        assert_eq!(decoded_config.skip_preflight, config.skip_preflight);
     }
+
     #[test]
     fn test_new_format_features() {
         let tx = VersionedTransaction::default();

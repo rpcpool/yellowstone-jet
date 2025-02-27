@@ -71,7 +71,12 @@ impl GrpcTransactionHandler {
         transaction: SubscribeTransaction,
     ) -> anyhow::Result<String> {
         let payload = match transaction.payload {
-            Some(Payload::LegacyPayload(bytes)) => TransactionPayload::Legacy(bytes),
+            Some(Payload::LegacyPayload(bytes)) => {
+                // Parse legacy JSON bytes into LegacyPayload
+                let legacy_payload = serde_json::from_slice(&bytes)
+                    .context("Failed to deserialize legacy JSON payload")?;
+                TransactionPayload::Legacy(legacy_payload)
+            }
             Some(Payload::NewPayload(wrapper)) => TransactionPayload::New(wrapper),
             None => return Err(anyhow::anyhow!("Empty transaction payload")),
         };
