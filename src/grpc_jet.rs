@@ -59,7 +59,7 @@ pub struct GrpcTransactionHandler {
 }
 
 impl GrpcTransactionHandler {
-    pub fn new(tx_sender: RpcServerImplSolanaLike) -> Self {
+    pub const fn new(tx_sender: RpcServerImplSolanaLike) -> Self {
         Self { tx_sender }
     }
 
