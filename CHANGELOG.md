@@ -12,7 +12,44 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Features
 
+- Implemented a comprehensive dual-format transaction system:
+  - Legacy format support with base58/base64 encoding options
+  - New structured format with enhanced configuration capabilities
+  - Automatic format detection and graceful degradation
+- Added new transaction handling components:
+  - `TransactionPayload` enum for unified payload handling
+  - `TransactionHandler` for centralized transaction processing
+  - `TransactionDecoder` for reliable payload decoding
+- Enhanced error handling:
+  - Detailed error types with proper error propagation
+  - Improved validation and sanitization checks
+  - Better error messages for debugging
+- Added comprehensive configuration support:
+  - Flexible transaction encoding options
+  - Extended sanitization and preflight checks
+  - Support for blocklist PDAs
+- Improved testing infrastructure:
+  - Unit tests for all payload formats
+  - Integration tests for format conversion
+  - Configuration preservation tests
+
+### Breaking Changes
+
+- Modified transaction payload structure:
+  - Changed base transaction message format
+  - Updated protobuf definitions for compatibility
+  - Modified legacy payload handling
+- Updated RPC interfaces:
+  - New transaction validation flow
+  - Changed configuration parameter handling
+  - Modified response formats for better error reporting
+
 ### Fixes
+
+- Fixed encoding/decoding edge cases in transaction handling
+- Improved error handling for invalid configurations
+- Enhanced transaction validation reliability
+- Fixed configuration preservation through conversion
 
 ## [10.6.0]
 
@@ -25,7 +62,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-- Refactor `SendTransactionsPool`, `SendTransactionsPoolTask`, `RootedTransactions`, `QuicClient`, `ClusterTpuInfo`, `BlockhasQueue` 
+- Refactor `SendTransactionsPool`, `SendTransactionsPoolTask`, `RootedTransactions`, `QuicClient`, `ClusterTpuInfo`, `BlockhasQueue`
 - Added integration test for `SendTransactionsPool`, `IdentityFlusherWaitGroup` and `RpcServer`.
 
 ## [10.5.0]
@@ -40,7 +77,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 ### Fixes
 
 - Added `finish` and `stopped` call in `quic_solana::QuicClientsend_buffer_using_conn` to properly awaits acks making sure transaction are truely handled by
-a remote validator.
+  a remote validator.
 
 ## [10.4.0]
 
