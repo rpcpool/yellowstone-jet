@@ -488,9 +488,6 @@ impl SendTransactionsPoolTask {
                 Some(result) = self.send_tasks.join_next_with_id() => {
                     self.handle_send_result(result).await;
                 }
-                _ = tokio::time::sleep_until(next_retry_deadline) => {
-                    self.retry_next_in_schedule().await;
-                }
                 maybe_signature_update = self.rooted_transactions.recv() => {
                     match maybe_signature_update {
                         Some((signature, commitment)) => self.update_signature(signature, commitment).await,
