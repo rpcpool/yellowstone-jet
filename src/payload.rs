@@ -87,7 +87,7 @@ impl TransactionPayload {
 
                 let tx =
                     bincode::deserialize(&tx_bytes).context("Failed to deserialize transaction")?;
-                Ok((tx, Some(legacy.config.clone())))
+                Ok((tx, Some(legacy.config)))
             }
             Self::New(wrapper) => {
                 let tx = bincode::deserialize(&wrapper.transaction)
@@ -140,9 +140,7 @@ fn convert_transaction_config(proto_config: &TransactionConfig) -> RpcSendTransa
 
 #[cfg(test)]
 mod tests {
-    use crate::util::ms_since_epoch;
-
-    use super::*;
+    use {super::*, crate::util::ms_since_epoch};
 
     fn create_test_wrapper(tx: &VersionedTransaction) -> TransactionWrapper {
         TransactionWrapper {
@@ -168,7 +166,7 @@ mod tests {
         };
 
         // Create legacy payload
-        let payload = TransactionPayload::from_transaction(&tx, config.clone()).unwrap();
+        let payload = TransactionPayload::from_transaction(&tx, config).unwrap();
 
         // Convert to proto and back
         let proto_tx = payload.to_proto();
@@ -273,7 +271,7 @@ mod tests {
         };
 
         // Convert to payload
-        let payload = TransactionPayload::from_transaction(&tx, original_config.clone()).unwrap();
+        let payload = TransactionPayload::from_transaction(&tx, original_config).unwrap();
 
         // Convert back
         let (_, decoded_config) = payload.decode().unwrap();
