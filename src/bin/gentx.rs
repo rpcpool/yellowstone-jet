@@ -40,7 +40,7 @@ use {
         payload::TransactionPayload,
         proto::jet::{
             jet_gateway_client::JetGatewayClient, publish_request::Message as PublishMessage,
-            PublishRequest, PublishResponse,
+            PublishRequest, PublishResponse, PublishTransaction,
         },
         setup_tracing,
     },
@@ -186,8 +186,8 @@ impl TransactionSender {
                 .map_err(Into::into),
             Self::JetGateway { tx } => {
                 let signature = transaction.signatures[0];
-                let payload = TransactionPayload::from_transaction(&transaction, config)?;
-                let proto_tx = payload.to_proto();
+                let payload = TransactionPayload::try_from((&transaction, config))?;
+                let proto_tx = payload.to_proto::<PublishTransaction>();
                 tx.lock()
                     .await
                     .send(PublishRequest {

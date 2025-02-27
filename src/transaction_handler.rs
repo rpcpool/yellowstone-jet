@@ -1,49 +1,80 @@
 use {
     crate::{
-        rpc::invalid_params,
         solana::decode_and_deserialize,
         transactions::{SendTransactionRequest, SendTransactionsPool},
     },
     anyhow::Result,
-    jsonrpsee::types::error::{
-        ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MSG,
-    },
+    jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE},
     solana_client::{
-        client_error::{ClientError, ClientErrorKind},
+        client_error::ClientErrorKind,
         nonblocking::rpc_client::RpcClient,
         rpc_config::{RcpSanitizeTransactionConfig, RpcSimulateTransactionConfig},
         rpc_request::{RpcError, RpcResponseErrorData},
         rpc_response::{Response as RpcResponse, RpcSimulateTransactionResult, RpcVersionInfo},
     },
-    solana_rpc_client_api::{
-        config::RpcSendTransactionConfig,
-        custom_error::{
-            NodeUnhealthyErrorData, JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
-        },
-    },
+    solana_rpc_client_api::config::RpcSendTransactionConfig,
     solana_sdk::{commitment_config::CommitmentConfig, transaction::VersionedTransaction},
     solana_transaction_status::UiTransactionEncoding,
     solana_version::Version,
     std::sync::Arc,
-    tracing::warn,
+    thiserror::Error,
 };
 
-pub struct TransactionHandler<'a> {
-    pub sts: &'a SendTransactionsPool,
+#[derive(Debug, Error)]
+pub enum TransactionHandlerError {
+    #[error("invalid transaction: {0}")]
+    InvalidTransaction(String),
+
+    #[error("transaction simulation failed: {0}")]
+    SimulationFailed(String),
+
+    #[error("failed to serialize transaction: {0}")]
+    SerializationFailed(#[from] bincode::Error),
+
+    #[error("transaction sanitize check failed: {0}")]
+    SanitizeCheckFailed(String),
+
+    #[error("failed to send transaction: {0}")]
+    SendFailed(String),
+
+    #[error("node unhealthy: {num_slots_behind} slots behind")]
+    NodeUnhealthy { num_slots_behind: u64 },
+
+    #[error("invalid parameters: {0}")]
+    InvalidParams(String),
+
+    #[error("unsupported encoding")]
+    UnsupportedEncoding,
+}
+
+impl From<ErrorObjectOwned> for TransactionHandlerError {
+    fn from(err: ErrorObjectOwned) -> Self {
+        TransactionHandlerError::InvalidParams(err.message().to_string())
+    }
+}
+
+impl From<TransactionHandlerError> for ErrorObjectOwned {
+    fn from(err: TransactionHandlerError) -> Self {
+        ErrorObject::owned(INTERNAL_ERROR_CODE, err.to_string(), None::<()>)
+    }
+}
+
+pub struct TransactionHandler {
+    pub stp: SendTransactionsPool,
     pub rpc: Arc<RpcClient>,
     pub proxy_sanitize_check: bool,
     pub proxy_preflight_check: bool,
 }
 
-impl<'a> TransactionHandler<'a> {
+impl TransactionHandler {
     pub fn new(
-        sts: &'a SendTransactionsPool,
-        rpc: &'a Arc<RpcClient>,
+        stp: SendTransactionsPool,
+        rpc: &Arc<RpcClient>,
         proxy_sanitize_check: bool,
         proxy_preflight_check: bool,
     ) -> Self {
         Self {
-            sts,
+            stp,
             rpc: Arc::clone(rpc),
             proxy_sanitize_check,
             proxy_preflight_check,
@@ -62,13 +93,13 @@ impl<'a> TransactionHandler<'a> {
         &self,
         transaction: VersionedTransaction,
         config: Option<RpcSendTransactionConfig>,
-    ) -> Result<String, ErrorObjectOwned> {
+    ) -> Result<String, TransactionHandlerError> {
         let config = config.unwrap_or_default();
 
         // Basic sanitize check first
         transaction
             .sanitize()
-            .map_err(|e| invalid_params(format!("invalid transaction: {}", e)))?;
+            .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         // Run preflight/sanitize checks if needed
         if !config.skip_preflight && self.proxy_preflight_check {
@@ -78,20 +109,15 @@ impl<'a> TransactionHandler<'a> {
         }
 
         let signature = transaction.signatures[0];
-        let wire_transaction = bincode::serialize(&transaction)
-            .map_err(|e| invalid_params(format!("failed to serialize transaction: {e}")))?;
+        let wire_transaction = bincode::serialize(&transaction)?;
 
-        if let Err(error) = self.sts.send_transaction(SendTransactionRequest {
+        if let Err(error) = self.stp.send_transaction(SendTransactionRequest {
             signature,
             transaction,
             wire_transaction,
             max_retries: config.max_retries,
         }) {
-            return Err(ErrorObject::owned(
-                INTERNAL_ERROR_CODE,
-                INTERNAL_ERROR_MSG,
-                Some(format!("{error}")),
-            ));
+            return Err(TransactionHandlerError::SendFailed(error.to_string()));
         }
 
         Ok(signature.to_string())
@@ -101,21 +127,17 @@ impl<'a> TransactionHandler<'a> {
         &self,
         data: String,
         config: Option<RpcSendTransactionConfig>,
-    ) -> Result<String, ErrorObjectOwned> {
+    ) -> Result<String, TransactionHandlerError> {
         let (wire_transaction, transaction) = self.prepare_transaction(data, config).await?;
         let signature = transaction.signatures[0];
 
-        if let Err(error) = self.sts.send_transaction(SendTransactionRequest {
+        if let Err(error) = self.stp.send_transaction(SendTransactionRequest {
             signature,
             transaction,
             wire_transaction,
             max_retries: config.and_then(|c| c.max_retries),
         }) {
-            return Err(ErrorObject::owned(
-                INTERNAL_ERROR_CODE,
-                INTERNAL_ERROR_MSG,
-                Some(format!("{error}")),
-            ));
+            return Err(TransactionHandlerError::SendFailed(error.to_string()));
         }
 
         Ok(signature.to_string())
@@ -125,7 +147,7 @@ impl<'a> TransactionHandler<'a> {
         &self,
         data: String,
         config: Option<RpcSendTransactionConfig>,
-    ) -> Result<(Vec<u8>, VersionedTransaction), ErrorObjectOwned> {
+    ) -> Result<(Vec<u8>, VersionedTransaction), TransactionHandlerError> {
         let config = config.unwrap_or_default();
         let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
 
@@ -133,8 +155,9 @@ impl<'a> TransactionHandler<'a> {
             data,
             encoding
                 .into_binary_encoding()
-                .ok_or_else(|| invalid_params("unsupported encoding"))?,
-        )?;
+                .ok_or(TransactionHandlerError::UnsupportedEncoding)?,
+        )
+        .map_err(|e| TransactionHandlerError::InvalidParams(e.to_string()))?;
 
         if !config.skip_preflight && self.proxy_preflight_check {
             self.handle_preflight(&transaction, &config).await?;
@@ -143,7 +166,7 @@ impl<'a> TransactionHandler<'a> {
         } else {
             transaction
                 .sanitize()
-                .map_err(|e| invalid_params(format!("invalid transaction: {}", e)))?;
+                .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
         }
 
         Ok((wire_transaction, transaction))
@@ -153,7 +176,7 @@ impl<'a> TransactionHandler<'a> {
         &self,
         transaction: &VersionedTransaction,
         config: &RpcSendTransactionConfig,
-    ) -> Result<(), ErrorObjectOwned> {
+    ) -> Result<(), TransactionHandlerError> {
         match self
             .rpc
             .simulate_transaction_with_config(
@@ -170,34 +193,22 @@ impl<'a> TransactionHandler<'a> {
             .await
         {
             Ok(RpcResponse {
-                context: _,
                 value:
                     RpcSimulateTransactionResult {
-                        err,
-                        logs,
-                        units_consumed,
-                        return_data,
-                        ..
+                        err: Some(error), ..
                     },
-            }) => {
-                if let Some(error) = err {
-                    return Err(ErrorObject::owned(
-                        JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE as i32,
-                        format!("Transaction simulation failed: {error}"),
-                        Some(RpcSimulateTransactionResult {
-                            err: Some(error),
-                            logs,
-                            accounts: None,
-                            units_consumed,
-                            return_data,
-                            inner_instructions: None,
-                            replacement_blockhash: None,
-                        }),
-                    ));
-                }
-                Ok(())
-            }
-            Err(error) => Err(self.unwrap_client_error("simulate_transaction", error)),
+                ..
+            }) => Err(TransactionHandlerError::SimulationFailed(error.to_string())),
+            Ok(_) => Ok(()),
+            Err(error) => match error.kind {
+                ClientErrorKind::RpcError(RpcError::RpcResponseError {
+                    data: RpcResponseErrorData::NodeUnhealthy { num_slots_behind },
+                    ..
+                }) => Err(TransactionHandlerError::NodeUnhealthy {
+                    num_slots_behind: num_slots_behind.unwrap_or(0),
+                }),
+                _ => Err(TransactionHandlerError::SimulationFailed(error.to_string())),
+            },
         }
     }
 
@@ -205,7 +216,7 @@ impl<'a> TransactionHandler<'a> {
         &self,
         transaction: &VersionedTransaction,
         config: &RpcSendTransactionConfig,
-    ) -> Result<(), ErrorObjectOwned> {
+    ) -> Result<(), TransactionHandlerError> {
         if let Err(error) = self
             .rpc
             .sanitize_transaction(
@@ -221,35 +232,11 @@ impl<'a> TransactionHandler<'a> {
             )
             .await
         {
-            Err(self.unwrap_client_error("sanitize_transaction", error))
+            Err(TransactionHandlerError::SanitizeCheckFailed(
+                error.to_string(),
+            ))
         } else {
             Ok(())
-        }
-    }
-
-    fn unwrap_client_error(&self, call: &str, error: ClientError) -> ErrorObjectOwned {
-        if let ClientErrorKind::RpcError(RpcError::RpcResponseError {
-            code,
-            message,
-            data,
-        }) = error.kind
-        {
-            ErrorObject::owned(
-                code as i32,
-                message,
-                match data {
-                    RpcResponseErrorData::Empty => None,
-                    RpcResponseErrorData::SendTransactionPreflightFailure(_) => {
-                        unreachable!("impossible response")
-                    }
-                    RpcResponseErrorData::NodeUnhealthy { num_slots_behind } => {
-                        Some(NodeUnhealthyErrorData { num_slots_behind })
-                    }
-                },
-            )
-        } else {
-            warn!("{call} failed: {error}");
-            ErrorObject::owned::<()>(INTERNAL_ERROR_CODE, INTERNAL_ERROR_MSG, None)
         }
     }
 }

@@ -310,7 +310,7 @@ pub mod rpc_solana_like {
             debug!("handling internal versioned transaction");
 
             let handler = TransactionHandler::new(
-                &self.sts,
+                self.sts.clone(),
                 &self.rpc,
                 self.proxy_sanitize_check,
                 self.proxy_preflight_check,
