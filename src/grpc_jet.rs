@@ -14,7 +14,7 @@ use {
             self,
             jet::{increment_send_transaction_error, increment_send_transaction_success},
         },
-        payload::TransactionPayload,
+        payload::{TransactionDecoder, TransactionPayload},
         proto::jet::{
             auth_request, auth_response, jet_gateway_client::JetGatewayClient,
             subscribe_request::Message as SubscribeRequestMessage,
@@ -70,18 +70,11 @@ impl GrpcTransactionHandler {
         &self,
         transaction: SubscribeTransaction,
     ) -> anyhow::Result<String> {
-        let payload = match transaction.payload {
-            Some(Payload::LegacyPayload(bytes)) => {
-                // Parse legacy JSON bytes into LegacyPayload
-                let legacy_payload = serde_json::from_slice(&bytes)
-                    .context("Failed to deserialize legacy JSON payload")?;
-                TransactionPayload::Legacy(legacy_payload)
-            }
-            Some(Payload::NewPayload(wrapper)) => TransactionPayload::New(wrapper),
-            None => return Err(anyhow::anyhow!("Empty transaction payload")),
-        };
+        let payload = TransactionPayload::try_from(transaction)
+            .map_err(|e| anyhow::anyhow!("Failed to parse transaction payload: {}", e))?;
 
-        let (transaction, config) = payload.decode()?;
+        let (transaction, config) = TransactionDecoder::decode(&payload)
+            .map_err(|e| anyhow::anyhow!("Failed to decode transaction: {}", e))?;
 
         self.tx_sender
             .handle_internal_transaction(transaction, config)
