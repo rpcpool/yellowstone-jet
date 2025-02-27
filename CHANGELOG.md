@@ -50,6 +50,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 - Improved error handling for invalid configurations
 - Enhanced transaction validation reliability
 - Fixed configuration preservation through conversion
+<<<<<<< HEAD
 
 ## [10.6.0]
 
@@ -64,6 +65,8 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 - Refactor `SendTransactionsPool`, `SendTransactionsPoolTask`, `RootedTransactions`, `QuicClient`, `ClusterTpuInfo`, `BlockhasQueue`
 - Added integration test for `SendTransactionsPool`, `IdentityFlusherWaitGroup` and `RpcServer`.
+=======
+>>>>>>> 06e9e60 (improved changelog)
 
 ## [10.5.0]
 
