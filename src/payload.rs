@@ -102,7 +102,7 @@ impl TransactionPayload {
         transaction: &VersionedTransaction,
         config: RpcSendTransactionConfig,
     ) -> Result<Self> {
-        let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base64);
+        let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
 
         match encoding {
             UiTransactionEncoding::Base64 | UiTransactionEncoding::Base58 => (),
@@ -244,11 +244,15 @@ mod tests {
         let config = RpcSendTransactionConfig {
             skip_preflight: true,
             skip_sanitize: true,
+            encoding: Some(UiTransactionEncoding::Base64),
             ..Default::default()
         };
 
         let payload = TransactionPayload::from_transaction(&tx, config).unwrap();
-        let (_, decoded_config) = payload.decode().unwrap();
+        let proto_tx = payload.to_proto();
+
+        let decoded = TransactionPayload::from_proto(proto_tx).unwrap();
+        let (_, decoded_config) = decoded.decode().unwrap();
 
         assert!(decoded_config.is_some());
         let decoded_config = decoded_config.unwrap();
