@@ -92,3 +92,113 @@ impl BlockhashQueue {
             .max()
     }
 }
+
+///
+/// Interface to query block height information
+///
+#[async_trait::async_trait]
+pub trait BlockHeighService {
+    ///
+    /// Get the block height for the given blockhash
+    ///
+    async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight>;
+    ///
+    /// Get the latest block height for the given commitment level
+    ///
+    async fn get_block_height_for_commitment(
+        &self,
+        commitment: CommitmentLevel,
+    ) -> Option<BlockHeight>;
+}
+
+#[async_trait::async_trait]
+impl BlockHeighService for BlockhashQueue {
+    async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
+        self.get_block_height(blockhash).await
+    }
+
+    async fn get_block_height_for_commitment(
+        &self,
+        commitment: CommitmentLevel,
+    ) -> Option<BlockHeight> {
+        self.get_block_height_latest(commitment).await
+    }
+}
+
+pub mod testkit {
+
+    use {
+        super::{BlockHeighService, SharedSlots},
+        crate::{
+            grpc_geyser::SlotUpdateInfoWithCommitment,
+            util::{BlockHeight, CommitmentLevel},
+        },
+        solana_sdk::hash::Hash,
+        std::{collections::HashMap, sync::Arc},
+        tokio::sync::RwLock,
+    };
+
+    #[derive(Default)]
+    pub struct MockBlockhashQueue {
+        slots: SharedSlots,
+    }
+
+    impl MockBlockhashQueue {
+        pub fn new() -> Self {
+            Self {
+                slots: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+
+        pub async fn increase_block_height(&self, hash: Hash) {
+            let mut slots = self.slots.write().await;
+            let last_block = slots.values().last();
+
+            let new_last_block = if let Some(last_block) = last_block {
+                SlotUpdateInfoWithCommitment {
+                    block_hash: hash,
+                    block_height: last_block.block_height + 1,
+                    commitment: CommitmentLevel::Confirmed,
+                    slot: last_block.slot + 1,
+                }
+            } else {
+                SlotUpdateInfoWithCommitment {
+                    block_hash: hash,
+                    block_height: 1,
+                    commitment: CommitmentLevel::Confirmed,
+                    slot: 1,
+                }
+            };
+
+            slots.insert(new_last_block.block_hash, new_last_block);
+        }
+
+        pub async fn change_last_block_confirmation(&self) {
+            let mut slots = self.slots.write().await;
+            let last_block = slots.values_mut().last();
+            if let Some(last_block) = last_block {
+                last_block.commitment = CommitmentLevel::Finalized;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlockHeighService for MockBlockhashQueue {
+        async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
+            let slots = self.slots.read().await;
+            slots.get(blockhash).map(|slot| slot.block_height)
+        }
+
+        async fn get_block_height_for_commitment(
+            &self,
+            commitment: CommitmentLevel,
+        ) -> Option<BlockHeight> {
+            let slots = self.slots.read().await;
+            slots
+                .values()
+                .filter(|info| info.commitment == commitment)
+                .map(|info| info.block_height)
+                .max()
+        }
+    }
+}

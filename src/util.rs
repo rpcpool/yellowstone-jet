@@ -1,4 +1,5 @@
 use {
+    crate::quic_solana::{BoxedIdentityFlusher, IdentityFlusher},
     futures::future::Either,
     serde::Deserialize,
     solana_sdk::{
@@ -8,7 +9,7 @@ use {
     },
     std::{cmp::Ordering, future::Future, sync::Arc},
     tokio::{
-        sync::{oneshot, watch, Mutex},
+        sync::{oneshot, watch, Mutex, RwLock},
         task::{JoinError, JoinHandle},
         time::{sleep, Duration},
     },
@@ -178,6 +179,7 @@ pub fn ms_since_epoch() -> u64 {
         .as_millis() as u64
 }
 
+#[derive(Clone)]
 pub struct ValueObserver<T> {
     last_val: T,
     rx: watch::Receiver<T>,
@@ -246,6 +248,41 @@ where
         let _ = tx2.send(x.clone());
     });
     (rx1, rx2)
+}
+
+///
+/// Combines multiple [`IdentityFlusher`] into one.
+#[derive(Clone)]
+pub struct IdentityFlusherWaitGroup {
+    waiters: Arc<RwLock<Vec<BoxedIdentityFlusher>>>,
+}
+
+impl Default for IdentityFlusherWaitGroup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IdentityFlusherWaitGroup {
+    pub fn new() -> Self {
+        Self {
+            waiters: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub async fn add_flusher(&self, flusher: BoxedIdentityFlusher) {
+        self.waiters.write().await.push(flusher);
+    }
+}
+
+#[async_trait::async_trait]
+impl IdentityFlusher for IdentityFlusherWaitGroup {
+    async fn flush(&self) {
+        let ws = self.waiters.write().await;
+        for w in ws.iter() {
+            w.flush().await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -338,5 +375,47 @@ mod tests {
         drop(tx);
         let result = fut.await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    pub async fn test_identity_flusher_wg() {
+        let wg = IdentityFlusherWaitGroup::default();
+
+        #[derive(Clone, Default)]
+        struct SpyIdentityFlusher {
+            flush_count: Arc<RwLock<Vec<()>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl IdentityFlusher for SpyIdentityFlusher {
+            async fn flush(&self) {
+                self.flush_count.write().await.push(());
+            }
+        }
+
+        impl SpyIdentityFlusher {
+            async fn flush_count(&self) -> usize {
+                self.flush_count.read().await.len()
+            }
+        }
+
+        let f1 = SpyIdentityFlusher::default();
+        let f2 = SpyIdentityFlusher::default();
+        let f3 = SpyIdentityFlusher::default();
+        wg.add_flusher(Box::new(f1.clone())).await;
+        wg.add_flusher(Box::new(f2.clone())).await;
+        wg.add_flusher(Box::new(f3.clone())).await;
+
+        wg.flush().await;
+
+        assert_eq!(f1.flush_count().await, 1);
+        assert_eq!(f2.flush_count().await, 1);
+        assert_eq!(f3.flush_count().await, 1);
+    }
+
+    #[tokio::test]
+    pub async fn test_empty_identity_flusher_wg() {
+        let wg = IdentityFlusherWaitGroup::default();
+        wg.flush().await;
     }
 }

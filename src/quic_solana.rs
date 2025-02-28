@@ -9,7 +9,6 @@ use {
         },
         util::{PubkeySigner, ValueObserver},
     },
-    futures::future::try_join_all,
     lru::LruCache,
     quinn::{
         crypto::rustls::QuicClientConfig, ClientConfig, ConnectError, Connection, ConnectionError,
@@ -50,10 +49,14 @@ pub struct ConnectionCacheIdentity {
     shared: Arc<Mutex<QuicSessionInner>>,
     identity_watcher: watch::Sender<Pubkey>,
     reactive_signer: watch::Sender<PubkeySigner>,
+    identity_flusher: Box<dyn IdentityFlusher + Send + Sync + 'static>,
 }
 
 impl ConnectionCacheIdentity {
     pub async fn update_keypair(&self, keypair: &Keypair) {
+        let kp = keypair.insecure_clone();
+        let ps = PubkeySigner::new(kp);
+
         let pubkey = keypair.pubkey();
         let (certificate, privkey) = new_dummy_x509_certificate(keypair);
         let cert = Arc::new(QuicClientCertificate {
@@ -62,14 +65,21 @@ impl ConnectionCacheIdentity {
             certificate,
         });
         let mut locked = self.shared.lock().await;
-        metrics::quic_set_indetity(cert.pubkey);
-        info!("update QUIC identityc: {}", cert.pubkey);
-        locked.connection_pools.clear(); // drop all previously created connections
+
+        // Connection pools actually returned owned connections, so we need to clear them AFTER we acquire the lock.
+        // Otherwise, if we clear connection_pools before the lock, new connection can still be open with the old certificate.
+        // Please note: since we are using Mutex + Owned connection objects this give us several important properties that we must understand:
+        //  1. Previously acquire connection **won't be affected** by the change of the certificate (direct consequence of using Owned connection object through Arc)
+        //  2. New connection will be created with the new certificate.
+        //  3. Because of the lock, all concurrent attempt to connect will block -> this can cause deadlock if we are not cautious.
+        locked.connection_pools.clear();
+
+        metrics::quic_set_identity(cert.pubkey);
+        info!("update QUIC identity: {}", cert.pubkey);
+        self.identity_flusher.flush().await;
         locked.client_certificate = cert;
-        let kp = keypair.insecure_clone();
-        let ps = PubkeySigner::new(kp);
-        self.identity_watcher.send_replace(keypair.pubkey());
         self.reactive_signer.send_replace(ps);
+        self.identity_watcher.send_replace(keypair.pubkey());
     }
 
     pub async fn get_cert(&self) -> CertificateDer {
@@ -95,6 +105,25 @@ impl ConnectionCacheIdentity {
 }
 
 ///
+/// Base Trait for flushing the identity of a [`ConnectionCache`].
+///
+#[async_trait::async_trait]
+pub trait IdentityFlusher {
+    async fn flush(&self);
+}
+
+pub type BoxedIdentityFlusher = Box<dyn IdentityFlusher + Send + Sync + 'static>;
+
+///
+/// IdentityFlusher that does nothing.
+pub struct NullIdentityFlusher;
+
+#[async_trait::async_trait]
+impl IdentityFlusher for NullIdentityFlusher {
+    async fn flush(&self) {}
+}
+
+///
 /// QUIC Session object are a managed version of raw QUIC connection where the session object
 /// manage the lifecycle of each sub connection and provides caching and identity management.
 ///
@@ -104,11 +133,30 @@ pub struct ConnectionCache {
     shared: Arc<Mutex<QuicSessionInner>>,
 }
 
+pub struct ConnectionCacheSendPermit {
+    pub tpu_info: TpuInfo,
+    pub addr: SocketAddr,
+    inner: Arc<QuicClient>,
+}
+
+impl ConnectionCacheSendPermit {
+    pub async fn send_buffer(&self, data: &[u8]) -> Result<(), QuicError> {
+        self.inner.send_buffer(data, &self.tpu_info).await
+    }
+}
+
 impl ConnectionCache {
-    pub fn new(config: ConfigQuic, initial_identity: Keypair) -> (Self, ConnectionCacheIdentity) {
+    pub fn new<F>(
+        config: ConfigQuic,
+        initial_identity: Keypair,
+        flush_identity: F,
+    ) -> (Self, ConnectionCacheIdentity)
+    where
+        F: IdentityFlusher + Send + Sync + 'static,
+    {
         let client_certificate = Self::create_client_certificate(&initial_identity);
         let initial_signer = PubkeySigner::new(initial_identity.insecure_clone());
-        metrics::quic_set_indetity(client_certificate.pubkey);
+        metrics::quic_set_identity(client_certificate.pubkey);
         info!("generate new QUIC identity: {}", client_certificate.pubkey);
 
         let connection_pools = LruCache::new(config.connection_max_pools);
@@ -122,6 +170,7 @@ impl ConnectionCache {
             shared: Arc::clone(&shared),
             identity_watcher,
             reactive_signer,
+            identity_flusher: Box::new(flush_identity),
         };
         let ret = Self {
             config: Arc::new(config),
@@ -138,10 +187,6 @@ impl ConnectionCache {
             privkey,
             certificate,
         })
-    }
-
-    pub async fn get_identity(&self) -> Pubkey {
-        self.shared.lock().await.client_certificate.pubkey
     }
 
     async fn get_connection(&self, addr: SocketAddr) -> Arc<QuicClient> {
@@ -167,6 +212,18 @@ impl ConnectionCache {
         locked.get_connection(addr)
     }
 
+    pub async fn reserve_send_permit(
+        &self,
+        tpu_info: TpuInfo,
+        addr: SocketAddr,
+    ) -> ConnectionCacheSendPermit {
+        ConnectionCacheSendPermit {
+            tpu_info,
+            addr,
+            inner: self.get_connection(addr).await,
+        }
+    }
+
     pub async fn send_buffer(
         &self,
         addr: SocketAddr,
@@ -175,16 +232,6 @@ impl ConnectionCache {
     ) -> Result<(), QuicError> {
         let client = self.get_connection(addr).await;
         client.send_buffer(data, tpu_info).await
-    }
-
-    pub async fn send_batch(
-        &self,
-        addr: SocketAddr,
-        buffers: &[&[u8]],
-        tpu_info: &TpuInfo,
-    ) -> Result<(), QuicError> {
-        let client = self.get_connection(addr).await;
-        client.send_batch(buffers, tpu_info).await
     }
 }
 
@@ -639,46 +686,6 @@ impl QuicClient {
     pub async fn send_buffer(&self, data: &[u8], tpu_info: &TpuInfo) -> Result<(), QuicError> {
         let _permit = self.sem.acquire().await?;
         let _connection = self.send_buffer_retry(data, tpu_info).await?;
-        Ok(())
-    }
-
-    pub async fn send_batch(&self, buffers: &[&[u8]], tpu_info: &TpuInfo) -> Result<(), QuicError> {
-        if buffers.len() > self.endpoint.config.send_max_concurrent_streams {
-            return Err(QuicError::ExceedBatchLimit {
-                size: buffers.len(),
-                limit: self.endpoint.config.send_max_concurrent_streams,
-            });
-        }
-
-        // Start off by "testing" the connection by sending the first buffer
-        // This will also connect to the server if not already connected
-        // and reconnect and retry if the first send attempt failed
-        // (for example due to a timed out connection), returning an error
-        // or the connection that was used to successfully send the buffer.
-        // We will use the returned connection to send the rest of the buffers in the batch
-        // to avoid touching the mutex in self, and not bother reconnecting if we fail along the way
-        // since testing even in the ideal GCE environment has found no cases
-        // where reconnecting and retrying in the middle of a batch send
-        // (i.e. we encounter a connection error in the middle of a batch send, which presumably cannot
-        // be due to a timed out connection) has succeeded
-        if buffers.is_empty() {
-            return Ok(());
-        }
-
-        let _permit = self.sem.acquire_many(buffers.len() as u32);
-        let connection = self.send_buffer_retry(buffers[0], tpu_info).await?;
-
-        // Used to avoid dereferencing the Arc multiple times below
-        // by just getting a reference to the NewConnection once
-        let connection_ref: &Connection = &connection;
-
-        try_join_all(
-            buffers[1..]
-                .iter()
-                .map(|buffer| Self::send_buffer_using_conn(connection_ref, buffer)),
-        )
-        .await?;
-
         Ok(())
     }
 }
