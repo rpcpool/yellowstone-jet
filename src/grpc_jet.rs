@@ -10,6 +10,7 @@
 use {
     crate::{
         config::ConfigJetGatewayClient,
+        feature_flags::FeatureSet,
         metrics::{
             self,
             jet::{increment_send_transaction_error, increment_send_transaction_success},
@@ -20,8 +21,8 @@ use {
             subscribe_request::Message as SubscribeRequestMessage,
             subscribe_response::Message as SubscribeResponseMessage,
             subscribe_transaction::Payload, AnswerChallengeRequest, AnswerChallengeResponse,
-            AuthRequest, GetChallengeRequest, Ping, Pong, SubscribeRequest, SubscribeResponse,
-            SubscribeTransaction, SubscribeUpdateLimit,
+            AuthRequest, FeatureFlags, GetChallengeRequest, Ping, Pong, SubscribeRequest,
+            SubscribeResponse, SubscribeTransaction, SubscribeUpdateLimit,
         },
         pubkey_challenger::{append_nonce_and_sign, OneTimeAuthToken},
         rpc::rpc_solana_like::RpcServerImpl as RpcServerImplSolanaLike,
@@ -152,25 +153,28 @@ pub async fn grpc_subscribe_jet_gw(
     endpoint: String,
     x_token: GrpcClientXToken,
     stream_buffer_size: usize,
+    features: FeatureSet,
 ) -> anyhow::Result<(
     impl Sink<SubscribeRequest, Error = futures::channel::mpsc::SendError>,
     impl Stream<Item = Result<SubscribeResponse, Status>>,
 )> {
+    // First get the OTAK
     let otak =
         get_jet_gw_subscribe_auth_token(Arc::clone(&signer), endpoint.clone(), x_token.clone())
             .await?;
+
     let channel = Endpoint::from_shared(endpoint.clone())?
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(1))
         .tls_config(ClientTlsConfig::new().with_native_roots())?
         .connect()
         .await?;
-    let mut client = JetGatewayClient::with_interceptor(channel, x_token);
 
+    let mut client = JetGatewayClient::with_interceptor(channel, x_token);
     let (subscribe_tx, subscribe_rx) = futures::channel::mpsc::channel(stream_buffer_size);
 
+    // Prepare OTAK authentication
     let mut subscribe_req = Request::new(subscribe_rx);
-
     let ser_otak = bincode::serialize(&otak).expect("failed to serialize one-time-auth-token");
     let bs58_otak = bs58::encode(ser_otak).into_string();
     subscribe_req.metadata_mut().insert(
@@ -180,10 +184,22 @@ pub async fn grpc_subscribe_jet_gw(
             .expect("failed to convert to AsciiMetadataValue"),
     );
 
-    // Send the OTAK first to authenticate
+    // Establish authenticated connection
     let response: Response<Streaming<SubscribeResponse>> = client.subscribe(subscribe_req).await?;
+    let (mut sink, stream) = (subscribe_tx, response.into_inner());
 
-    Ok((subscribe_tx, response.into_inner()))
+    // After authentication, send feature flags
+    let feature_request = SubscribeRequest {
+        message: Some(SubscribeRequestMessage::Features(FeatureFlags {
+            supported_features: features.enabled_features(),
+        })),
+    };
+
+    sink.send(feature_request)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to send feature flags: {}", e))?;
+
+    Ok((sink, stream))
 }
 
 type ArcSigner = Arc<dyn Signer + Send + Sync + 'static>;
@@ -193,10 +209,11 @@ impl GrpcServer {
         signer: ArcSigner,
         config: ConfigJetGatewayClient,
         tx_sender: RpcServerImplSolanaLike,
+        features: FeatureSet,
         mut stop_rx: oneshot::Receiver<()>,
     ) {
         tokio::select! {
-            () = Self::grpc_subscribe(signer, config, tx_sender) => {},
+            () = Self::grpc_subscribe(signer, config, tx_sender, features) => {},
             _ = &mut stop_rx => {},
         }
     }
@@ -205,6 +222,7 @@ impl GrpcServer {
         signer: ArcSigner,
         config: ConfigJetGatewayClient,
         tx_sender: RpcServerImplSolanaLike,
+        features: FeatureSet,
     ) {
         const STREAM_BUFFER_SIZE: usize = 10;
         const MAX_SEND_TRANSACTIONS: usize = 10;
@@ -221,6 +239,7 @@ impl GrpcServer {
                 &config.endpoints,
                 config.x_token.as_ref(),
                 STREAM_BUFFER_SIZE,
+                features.clone(),
             )
             .await
             {
@@ -319,6 +338,7 @@ impl GrpcServer {
         endpoints: &[String],
         x_token: Option<&String>,
         stream_buffer_size: usize,
+        features: FeatureSet,
     ) -> anyhow::Result<(
         impl Sink<SubscribeRequest, Error = futures::channel::mpsc::SendError>,
         impl Stream<Item = Result<SubscribeResponse, Status>>,
@@ -328,12 +348,14 @@ impl GrpcServer {
         let mut tasks = JoinSet::new();
         for endpoint in endpoints.iter().cloned() {
             let signer2 = Arc::clone(&signer);
+            let features = features.clone();
             tasks.spawn(
                 grpc_subscribe_jet_gw(
                     signer2,
                     endpoint.clone(),
                     x_token.clone(),
                     stream_buffer_size,
+                    features,
                 )
                 .map(|result| (result, endpoint)),
             );

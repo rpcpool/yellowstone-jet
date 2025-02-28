@@ -110,7 +110,11 @@ message SubscribeRequest {
     Ping ping = 1;
     Pong pong = 2;
     SubscribeUpdateLimit update_limit = 3;
+    FeatureFlags features = 4;
   }
+}
+message FeatureFlags {
+  repeated string supported_features = 1;
 }
 
 message SubscribeUpdateLimit {
