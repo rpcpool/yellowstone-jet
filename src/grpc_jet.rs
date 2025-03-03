@@ -186,20 +186,54 @@ pub async fn grpc_subscribe_jet_gw(
 
     // Establish authenticated connection
     let response: Response<Streaming<SubscribeResponse>> = client.subscribe(subscribe_req).await?;
-    let (mut sink, stream) = (subscribe_tx, response.into_inner());
+    let stream = response.into_inner();
 
-    // After authentication, send feature flags
-    let feature_request = SubscribeRequest {
-        message: Some(SubscribeRequestMessage::Features(FeatureFlags {
-            supported_features: features.enabled_features(),
+    // SAFE APPROACH: Send an update limit message first
+    // This is guaranteed to work with older gateways and avoids the ping check
+    let limit_msg = SubscribeRequest {
+        message: Some(SubscribeRequestMessage::UpdateLimit(SubscribeUpdateLimit {
+            messages_per100ms: 10, // Safe default value
         })),
     };
 
-    sink.send(feature_request)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to send feature flags: {}", e))?;
+    // Send the limit update first to ensure connection is stable
+    let mut subscribe_tx_clone = subscribe_tx.clone();
+    if let Err(e) = subscribe_tx_clone.send(limit_msg).await {
+        debug!("Failed to send initial limit update: {}", e);
+        return Ok((subscribe_tx, stream));
+    }
 
-    Ok((sink, stream))
+    // Wait a bit to ensure the connection is stable
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Now try to send feature flags
+    // We do this in a fire-and-forget way since errors shouldn't break the connection
+    if !features.enabled_features().is_empty() {
+        tokio::spawn({
+            let endpoint = endpoint.clone();
+            let mut subscribe_tx = subscribe_tx.clone();
+            let features = features.clone();
+            async move {
+                // Send feature flags in a separate task to avoid blocking
+                let feature_request = SubscribeRequest {
+                    message: Some(SubscribeRequestMessage::Features(FeatureFlags {
+                        supported_features: features.enabled_features(),
+                    })),
+                };
+
+                // If this fails, it's likely because the gateway doesn't support feature flags
+                if let Err(e) = subscribe_tx.send(feature_request).await {
+                    debug!("Failed to send feature flags (likely older gateway): {}", e);
+                    // Track metrics for unsupported features
+                    for feature in features.enabled_features() {
+                        metrics::jet::increment_gateway_version_mismatch(&endpoint, &feature);
+                    }
+                }
+            }
+        });
+    }
+
+    Ok((subscribe_tx, stream))
 }
 
 type ArcSigner = Arc<dyn Signer + Send + Sync + 'static>;

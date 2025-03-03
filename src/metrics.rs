@@ -171,6 +171,11 @@ pub mod jet {
             &["leader"]
         ).unwrap();
 
+        static ref GATEWAY_VERSION_MISMATCH: IntCounterVec = IntCounterVec::new(
+            Opts::new("gateway_version_mismatch_total", "Number of connection attempts to older gateway versions"),
+            &["endpoint", "feature"]
+        ).unwrap();
+
         // static ref LEADER_PMTUD:
     }
 
@@ -221,7 +226,14 @@ pub mod jet {
             register!(TRANSACTION_DESERIALIZE_ERRORS);
             register!(SEND_TRANSACTION_ERROR);
             register!(SEND_TRANSACTION_SUCCESS);
+            register!(GATEWAY_VERSION_MISMATCH);
         });
+    }
+
+    pub fn increment_gateway_version_mismatch(endpoint: &str, feature: &str) {
+        GATEWAY_VERSION_MISMATCH
+            .with_label_values(&[endpoint, feature])
+            .inc();
     }
 
     pub fn incr_send_tx_attempt(leader: Pubkey) {
