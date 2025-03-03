@@ -14,7 +14,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-## [10.6.1]
+## [10.7.0]
 
 ### Features
 - Added support for block leaders from yellowstone-blocklist smart contract
