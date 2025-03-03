@@ -109,12 +109,22 @@ message SubscribeRequest {
   oneof message {
     Ping ping = 1;
     Pong pong = 2;
-    SubscribeUpdateLimit update_limit = 3;
-    FeatureFlags features = 4;
+    SubscribeUpdateLimit update_limit = 3; // first message to send
+    InitialSubscribeRequest init = 4;
   }
 }
+message InitialSubscribeRequest {
+  FeatureFlags features = 1;
+}
+
+enum Feature {
+  FEATURE_UNSPECIFIED = 0;  // Required default for proto3
+  TRANSACTION_PAYLOAD_V2 = 1;
+  // Future features flags
+}
+
 message FeatureFlags {
-  repeated string supported_features = 1;
+  repeated Feature supported_features = 1;
 }
 
 message SubscribeUpdateLimit {
