@@ -3,9 +3,8 @@ use {
     anyhow::Context,
     serde::{
         de::{self, Deserializer},
-        Deserialize, Serialize,
+        Deserialize,
     },
-    solana_client::rpc_client::RpcClient,
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_sdk::{
         pubkey::Pubkey,
@@ -16,17 +15,14 @@ use {
         signer::keypair::{read_keypair_file, Keypair},
     },
     solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
-    solana_yellowstone_blocklist::state::{AclType, ListState},
     std::{
-        collections::{HashMap, HashSet},
+        collections::HashSet,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
         num::NonZeroUsize,
         ops::Range,
         path::{Path, PathBuf},
-        sync::Arc,
     },
-    tokio::{fs, sync::RwLock, time::Duration},
-    tracing::warn,
+    tokio::{fs, time::Duration},
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -550,14 +546,10 @@ impl ConfigBlocklist {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct YellowstoneBlocklist {
     #[serde(deserialize_with = "YellowstoneBlocklist::deserialize_pubkey")]
     pub contract_pubkey: Option<Pubkey>,
-    #[serde(skip)]
-    pub deny_lists: Arc<RwLock<HashMap<String, HashSet<Pubkey>>>>,
-    #[serde(skip)]
-    pub allow_lists: Arc<RwLock<HashMap<String, HashSet<Pubkey>>>>,
 }
 
 impl YellowstoneBlocklist {
@@ -570,48 +562,4 @@ impl YellowstoneBlocklist {
             .map(Some)
             .map_err(de::Error::custom)
     }
-
-    pub async fn set_lists(&self, url: String) -> Result<(), anyhow::Error> {
-        if let Some(contract_pubkey) = &self.contract_pubkey {
-            let rpc = RpcClient::new(url);
-            let accounts = rpc.get_program_accounts(contract_pubkey)?;
-            let accounts_parsed: Vec<(String, HashSet<Pubkey>, AclType)> = accounts
-                .iter()
-                .map(|account| {
-                    let state = ListState::deserialize(account.1.data.as_slice());
-                    match state {
-                        Ok(state) => (
-                            account.0.to_string(),
-                            get_hashset(state.list),
-                            state.meta.acl_type,
-                        ),
-                        Err(_) => {
-                            warn!("Error parsing account data from {:?}", account.0);
-                            ("".to_string(), HashSet::new(), AclType::Allow)
-                        }
-                    }
-                })
-                .collect();
-
-            let mut deny_list = self.deny_lists.write().await;
-            let mut allow_list = self.allow_lists.write().await;
-
-            accounts_parsed
-                .into_iter()
-                .for_each(|(key, hash_keys, acl)| match acl {
-                    AclType::Allow => {
-                        allow_list.insert(key, hash_keys);
-                    }
-                    AclType::Deny => {
-                        deny_list.insert(key, hash_keys);
-                    }
-                });
-        }
-
-        Ok(())
-    }
-}
-
-pub fn get_hashset(list: &[Pubkey]) -> HashSet<Pubkey> {
-    list.iter().cloned().collect()
 }

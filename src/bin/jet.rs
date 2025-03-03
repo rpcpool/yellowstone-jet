@@ -20,15 +20,15 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{signal, SignalKind},
-        sync::{broadcast, oneshot, RwLock},
+        sync::{broadcast, oneshot},
         task::JoinHandle,
     },
     tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
-        cluster_tpu_info::{ClusterTpuInfo, ClusterTpuInfoInner},
+        cluster_tpu_info::{BlocklistUpdater, ClusterTpuInfo, LeadersSelector},
         config::{load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream},
-        grpc_geyser::GeyserSubscriber,
+        grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_jet::GrpcServer,
         grpc_metrics::GrpcClient as GrpcMetricsClient,
         metrics::jet as metrics,
@@ -252,7 +252,16 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     if let Some(identity) = config.identity.expected {
         metrics::quic_set_identity_expected(identity);
     }
-    // let flush_identity = Arc::new(flush_identity);
+
+    let leaders_selector = Arc::new(
+        LeadersSelector::new_from_blockchain(
+            config.upstream.rpc.clone(),
+            config.blocklist.leaders,
+            &config.yellowstone_blocklist.contract_pubkey,
+        )
+        .await?,
+    );
+
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
         shutdown_geyser_rx,
@@ -261,18 +270,18 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             .upstream
             .secondary_grpc
             .unwrap_or(config.upstream.primary_grpc),
-        Arc::clone(&yellowstone_blocklist),
+        config.yellowstone_blocklist.contract_pubkey,
+        Arc::clone(&leaders_selector) as Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     );
     let blockhash_queue = BlockhashQueue::new(&geyser);
-    let inner_cluster_tpu_info =
-        RwLock::new(ClusterTpuInfoInner::new(config.upstream.rpc.clone()).await);
-    let (cluster_tpu_info, cluster_tpu_info_tasks) = ClusterTpuInfo::new(
+
+    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
         config.upstream.rpc.clone(),
-        &geyser,
-        Arc::new(inner_cluster_tpu_info),
+    ));
+    let (cluster_tpu_info, cluster_tpu_info_tasks) = ClusterTpuInfo::new(
+        rpc_client,
+        geyser.subscribe_slots(),
         config.upstream.cluster_nodes_update_interval,
-        config.blocklist,
-        yellowstone_blocklist,
     )
     .await;
 
@@ -296,6 +305,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(cluster_tpu_info.clone()),
         config.quic.clone(),
         Arc::new(quic_session),
+        leaders_selector,
     );
 
     let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
@@ -420,7 +430,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     });
 
     tg.spawn_cancelable("cluster_tpu_info", async move {
-        cluster_tpu_info_tasks.await.expect("cluster_tpu_info");
+        cluster_tpu_info_tasks.await;
     });
 
     tg.spawn_cancelable("rooted_transactions", async move {

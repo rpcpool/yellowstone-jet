@@ -14,10 +14,19 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-## [10.6.0]
+## [10.6.1]
 
 ### Features
+- Added support for block leaders from yellowstone-blocklist smart contract
+- Refactor `cluster_tpu_info.rs` and `grpc_geyser.rs`
+- Added SelectLeaders struct to handle blocking tpus
 
+### Fixes
+- Added tests for blocklist
+- Added tests for ClusterTpuInfo
+- Fix on QuicClient
+
+## [10.6.0]
 - Added 'IdentityFlusherWaitGroup' struct which function is to control when an identity is updated in Jet.
 - Added reset_identity method in RPC.
 - Added flush transactions while updating identity.

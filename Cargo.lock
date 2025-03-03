@@ -6863,7 +6863,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet"
-version = "10.6.0"
+version = "10.6.1"
 dependencies = [
  "anyhow",
  "async-trait",

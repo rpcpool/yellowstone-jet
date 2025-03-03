@@ -151,14 +151,13 @@ impl GrpcRootedTxReceiver {
             let entry = slots.entry(slot_update.slot).or_default();
             entry.slot = Some(slot_update);
             for signature in entry.transactions.iter() {
-                if watch_signatures.contains(signature) {
-                    if signature_updates_tx
+                if watch_signatures.contains(signature)
+                    && signature_updates_tx
                         .send((*signature, slot_update.commitment))
                         .is_err()
-                    {
-                        // The loop shutdown when the receiver is closed
-                        return;
-                    }
+                {
+                    // The loop shutdown when the receiver is closed
+                    return;
                 }
             }
 
@@ -195,14 +194,13 @@ impl GrpcRootedTxReceiver {
                 let entry = slots.entry(slot).or_default();
                 if entry.transactions.insert(signature) {
                     if let Some(slot) = &entry.slot {
-                        if watch_signatures.contains(&signature) {
-                            if signature_updates_tx
+                        if watch_signatures.contains(&signature)
+                            && signature_updates_tx
                                 .send((signature, slot.commitment))
                                 .is_err()
-                            {
-                                // The loop shutdown when the receiver is closed
-                                return;
-                            }
+                        {
+                            // The loop shutdown when the receiver is closed
+                            return;
                         }
                     }
                     transactions.insert(signature, slot);
@@ -351,10 +349,12 @@ pub trait TxChannelPermit {
     ) -> ();
 }
 
+type BoxedInnerTxChannelPermit = Box<
+    dyn FnOnce(SendTransactionInfoId, Signature, Arc<Vec<u8>>) -> BoxFuture<'static, ()> + Send,
+>;
+
 pub struct BoxedTxChannelPermit {
-    inner: Box<
-        dyn FnOnce(SendTransactionInfoId, Signature, Arc<Vec<u8>>) -> BoxFuture<'static, ()> + Send,
-    >,
+    inner: BoxedInnerTxChannelPermit,
 }
 
 impl BoxedTxChannelPermit {
@@ -388,7 +388,11 @@ pub trait TxChannel {
     ///
     /// Reserve a permit to send a transaction
     ///
-    async fn reserve(&self, leader_foward_count: usize) -> Option<BoxedTxChannelPermit>;
+    async fn reserve(
+        &self,
+        leader_foward_count: usize,
+        list_pda_keys: Vec<String>,
+    ) -> Option<BoxedTxChannelPermit>;
 }
 
 #[async_trait::async_trait]
@@ -405,8 +409,12 @@ impl TxChannelPermit for QuicSendTxPermit {
 
 #[async_trait::async_trait]
 impl TxChannel for QuicClient {
-    async fn reserve(&self, leader_foward_count: usize) -> Option<BoxedTxChannelPermit> {
-        QuicClient::reserve_send_permit(self, leader_foward_count)
+    async fn reserve(
+        &self,
+        leader_foward_count: usize,
+        list_pda_keys: Vec<String>,
+    ) -> Option<BoxedTxChannelPermit> {
+        QuicClient::reserve_send_permit(self, leader_foward_count, list_pda_keys)
             .await
             .map(BoxedTxChannelPermit::new)
     }
@@ -416,6 +424,7 @@ pub struct TransactionInfo {
     pub id: SendTransactionInfoId,
     pub signature: Signature,
     pub wire_transaction: Arc<Vec<u8>>,
+    pub list_pda_keys: Vec<String>,
 }
 
 pub struct SendTransactionsPoolTask {
@@ -614,7 +623,12 @@ impl SendTransactionsPoolTask {
             // AND it prevents concurrent connection from happening while the flush is in process.
             // Doing spawn_connect will not block the current flush process and they will internally wait for
             // new connection to be available.
-            self.spawn_connect(tx_info.id, tx_info.signature, tx_info.wire_transaction);
+            self.spawn_connect(
+                tx_info.id,
+                tx_info.signature,
+                tx_info.wire_transaction,
+                tx_info.list_pda_keys,
+            );
         }
 
         while let Some(result) = self.send_tasks.join_next_with_id().await {
@@ -717,7 +731,7 @@ impl SendTransactionsPoolTask {
             self.schedule_transaction_retry(signature, retry_timestamp)
                 .await;
         } else {
-            self.spawn_connect(id, signature, wire_transaction);
+            self.spawn_connect(id, signature, wire_transaction, list_pda_keys);
         }
     }
 
@@ -742,28 +756,20 @@ impl SendTransactionsPoolTask {
         list_pda_keys: Vec<String>,
     ) {
         let leader_forward_count = self.config.leader_forward_count;
-        let retry_timestamp = TransactionRetryTimestamp::next(self.config.retry_rate);
-        self.tasks.spawn(async move {
-            info!(id, %signature, "trying to send transaction");
-
-            quic_client
-                .send_transaction(
-                    id,
-                    signature,
-                    wire_transaction,
-                    leader_forward_count,
-                    list_pda_keys,
-                )
-                .await;
         let tx_channel = Arc::clone(&self.tx_channel);
-            .connecting_tasks
-            .spawn(async move { tx_channel.reserve(leader_forward_count).await });
+        let list_pda_keys_clone = list_pda_keys.clone();
+        let abort_handle = self.connecting_tasks.spawn(async move {
+            tx_channel
+                .reserve(leader_forward_count, list_pda_keys_clone)
+                .await
+        });
         self.connecting_map.insert(
             abort_handle.id(),
             TransactionInfo {
                 id,
                 signature,
                 wire_transaction,
+                list_pda_keys,
             },
         );
     }
@@ -825,6 +831,7 @@ impl SendTransactionsPoolTask {
                             info.id,
                             info.signature,
                             Arc::clone(&info.wire_transaction),
+                            info.list_pda_keys.clone(),
                         );
                     } else {
                         let retry_timestamp = Instant::now() + self.config.retry_rate;
@@ -864,9 +871,24 @@ pub mod testkit {
     use {
         super::RootedTxReceiver,
         crate::util::CommitmentLevel,
+        solana_sdk::signature::Signature,
+        std::{collections::HashMap, sync::Arc},
+        tokio::sync::{
+            mpsc::{self, UnboundedReceiver},
+            RwLock,
+        },
+    };
+
+    #[derive(Default)]
+    struct MockRootedTxChannelShared {
+        transactions: HashMap<Signature, CommitmentLevel>,
+    }
+
+    pub struct MockRootedTransactionsTx {
         shared: Arc<RwLock<MockRootedTxChannelShared>>,
         tx: mpsc::UnboundedSender<(Signature, CommitmentLevel)>,
     }
+
     impl MockRootedTransactionsTx {
         pub async fn send(&self, signature: Signature, commitment: CommitmentLevel) {
             self.shared

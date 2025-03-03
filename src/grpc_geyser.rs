@@ -1,6 +1,7 @@
 use {
     crate::{
-        config::{get_hashset, ConfigUpstreamGrpc, YellowstoneBlocklist},
+        cluster_tpu_info::BlocklistUpdater,
+        config::ConfigUpstreamGrpc,
         metrics::jet as metrics,
         util::{fork_oneshot, BlockHeight, CommitmentLevel, IncrementalBackoff},
     },
@@ -15,7 +16,6 @@ use {
     semver::{Version, VersionReq},
     serde::Deserialize,
     solana_sdk::{clock::Slot, hash::Hash, pubkey::Pubkey, signature::Signature},
-    solana_yellowstone_blocklist::state::{AclType, ListState},
     std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration},
     tokio::{
         sync::{
@@ -111,7 +111,8 @@ impl GeyserSubscriber {
         shutdown_rx: oneshot::Receiver<()>,
         primary_grpc: ConfigUpstreamGrpc,
         secondary_grpc: ConfigUpstreamGrpc,
-        yellowstone_blocklist: Arc<YellowstoneBlocklist>,
+        blocklist_program_key: Option<Pubkey>,
+        leaders_selector: Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     ) -> (Self, GeyserHandle) {
         // let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -126,7 +127,8 @@ impl GeyserSubscriber {
             secondary_grpc,
             slots_tx.clone(),
             transactions_tx,
-            yellowstone_blocklist,
+            blocklist_program_key,
+            leaders_selector,
         ));
         let geyser_handle = GeyserHandle {
             inner: geyser_handle,
@@ -146,7 +148,8 @@ impl GeyserSubscriber {
         secondary_grpc: ConfigUpstreamGrpc,
         slots_tx: broadcast::Sender<SlotUpdateInfoWithCommitment>,
         transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
-        yellowstone_blocklist: Arc<YellowstoneBlocklist>,
+        blocklist_program_key: Option<Pubkey>,
+        leaders_selector: Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     ) -> anyhow::Result<()> {
         let (shutdown1, shutdown2) = fork_oneshot(shutdown_rx);
         try_join(
@@ -156,14 +159,16 @@ impl GeyserSubscriber {
                 primary_grpc.x_token,
                 slots_tx,
                 transactions_tx.clone(),
-                Arc::clone(&yellowstone_blocklist),
+                &blocklist_program_key,
+                Arc::clone(&leaders_selector),
             ),
             Self::grpc_subscribe_secondary(
                 shutdown2,
                 secondary_grpc.endpoint,
                 secondary_grpc.x_token,
                 transactions_tx,
-                yellowstone_blocklist,
+                &blocklist_program_key,
+                leaders_selector,
             ),
         )
         .await?;
@@ -176,7 +181,8 @@ impl GeyserSubscriber {
         x_token: Option<String>,
         slots_tx: broadcast::Sender<SlotUpdateInfoWithCommitment>,
         transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
-        yellowstone_blocklist: Arc<YellowstoneBlocklist>,
+        blocklist_program_key: &Option<Pubkey>,
+        leaders_selector: Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     ) -> anyhow::Result<()> {
         loop {
             metrics::grpc_slot_set(CommitmentLevel::Processed, 0);
@@ -185,7 +191,7 @@ impl GeyserSubscriber {
 
             let mut slot_updates = BTreeMap::<Slot, SlotUpdateInfo>::new();
             let mut stream = tokio::select! {
-                result = Self::grpc_open(&endpoint, x_token.as_deref(), true, &yellowstone_blocklist.contract_pubkey) => {
+                result = Self::grpc_open(&endpoint, x_token.as_deref(), true, blocklist_program_key) => {
                     result?
                 }
                 _ = &mut shutdown_rx => return Ok(()),
@@ -197,21 +203,7 @@ impl GeyserSubscriber {
                         Some(Ok(msg)) => match msg.update_oneof {
                             Some(UpdateOneof::Account(SubscribeUpdateAccount{account, ..})) => {
                                 if let Some(acc) = account {
-                                    let key = encode(acc.pubkey).into_string();
-                                    let state = ListState::deserialize(acc.data.as_slice())?;
-                                    let mut deny_list = yellowstone_blocklist.deny_lists.write().await;
-                                    let mut allow_list = yellowstone_blocklist.allow_lists.write().await;
-
-                                    match state.meta.acl_type {
-                                        AclType::Allow => {
-                                            deny_list.remove(&key);
-                                            allow_list.insert(key, get_hashset(state.list));
-                                        }
-                                        AclType::Deny => {
-                                            allow_list.remove(&key);
-                                            deny_list.insert(key, get_hashset(state.list));
-                                        }
-                                    }
+                                    leaders_selector.update_list(&acc.data, encode(acc.pubkey).into_string()).await;
                                 }
                                 continue;
                             }
@@ -313,11 +305,12 @@ impl GeyserSubscriber {
         endpoint: String,
         x_token: Option<String>,
         transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
-        yellowstone_blocklist: Arc<YellowstoneBlocklist>,
+        blocklist_program_key: &Option<Pubkey>,
+        leaders_selector: Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     ) -> anyhow::Result<()> {
         loop {
             let mut stream = tokio::select! {
-                result = Self::grpc_open(&endpoint, x_token.as_deref(), false, &yellowstone_blocklist.contract_pubkey) => {
+                result = Self::grpc_open(&endpoint, x_token.as_deref(), false, blocklist_program_key) => {
                     result?
                 }
                 _ = &mut shutdown_rx => return Ok(()),
@@ -327,6 +320,12 @@ impl GeyserSubscriber {
                     _ = &mut shutdown_rx => return Ok(()),
                     message = stream.next() => match message {
                         Some(Ok(msg)) => match msg.update_oneof {
+                             Some(UpdateOneof::Account(SubscribeUpdateAccount{account, ..})) => {
+                                if let Some(acc) = account {
+                                    leaders_selector.update_list(&acc.data, encode(acc.pubkey).into_string()).await;
+                                }
+                                continue;
+                            }
                             Some(UpdateOneof::TransactionStatus(SubscribeUpdateTransactionStatus {
                                 slot,
                                 signature,
