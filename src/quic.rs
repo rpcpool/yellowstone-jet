@@ -3,7 +3,7 @@ use {
         cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
         config::{ConfigQuic, ConfigQuicTpuPort},
         metrics::jet as metrics,
-        quic_solana::ConnectionCache,
+        quic_solana::{ConnectionCache, ConnectionCacheSendPermit},
         transactions::SendTransactionInfoId,
     },
     futures::{
@@ -11,7 +11,7 @@ use {
         FutureExt,
     },
     solana_sdk::{clock::Slot, pubkey::Pubkey, signature::Signature},
-    std::{fmt, net::SocketAddr, sync::Arc},
+    std::{fmt, net::SocketAddr, sync::Arc, time::Duration},
     tokio::{sync::broadcast, time::timeout},
     tracing::{debug, instrument},
 };
@@ -85,6 +85,107 @@ impl UpcomingLeaderSchedule for ClusterTpuInfo {
     }
 }
 
+pub struct QuicSendTxPermit {
+    connection_permits: Vec<ConnectionCacheSendPermit>,
+    send_retry_count: usize,
+    send_timeout: Duration,
+    tx_broadcast_metrics: broadcast::Sender<QuicClientMetric>,
+}
+
+impl QuicSendTxPermit {
+    #[instrument(skip_all, fields(id, signature))]
+    pub async fn send_transaction(
+        self,
+        id: SendTransactionInfoId,
+        signature: Signature,
+        wire_transaction: Arc<Vec<u8>>,
+    ) {
+        let send_futs = self.connection_permits.into_iter().map(|permit| {
+            let tx_broadcast_metrics = self.tx_broadcast_metrics.clone();
+            let send_retry_count = self.send_retry_count;
+            let send_timeout = self.send_timeout;
+            let wire_tx = Arc::clone(&wire_transaction);
+            async move {
+                let tpu_info = permit.tpu_info;
+                let tpu_addr = permit.addr;
+                for _ in 0..send_retry_count {
+                    match timeout(send_timeout, permit.send_buffer(&wire_tx)).await {
+                        Ok(Ok(())) => {
+                            metrics::quic_send_attempts_inc(
+                                &tpu_info.leader,
+                                &tpu_addr,
+                                "success",
+                                "",
+                            );
+                            let metric = QuicClientMetric::SendAttempts {
+                                sig: signature,
+                                leader: tpu_info.leader,
+                                leader_tpu_addr: tpu_addr,
+                                slots: tpu_info.slots.to_vec(),
+                                error: None,
+                            };
+                            let _ = tx_broadcast_metrics.send(metric);
+                            return Ok(());
+                        }
+                        Ok(Err(error)) => {
+                            metrics::quic_send_attempts_inc(
+                                &tpu_info.leader,
+                                &tpu_addr,
+                                "error",
+                                &error.get_categorie(),
+                            );
+                            let metric = QuicClientMetric::SendAttempts {
+                                sig: signature,
+                                leader: tpu_info.leader,
+                                leader_tpu_addr: tpu_addr,
+                                slots: tpu_info.slots.to_vec(),
+                                error: Some(SendError::QuicError(error.to_string())),
+                            };
+                            let _ = tx_broadcast_metrics.send(metric);
+                            if error.is_timedout() {
+                                break;
+                            }
+                        }
+                        Err(_timeout) => {
+                            debug!(
+                                id,
+                                %signature,
+                                tpu.leader = %tpu_info.leader,
+                                tpu.slots = ?tpu_info.slots,
+                                tpu.quic = %tpu_addr,
+                                "failed to send transaction: timedout",
+                            );
+                            metrics::quic_send_attempts_inc(
+                                &tpu_info.leader,
+                                &tpu_addr,
+                                "timedout",
+                                "timedout",
+                            );
+
+                            let metric = QuicClientMetric::SendAttempts {
+                                sig: signature,
+                                leader: tpu_info.leader,
+                                leader_tpu_addr: tpu_addr,
+                                slots: tpu_info.slots.to_vec(),
+                                error: Some(SendError::Timeout),
+                            };
+                            let _ = tx_broadcast_metrics.send(metric);
+                            break;
+                        }
+                    }
+                }
+                Err(())
+            }
+        });
+        let success = join_all(send_futs)
+            .await
+            .into_iter()
+            .filter(|value| value.is_ok())
+            .count();
+        metrics::sts_tpu_send_inc(success);
+    }
+}
+
 impl QuicClient {
     pub fn new(
         upcoming_leader_schedule: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
@@ -116,6 +217,47 @@ impl QuicClient {
         self.tx_broadcast_metrics.subscribe()
     }
 
+    ///
+    /// Reserves a broadcast permit to upcoming Nth leaders.
+    ///
+    /// # Parameters
+    ///
+    /// * `leader_forward_count` - The number of leaders to broadcast/foward to
+    ///
+    pub async fn reserve_send_permit(
+        &self,
+        leader_forward_count: usize,
+    ) -> Option<QuicSendTxPermit> {
+        let tpus_info = self
+            .upcoming_leader_schedule
+            .get_leader_tpus(leader_forward_count, self.extra_tpu_forward.clone())
+            .await;
+        let futs = tpus_info
+            .into_iter()
+            .chain(self.extra_tpu_forward.iter().cloned())
+            .filter_map(|tpu_info| {
+                match self.config.tpu_port {
+                    ConfigQuicTpuPort::Normal => tpu_info.quic,
+                    ConfigQuicTpuPort::Forwards => tpu_info.quic_forwards,
+                }
+                .map(|addr| (tpu_info, addr))
+            })
+            .map(|(tpu_info, addr)| self.connection_cache.reserve_send_permit(tpu_info, addr));
+
+        let connection_permits = join_all(futs).await;
+        if connection_permits.is_empty() {
+            None
+        } else {
+            Some(QuicSendTxPermit {
+                connection_permits,
+                send_retry_count: self.config.send_retry_count,
+                tx_broadcast_metrics: self.tx_broadcast_metrics.clone(),
+                send_timeout: self.config.send_timeout,
+            })
+        }
+    }
+
+    #[deprecated(note = "use reserve_send_permit instead")]
     #[instrument(skip_all, fields(id, signature, leader_forward_count))]
     pub async fn send_transaction(
         &self,
@@ -257,5 +399,34 @@ impl QuicClient {
             .filter(|value| value.is_ok())
             .count();
         metrics::sts_tpu_send_inc(success);
+    }
+}
+
+pub mod teskit {
+    use {
+        super::UpcomingLeaderSchedule,
+        crate::cluster_tpu_info::TpuInfo,
+        futures::{future::BoxFuture, FutureExt},
+    };
+
+    pub struct MockClusterTpuInfo {
+        leaders: Vec<TpuInfo>,
+    }
+
+    impl MockClusterTpuInfo {
+        pub const fn new(leaders: Vec<TpuInfo>) -> Self {
+            Self { leaders }
+        }
+    }
+
+    impl UpcomingLeaderSchedule for MockClusterTpuInfo {
+        fn get_leader_tpus(
+            &self,
+            _leader_forward_lookahead: usize,
+            _extra_tpu_forward: Vec<TpuInfo>,
+        ) -> BoxFuture<'_, Vec<TpuInfo>> {
+            let leaders = self.leaders.clone();
+            async move { leaders }.boxed()
+        }
     }
 }

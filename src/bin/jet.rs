@@ -22,7 +22,6 @@ use {
         signal::unix::{signal, SignalKind},
         sync::{broadcast, oneshot, RwLock},
         task::JoinHandle,
-        time::{sleep, Duration},
     },
     tracing::{info, warn},
     yellowstone_jet::{
@@ -39,8 +38,8 @@ use {
         setup_tracing,
         stake::StakeInfo,
         task_group::TaskGroup,
-        transactions::{RootedTransactions, SendTransactionsPool},
-        util::{PubkeySigner, ValueObserver, WaitShutdown},
+        transactions::{GrpcRootedTxReceiver, SendTransactionsPool},
+        util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
     },
 };
 
@@ -78,6 +77,8 @@ enum ArgsCommandAdmin {
         #[clap(long)]
         identity: Option<PathBuf>,
     },
+    /// Reset identity
+    ResetIdentityKeypair,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -142,6 +143,9 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
             );
             println!("Successfully update identity to {identity}");
         }
+        ArgsCommandAdmin::ResetIdentityKeypair => {
+            client.reset_identity().await?;
+        }
     }
 
     Ok(())
@@ -157,6 +161,7 @@ async fn spawn_jet_gw_listener(
     loop {
         let jet_gw_config2 = jet_gw_config.clone();
         let tx_sender2 = tx_sender.clone();
+        let mut identity_observer2 = identity_observer.clone();
         let (stop_tx2, stop_rx2) = tokio::sync::oneshot::channel();
         let fut = identity_observer.until_value_change(move |current_identity| {
             if let Some(expected_identity) = expected_identity {
@@ -195,6 +200,13 @@ async fn spawn_jet_gw_listener(
                 drop(stop_tx2);
                 return Ok(());
             },
+            current_identity = identity_observer2.observe() => {
+                if let Some(expected_identity) = expected_identity {
+                    if current_identity.pubkey() != expected_identity {
+                        drop(stop_tx2);
+                    }
+                }
+            }
         }
     }
 }
@@ -238,15 +250,9 @@ fn spawn_lewis_metric_subscriber(
 async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     metrics::init();
     if let Some(identity) = config.identity.expected {
-        metrics::quic_set_indetity_expected(identity);
+        metrics::quic_set_identity_expected(identity);
     }
-    config
-        .yellowstone_blocklist
-        .set_lists(config.upstream.rpc.clone())
-        .await?;
-
-    let yellowstone_blocklist = Arc::new(config.yellowstone_blocklist);
-
+    // let flush_identity = Arc::new(flush_identity);
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
         shutdown_geyser_rx,
@@ -269,11 +275,22 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         yellowstone_blocklist,
     )
     .await;
-    let rooted_transactions = RootedTransactions::new(&geyser).await?;
+
+    let rooted_tx_geyser_rx = geyser
+        .subscribe_transactions()
+        .await
+        .expect("failed to subscribe geyser transactions");
+    let (rooted_transactions_rx, rooted_tx_loop_fut) =
+        GrpcRootedTxReceiver::new(rooted_tx_geyser_rx);
+
+    let identity_flusher_wg = IdentityFlusherWaitGroup::default();
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
-    let (quic_session, quic_identity_man) =
-        ConnectionCache::new(config.quic.clone(), initial_identity);
+    let (quic_session, quic_identity_man) = ConnectionCache::new(
+        config.quic.clone(),
+        initial_identity,
+        identity_flusher_wg.clone(),
+    );
 
     let quic_tx_sender = QuicClient::new(
         Arc::new(cluster_tpu_info.clone()),
@@ -284,13 +301,18 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
     let lewis = spawn_lewis_metric_subscriber(config.metrics_upstream, quic_tx_metrics_listener);
 
-    let send_transactions = SendTransactionsPool::new(
+    let (send_transactions, send_tx_pool_fut) = SendTransactionsPool::spawn(
         config.send_transaction_service,
-        blockhash_queue.clone(),
-        rooted_transactions.clone(),
-        quic_tx_sender.clone(),
+        Arc::new(blockhash_queue.clone()),
+        Box::new(rooted_transactions_rx),
+        Arc::new(quic_tx_sender.clone()),
     )
-    .await?;
+    .await;
+
+    // Add all flusher here
+    identity_flusher_wg
+        .add_flusher(Box::new(send_transactions.clone()))
+        .await;
 
     let rpc = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
         config.upstream.rpc.clone(),
@@ -401,45 +423,11 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         cluster_tpu_info_tasks.await.expect("cluster_tpu_info");
     });
 
-    tg.spawn_with_shutdown("rooted_transactions", |mut stop| async move {
-        tokio::select! {
-            result = rooted_transactions.clone().wait_shutdown() => {
-                result.expect("rooted_transactions");
-            },
-            _ = &mut stop => {
-                rooted_transactions.shutdown();
-                rooted_transactions.wait_shutdown().await.expect("rooted_transactions shutdown");
-            },
-        }
+    tg.spawn_cancelable("rooted_transactions", async move {
+        rooted_tx_loop_fut.await;
     });
 
-    tg.spawn_with_shutdown("send_transactions", |mut stop| async move {
-        tokio::select! {
-            result = send_transactions.clone().wait_shutdown() => {
-                result.expect("send_transactions");
-            },
-            _ = &mut stop => {
-
-                let mut pool_size = metrics::sts_pool_get_size();
-                info!("waiting empty STS pool, size: {pool_size}");
-                loop {
-                    let new_pool_size = metrics::sts_pool_get_size();
-                    if new_pool_size == 0 {
-                        break;
-                    }
-                    if pool_size != new_pool_size {
-                        info!("waiting empty STS pool, size: {pool_size}");
-                        pool_size = new_pool_size;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-
-                info!("shutdown STS");
-                send_transactions.shutdown();
-                send_transactions.wait_shutdown().await.expect("send_transactions shutdown");
-            },
-        }
-    });
+    tg.spawn_cancelable("send_transactions_pool", send_tx_pool_fut);
 
     tg.spawn_with_shutdown("stake", |mut stop| async move {
         tokio::select! {
@@ -473,7 +461,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     });
 
     let (first, result, rest) = tg.wait_one().await.expect("task group empty");
-
     rpc_admin.shutdown();
     rpc_solana_like.shutdown();
 
