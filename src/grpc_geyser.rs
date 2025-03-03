@@ -1,10 +1,12 @@
 use {
     crate::{
+        cluster_tpu_info::BlocklistUpdater,
         config::ConfigUpstreamGrpc,
         metrics::jet as metrics,
         util::{fork_oneshot, BlockHeight, CommitmentLevel, IncrementalBackoff},
     },
     anyhow::Context,
+    bs58::encode,
     futures::{
         future::{try_join, TryFutureExt},
         stream::{Stream, StreamExt},
@@ -13,7 +15,7 @@ use {
     maplit::hashmap,
     semver::{Version, VersionReq},
     serde::Deserialize,
-    solana_sdk::{clock::Slot, hash::Hash, signature::Signature},
+    solana_sdk::{clock::Slot, hash::Hash, pubkey::Pubkey, signature::Signature},
     std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration},
     tokio::{
         sync::{
@@ -27,12 +29,14 @@ use {
     tracing::{debug, error, info, warn},
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
+        // geyser::SubscribeRequestFilterAccounts,
         prelude::{
             subscribe_update::UpdateOneof, BlockHeight as GrpcBlockHeight,
             CommitmentLevel as GrpcCommitmentLevel, SubscribeRequest,
-            SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots,
-            SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta,
-            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus,
+            SubscribeRequestFilterAccounts, SubscribeRequestFilterBlocksMeta,
+            SubscribeRequestFilterSlots, SubscribeRequestFilterTransactions, SubscribeUpdate,
+            SubscribeUpdateAccount, SubscribeUpdateBlockMeta, SubscribeUpdateSlot,
+            SubscribeUpdateTransactionStatus,
         },
         tonic::Status,
     },
@@ -107,6 +111,8 @@ impl GeyserSubscriber {
         shutdown_rx: oneshot::Receiver<()>,
         primary_grpc: ConfigUpstreamGrpc,
         secondary_grpc: ConfigUpstreamGrpc,
+        blocklist_program_key: Option<Pubkey>,
+        leaders_selector: Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     ) -> (Self, GeyserHandle) {
         // let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -121,6 +127,8 @@ impl GeyserSubscriber {
             secondary_grpc,
             slots_tx.clone(),
             transactions_tx,
+            blocklist_program_key,
+            leaders_selector,
         ));
         let geyser_handle = GeyserHandle {
             inner: geyser_handle,
@@ -134,20 +142,14 @@ impl GeyserSubscriber {
         (geyser, geyser_handle)
     }
 
-    pub fn subscribe_slots(&self) -> broadcast::Receiver<SlotUpdateInfoWithCommitment> {
-        self.slots_tx.subscribe()
-    }
-
-    pub async fn subscribe_transactions(&self) -> Option<mpsc::Receiver<GrpcUpdateMessage>> {
-        self.transactions_rx.lock().await.take()
-    }
-
     async fn grpc_subscribe(
         shutdown_rx: oneshot::Receiver<()>,
         primary_grpc: ConfigUpstreamGrpc,
         secondary_grpc: ConfigUpstreamGrpc,
         slots_tx: broadcast::Sender<SlotUpdateInfoWithCommitment>,
         transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
+        blocklist_program_key: Option<Pubkey>,
+        leaders_selector: Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     ) -> anyhow::Result<()> {
         let (shutdown1, shutdown2) = fork_oneshot(shutdown_rx);
         try_join(
@@ -157,12 +159,16 @@ impl GeyserSubscriber {
                 primary_grpc.x_token,
                 slots_tx,
                 transactions_tx.clone(),
+                &blocklist_program_key,
+                Arc::clone(&leaders_selector),
             ),
             Self::grpc_subscribe_secondary(
                 shutdown2,
                 secondary_grpc.endpoint,
                 secondary_grpc.x_token,
                 transactions_tx,
+                &blocklist_program_key,
+                leaders_selector,
             ),
         )
         .await?;
@@ -175,6 +181,8 @@ impl GeyserSubscriber {
         x_token: Option<String>,
         slots_tx: broadcast::Sender<SlotUpdateInfoWithCommitment>,
         transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
+        blocklist_program_key: &Option<Pubkey>,
+        leaders_selector: Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     ) -> anyhow::Result<()> {
         loop {
             metrics::grpc_slot_set(CommitmentLevel::Processed, 0);
@@ -183,7 +191,7 @@ impl GeyserSubscriber {
 
             let mut slot_updates = BTreeMap::<Slot, SlotUpdateInfo>::new();
             let mut stream = tokio::select! {
-                result = Self::grpc_open(&endpoint, x_token.as_deref(), true) => {
+                result = Self::grpc_open(&endpoint, x_token.as_deref(), true, blocklist_program_key) => {
                     result?
                 }
                 _ = &mut shutdown_rx => return Ok(()),
@@ -193,6 +201,12 @@ impl GeyserSubscriber {
                     _ = &mut shutdown_rx => return Ok(()),
                     message = stream.next() => match message {
                         Some(Ok(msg)) => match msg.update_oneof {
+                            Some(UpdateOneof::Account(SubscribeUpdateAccount{account, ..})) => {
+                                if let Some(acc) = account {
+                                    leaders_selector.update_list(&acc.data, encode(acc.pubkey).into_string()).await;
+                                }
+                                continue;
+                            }
                             Some(UpdateOneof::Slot(SubscribeUpdateSlot { slot, status, .. })) => {
                                 let entry = slot_updates.entry(slot).or_default();
                                 entry.slot = true;
@@ -291,10 +305,12 @@ impl GeyserSubscriber {
         endpoint: String,
         x_token: Option<String>,
         transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
+        blocklist_program_key: &Option<Pubkey>,
+        leaders_selector: Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     ) -> anyhow::Result<()> {
         loop {
             let mut stream = tokio::select! {
-                result = Self::grpc_open(&endpoint, x_token.as_deref(), false) => {
+                result = Self::grpc_open(&endpoint, x_token.as_deref(), false, blocklist_program_key) => {
                     result?
                 }
                 _ = &mut shutdown_rx => return Ok(()),
@@ -304,6 +320,12 @@ impl GeyserSubscriber {
                     _ = &mut shutdown_rx => return Ok(()),
                     message = stream.next() => match message {
                         Some(Ok(msg)) => match msg.update_oneof {
+                             Some(UpdateOneof::Account(SubscribeUpdateAccount{account, ..})) => {
+                                if let Some(acc) = account {
+                                    leaders_selector.update_list(&acc.data, encode(acc.pubkey).into_string()).await;
+                                }
+                                continue;
+                            }
                             Some(UpdateOneof::TransactionStatus(SubscribeUpdateTransactionStatus {
                                 slot,
                                 signature,
@@ -346,6 +368,7 @@ impl GeyserSubscriber {
         endpoint: &str,
         x_token: Option<&str>,
         full: bool,
+        contract_pubkey: &Option<Pubkey>,
     ) -> anyhow::Result<impl Stream<Item = Result<SubscribeUpdate, Status>>> {
         let mut backoff = IncrementalBackoff::default();
         loop {
@@ -389,11 +412,19 @@ impl GeyserSubscriber {
                 (hashmap! {}, hashmap! {})
             };
 
+            let accounts = if let Some(acc) = contract_pubkey {
+                hashmap! { "client".to_owned() =>
+                SubscribeRequestFilterAccounts {account:Vec::new(),owner:vec![acc.to_string()], filters: vec![], ..Default::default() }}
+            } else {
+                hashmap! {}
+            };
+
             match client.subscribe_once(SubscribeRequest {
                 slots,
                 transactions_status: hashmap! { "".to_owned() => SubscribeRequestFilterTransactions::default() },
                 blocks_meta,
                 commitment: Some(GrpcCommitmentLevel::Processed as i32),
+                accounts,
                 ..SubscribeRequest::default()
             }).await {
                 Ok(stream) => {
@@ -449,5 +480,24 @@ impl GeyserSubscriber {
         );
 
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+pub trait GeyserStreams {
+    fn subscribe_slots(&self) -> broadcast::Receiver<SlotUpdateInfoWithCommitment>;
+
+    async fn subscribe_transactions(&self) -> Option<mpsc::Receiver<GrpcUpdateMessage>>;
+}
+
+#[async_trait::async_trait]
+
+impl GeyserStreams for GeyserSubscriber {
+    fn subscribe_slots(&self) -> broadcast::Receiver<SlotUpdateInfoWithCommitment> {
+        self.slots_tx.subscribe()
+    }
+
+    async fn subscribe_transactions(&self) -> Option<mpsc::Receiver<GrpcUpdateMessage>> {
+        self.transactions_rx.lock().await.take()
     }
 }
