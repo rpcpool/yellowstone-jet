@@ -1,5 +1,5 @@
 use {
-    crate::util::CommitmentLevel,
+    crate::{feature_flags::FeatureSet, util::CommitmentLevel},
     anyhow::Context,
     serde::{
         de::{self, Deserializer},
@@ -67,6 +67,10 @@ pub struct ConfigJet {
     /// Validators blocklist
     #[serde(default)]
     pub blocklist: ConfigBlocklist,
+
+    /// Features Flags
+    #[serde(default)]
+    pub features: FeatureSet,
 }
 
 #[derive(Debug, Deserialize)]

@@ -37,7 +37,7 @@ use {
     },
     tracing::{error, info},
     yellowstone_jet::{
-        grpc_jet::Payload,
+        payload::TransactionPayload,
         proto::jet::{
             jet_gateway_client::JetGatewayClient, publish_request::Message as PublishMessage,
             PublishRequest, PublishResponse, PublishTransaction,
@@ -186,13 +186,12 @@ impl TransactionSender {
                 .map_err(Into::into),
             Self::JetGateway { tx } => {
                 let signature = transaction.signatures[0];
-                let payload = Payload::new(&transaction, config)?
-                    .encode()
-                    .context("failed to serialize to json.")?;
+                let payload = TransactionPayload::try_from((&transaction, config))?;
+                let proto_tx = payload.to_proto::<PublishTransaction>();
                 tx.lock()
                     .await
                     .send(PublishRequest {
-                        message: Some(PublishMessage::Transaction(PublishTransaction { payload })),
+                        message: Some(PublishMessage::Transaction(proto_tx)),
                     })
                     .await?;
                 Ok(signature)
