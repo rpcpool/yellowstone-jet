@@ -21,8 +21,8 @@ use {
             subscribe_request::Message as SubscribeRequestMessage,
             subscribe_response::Message as SubscribeResponseMessage,
             subscribe_transaction::Payload, AnswerChallengeRequest, AnswerChallengeResponse,
-            AuthRequest, FeatureFlags, GetChallengeRequest, Ping, Pong, SubscribeRequest,
-            SubscribeResponse, SubscribeTransaction, SubscribeUpdateLimit,
+            AuthRequest, FeatureFlags, GetChallengeRequest, InitialSubscribeRequest, Ping, Pong,
+            SubscribeRequest, SubscribeResponse, SubscribeTransaction, SubscribeUpdateLimit,
         },
         pubkey_challenger::{append_nonce_and_sign, OneTimeAuthToken},
         rpc::rpc_solana_like::RpcServerImpl as RpcServerImplSolanaLike,
@@ -45,7 +45,7 @@ use {
         metadata::{errors::InvalidMetadataValue, AsciiMetadataValue},
         service::Interceptor,
         transport::channel::{ClientTlsConfig, Endpoint},
-        Request, Response, Status, Streaming,
+        Request, Status,
     },
     tracing::{debug, error, info},
     uuid::Uuid,
@@ -148,6 +148,10 @@ async fn get_jet_gw_subscribe_auth_token(
     }
 }
 
+/// Establish a bidirectional streaming connection to the jet-gateway
+///
+/// Handles authentication and feature negotiation with graceful fallback if features
+/// aren't supported by the gateway server.
 pub async fn grpc_subscribe_jet_gw(
     signer: ArcSigner,
     endpoint: String,
@@ -163,6 +167,10 @@ pub async fn grpc_subscribe_jet_gw(
         get_jet_gw_subscribe_auth_token(Arc::clone(&signer), endpoint.clone(), x_token.clone())
             .await?;
 
+    // Create channel with adequate buffer size
+    let (subscribe_tx, subscribe_rx) = futures::channel::mpsc::channel(stream_buffer_size);
+
+    // Connect to the gateway for the actual subscription
     let channel = Endpoint::from_shared(endpoint.clone())?
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(1))
@@ -171,10 +179,12 @@ pub async fn grpc_subscribe_jet_gw(
         .await?;
 
     let mut client = JetGatewayClient::with_interceptor(channel, x_token);
-    let (subscribe_tx, subscribe_rx) = futures::channel::mpsc::channel(stream_buffer_size);
+
+    // Construct the initial message pipeline with buffer for our initialization sequence
+    let (init_tx, init_rx) = futures::channel::mpsc::channel(2); // Small buffer for init messages
 
     // Prepare OTAK authentication
-    let mut subscribe_req = Request::new(subscribe_rx);
+    let mut subscribe_req = Request::new(init_rx);
     let ser_otak = bincode::serialize(&otak).expect("failed to serialize one-time-auth-token");
     let bs58_otak = bs58::encode(ser_otak).into_string();
     subscribe_req.metadata_mut().insert(
@@ -184,54 +194,68 @@ pub async fn grpc_subscribe_jet_gw(
             .expect("failed to convert to AsciiMetadataValue"),
     );
 
-    // Establish authenticated connection
-    let response: Response<Streaming<SubscribeResponse>> = client.subscribe(subscribe_req).await?;
-    let stream = response.into_inner();
+    // Establish authenticated connection first
+    let response = match client.subscribe(subscribe_req).await {
+        Ok(resp) => resp.into_inner(),
+        Err(status) => {
+            return Err(anyhow::anyhow!(
+                "Failed to establish subscription: {}",
+                status
+            ));
+        }
+    };
 
-    // SAFE APPROACH: Send an update limit message first
-    // This is guaranteed to work with older gateways and avoids the ping check
-    let limit_msg = SubscribeRequest {
+    let stream = response;
+
+    // Important: Send rate limit message first - this is always expected
+    let limit_message = SubscribeRequest {
         message: Some(SubscribeRequestMessage::UpdateLimit(SubscribeUpdateLimit {
-            messages_per100ms: 10, // Safe default value
+            messages_per100ms: 100, // Default limit, will be updated by the server loop
         })),
     };
 
-    // Send the limit update first to ensure connection is stable
-    let mut subscribe_tx_clone = subscribe_tx.clone();
-    if let Err(e) = subscribe_tx_clone.send(limit_msg).await {
-        debug!("Failed to send initial limit update: {}", e);
-        return Ok((subscribe_tx, stream));
+    if let Err(e) = init_tx.clone().send(limit_message).await {
+        return Err(anyhow::anyhow!("Failed to send rate limit message: {}", e));
     }
 
-    // Wait a bit to ensure the connection is stable
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Try to send feature flags if any are enabled - but after the limit message
+    if !features.is_empty() {
+        debug!(
+            "Sending InitialSubscribeRequest with feature flags: {:?}",
+            features.enabled_features()
+        );
+        let init_request = SubscribeRequest {
+            message: Some(SubscribeRequestMessage::Init(InitialSubscribeRequest {
+                features: Some(FeatureFlags {
+                    supported_features: features.enabled_features(),
+                }),
+            })),
+        };
 
-    // Now try to send feature flags
-    // We do this in a fire-and-forget way since errors shouldn't break the connection
-    if !features.enabled_features().is_empty() {
-        tokio::spawn({
-            let endpoint = endpoint.clone();
-            let mut subscribe_tx = subscribe_tx.clone();
-            let features = features.clone();
-            async move {
-                // Send feature flags in a separate task to avoid blocking
-                let feature_request = SubscribeRequest {
-                    message: Some(SubscribeRequestMessage::Features(FeatureFlags {
-                        supported_features: features.enabled_features(),
-                    })),
-                };
+        // Try to send feature flags, but don't fail completely if they're rejected
+        if let Err(e) = init_tx.clone().send(init_request).await {
+            return Err(anyhow::anyhow!(
+                "Failed to send feature initialization request: {}. \
+                The gateway may not support requested features - consider disabling them",
+                e
+            ));
+        }
+    }
 
-                // If this fails, it's likely because the gateway doesn't support feature flags
-                if let Err(e) = subscribe_tx.send(feature_request).await {
-                    debug!("Failed to send feature flags (likely older gateway): {}", e);
-                    // Track metrics for unsupported features
-                    for feature in features.enabled_features() {
-                        metrics::jet::increment_gateway_version_mismatch(&endpoint, &feature);
-                    }
+    tokio::spawn(async move {
+        let mut subscribe_rx: futures::channel::mpsc::Receiver<SubscribeRequest> = subscribe_rx;
+        let mut init_tx = init_tx;
+
+        while let Some(msg) = subscribe_rx.next().await {
+            if msg.message.is_some() {
+                if init_tx.send(msg).await.is_err() {
+                    break;
                 }
+            } else {
+                debug!("Dropping empty message - not sending to gateway");
             }
-        });
-    }
+        }
+    });
 
     Ok((subscribe_tx, stream))
 }
@@ -261,12 +285,20 @@ impl GrpcServer {
         const STREAM_BUFFER_SIZE: usize = 10;
         const MAX_SEND_TRANSACTIONS: usize = 10;
         const LIMIT_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
+        const MAX_QUICK_DISCONNECTS: usize = 3;
 
         let mut backoff = IncrementalBackoff::default();
         let mut tasks = JoinSet::<anyhow::Result<()>>::new();
+        let mut quick_disconnects = 0;
+        let mut last_connect_time = std::time::Instant::now();
 
         loop {
             backoff.maybe_tick().await;
+
+            // Reset quick disconnect counter if we've been connected for a while
+            if last_connect_time.elapsed() > Duration::from_secs(5) {
+                quick_disconnects = 0;
+            }
 
             let (mut sink, mut stream) = match Self::grpc_connect(
                 Arc::clone(&signer),
@@ -279,10 +311,22 @@ impl GrpcServer {
             {
                 Ok((sink, stream)) => {
                     backoff.reset();
+                    last_connect_time = std::time::Instant::now();
                     (sink, stream)
                 }
                 Err(error) => {
                     error!(?error, "failed to connect to gRPC jet-gateway");
+
+                    // If error mentions feature flags, exit completely
+                    if error.to_string().contains("features")
+                        || error.to_string().contains("Feature")
+                    {
+                        error!("Fatal error - feature flags not supported by gateway. Please remove them from config.yml");
+                        // Wait a bit before exiting to allow log to flush
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        std::process::exit(1);
+                    }
+
                     backoff.init();
                     continue;
                 }
@@ -290,78 +334,94 @@ impl GrpcServer {
 
             let mut limit_interval = interval(LIMIT_UPDATE_INTERVAL);
 
-            loop {
-                if let Err(error) = async {
-                    tokio::select! {
-                        _ = limit_interval.tick() => {
-                            let messages_per100ms = config
-                                .max_streams
-                                .unwrap_or_else(metrics::jet::cluster_identity_stake_get_max_streams);
-                            let message = SubscribeRequest {
-                                message: Some(SubscribeRequestMessage::UpdateLimit(SubscribeUpdateLimit { messages_per100ms }))
-                            };
-                            sink.send(message).await.context("failed to send limit value")
-                        }
-                        message = stream.next(), if tasks.len() < MAX_SEND_TRANSACTIONS => {
-                            let message = message
-                                .ok_or(anyhow::anyhow!("stream finished"))?
-                                .context("failed to receive message")?
-                                .message
-                                .ok_or(anyhow::anyhow!("no message in response"))?;
+            let loop_result = async {
+                loop {
+                    if let Err(error) = async {
+                        tokio::select! {
+                            _ = limit_interval.tick() => {
+                                let messages_per100ms = config
+                                    .max_streams
+                                    .unwrap_or_else(metrics::jet::cluster_identity_stake_get_max_streams);
+                                let message = SubscribeRequest {
+                                    message: Some(SubscribeRequestMessage::UpdateLimit(SubscribeUpdateLimit { messages_per100ms }))
+                                };
+                                sink.send(message).await.context("failed to send limit value")
+                            }
+                            message = stream.next(), if tasks.len() < MAX_SEND_TRANSACTIONS => {
+                                let message = message
+                                    .ok_or(anyhow::anyhow!("stream finished"))?
+                                    .context("failed to receive message")?
+                                    .message
+                                    .ok_or(anyhow::anyhow!("no message in response"))?;
 
-                            match message {
-                                SubscribeResponseMessage::Ping(Ping { id }) => {
-                                    let message = SubscribeRequest {
-                                        message: Some(SubscribeRequestMessage::Pong(Pong { id })),
-                                    };
-                                    sink.send(message).await.context("failed to send pong response")
-                                },
-                                SubscribeResponseMessage::Pong(_) => Ok(()),
-                                SubscribeResponseMessage::Transaction(transaction) => {
-                                    let timestamp = transaction.payload.as_ref().and_then(|p| {
-                                        if let Payload::NewPayload(wrapper) = p {
-                                            wrapper.timestamp
-                                        } else {
-                                            None
-                                        }
-                                    });
+                                match message {
+                                    SubscribeResponseMessage::Ping(Ping { id }) => {
+                                        let message = SubscribeRequest {
+                                            message: Some(SubscribeRequestMessage::Pong(Pong { id })),
+                                        };
+                                        sink.send(message).await.context("failed to send pong response")
+                                    },
+                                    SubscribeResponseMessage::Pong(_) => Ok(()),
+                                    SubscribeResponseMessage::Transaction(transaction) => {
+                                        let timestamp = transaction.payload.as_ref().and_then(|p| {
+                                            if let Payload::NewPayload(wrapper) = p {
+                                                wrapper.timestamp
+                                            } else {
+                                                None
+                                            }
+                                        });
 
-                                    let tx_sender = tx_sender.clone();
-                                    tasks.spawn(async move {
-                                        let handler = GrpcTransactionHandler::new(tx_sender);
-                                        match handler.handle_transaction(transaction).await {
-                                            Ok(_) => {
-                                                if let Some(gateway_timestamp) = timestamp {
-                                                    let latency = ms_since_epoch().saturating_sub(gateway_timestamp);
-                                                    metrics::jet::observe_forwarded_txn_latency(latency as f64);
+                                        let tx_sender = tx_sender.clone();
+                                        tasks.spawn(async move {
+                                            let handler = GrpcTransactionHandler::new(tx_sender);
+                                            match handler.handle_transaction(transaction).await {
+                                                Ok(_) => {
+                                                    if let Some(gateway_timestamp) = timestamp {
+                                                        let latency = ms_since_epoch().saturating_sub(gateway_timestamp);
+                                                        metrics::jet::observe_forwarded_txn_latency(latency as f64);
+                                                    }
+                                                    increment_send_transaction_success();
                                                 }
-                                                increment_send_transaction_success();
+                                                Err(e) => {
+                                                    increment_send_transaction_error();
+                                                    error!(?e, "Failed to handle transaction");
+                                                }
                                             }
-                                            Err(e) => {
-                                                increment_send_transaction_error();
-                                                error!(?e, "Failed to handle transaction");
-                                            }
-                                        }
+                                            Ok(())
+                                        });
                                         Ok(())
-                                    });
-                                    Ok(())
+                                    }
                                 }
                             }
-                        }
-                        Some(result) = tasks.join_next() => {
-                            let result = result.expect("failed to join send_transaction task");
-                            if result.is_err() {
-                                increment_send_transaction_error();
-                                error!(?result, "failed to send transaction");
-                            } else {
-                                increment_send_transaction_success();
+                            Some(result) = tasks.join_next() => {
+                                let result = result.expect("failed to join send_transaction task");
+                                if result.is_err() {
+                                    increment_send_transaction_error();
+                                    error!(?result, "failed to send transaction");
+                                } else {
+                                    increment_send_transaction_success();
+                                }
+                                Ok(())
                             }
-                            Ok(())
                         }
+                    }.await {
+                        error!(?error, "Error in gateway stream");
+                        return error;
                     }
-                }.await {
-                    error!(?error);
-                    break;
+                }
+            }.await;
+
+            // If we get disconnected quickly too many times, there might be a protocol issue
+            if last_connect_time.elapsed() < Duration::from_secs(2) {
+                quick_disconnects += 1;
+                if quick_disconnects >= MAX_QUICK_DISCONNECTS {
+                    error!("Too many quick disconnections ({quick_disconnects}). Last error: {loop_result}");
+                    error!(
+                        "This may indicate a protocol mismatch or feature flag incompatibility."
+                    );
+                    error!("Waiting longer before reconnecting...");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    quick_disconnects = 0;
                 }
             }
         }
@@ -382,20 +442,22 @@ impl GrpcServer {
         let mut tasks = JoinSet::new();
         for endpoint in endpoints.iter().cloned() {
             let signer2 = Arc::clone(&signer);
-            let features = features.clone();
+            let features_clone = features.clone();
             tasks.spawn(
                 grpc_subscribe_jet_gw(
                     signer2,
                     endpoint.clone(),
                     x_token.clone(),
                     stream_buffer_size,
-                    features,
+                    features_clone,
                 )
                 .map(|result| (result, endpoint)),
             );
         }
 
         let mut last_err = None;
+        let mut feature_err = false;
+
         loop {
             match tasks.join_next().await {
                 Some(Ok((Ok((sink, stream)), endpoint))) => {
@@ -404,7 +466,17 @@ impl GrpcServer {
                     return Ok((sink, stream));
                 }
                 Some(Ok((Err(error), endpoint))) => {
-                    debug!(endpoint, ?error, "failed to connect");
+                    // Check if error is related to feature flags
+                    if error.to_string().contains("features") {
+                        feature_err = true;
+                        error!(
+                            endpoint,
+                            "Gateway rejected feature flags - disable them in your configuration file: {:?}",
+                            error
+                        );
+                    } else {
+                        debug!(endpoint, ?error, "failed to connect");
+                    }
                     last_err = Some(error);
                     continue;
                 }
@@ -413,7 +485,15 @@ impl GrpcServer {
                     last_err = Some(anyhow::anyhow!(error));
                     continue;
                 }
-                None => return Err(last_err.expect("error should exists")),
+                None => {
+                    if feature_err {
+                        return Err(anyhow::anyhow!(
+                            "Failed to connect to any gateway: Feature flags not supported. \
+                        Remove 'features.enabled_features' from your configuration file."
+                        ));
+                    }
+                    return Err(last_err.expect("error should exist"));
+                }
             }
         }
     }

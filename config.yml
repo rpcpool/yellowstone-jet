@@ -138,6 +138,4 @@ quic:
 #       - DUND26mEDfFeaPsVof3YvbXDRvpuQX7HMUJrLgEWzYw4
 
 features:
-  enabled_features:
-    - payload_v2
-    - blocklist_pdas
+  enabled_features: []

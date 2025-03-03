@@ -16,22 +16,16 @@ The minor version will be incremented upon a breaking change and the patch versi
   - Legacy format support with base58/base64 encoding options
   - New structured format with enhanced configuration capabilities
   - Automatic format detection and graceful degradation
-- Added new transaction handling components:
-  - `TransactionPayload` enum for unified payload handling
-  - `TransactionHandler` for centralized transaction processing
-  - `TransactionDecoder` for reliable payload decoding
-- Enhanced error handling:
-  - Detailed error types with proper error propagation
-  - Improved validation and sanitization checks
-  - Better error messages for debugging
+- Added feature flag system for negotiating capabilities with gateway servers
+- Enhanced gRPC connection stability:
+  - Improved error handling for disconnections
+  - Better detection of problematic connections
+  - Added feature flag negotiation with graceful fallback
+- Improved empty message handling to prevent protocol errors
 - Added comprehensive configuration support:
-  - Flexible transaction encoding options
-  - Extended sanitization and preflight checks
+  - Transaction encoding configuration
+  - Extended transaction validation options
   - Support for blocklist PDAs
-- Improved testing infrastructure:
-  - Unit tests for all payload formats
-  - Integration tests for format conversion
-  - Configuration preservation tests
 
 ### Breaking Changes
 
@@ -39,18 +33,13 @@ The minor version will be incremented upon a breaking change and the patch versi
   - Changed base transaction message format
   - Updated protobuf definitions for compatibility
   - Modified legacy payload handling
-- Updated RPC interfaces:
-  - New transaction validation flow
-  - Changed configuration parameter handling
-  - Modified response formats for better error reporting
 
 ### Fixes
 
 - Fixed encoding/decoding edge cases in transaction handling
-- Improved error handling for invalid configurations
+- Improved feature flag compatibility detection
 - Enhanced transaction validation reliability
-- Fixed configuration preservation through conversion
-<<<<<<< HEAD
+- Fixed connection stability issues
 
 ## [10.6.0]
 
@@ -65,8 +54,6 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 - Refactor `SendTransactionsPool`, `SendTransactionsPoolTask`, `RootedTransactions`, `QuicClient`, `ClusterTpuInfo`, `BlockhasQueue`
 - Added integration test for `SendTransactionsPool`, `IdentityFlusherWaitGroup` and `RpcServer`.
-=======
->>>>>>> 06e9e60 (improved changelog)
 
 ## [10.5.0]
 
