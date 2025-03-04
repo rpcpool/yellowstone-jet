@@ -6,7 +6,6 @@ use {
         util::{fork_oneshot, BlockHeight, CommitmentLevel, IncrementalBackoff},
     },
     anyhow::Context,
-    bs58::encode,
     futures::{
         future::{try_join, TryFutureExt},
         stream::{Stream, StreamExt},
@@ -203,7 +202,15 @@ impl GeyserSubscriber {
                         Some(Ok(msg)) => match msg.update_oneof {
                             Some(UpdateOneof::Account(SubscribeUpdateAccount{account, ..})) => {
                                 if let Some(acc) = account {
-                                    leaders_selector.update_list(&acc.data, encode(acc.pubkey).into_string()).await;
+                                    let pubkey_bytes  = acc.pubkey;
+
+                                    if pubkey_bytes.len() == 32 {
+                                        let pubkey_array: [u8; 32] = pubkey_bytes.try_into().expect("slice with incorrect length");
+                                        let pubkey = Pubkey::new_from_array(pubkey_array);
+                                        leaders_selector.update_list(&acc.data, pubkey).await;
+                                    } else {
+                                        warn!("gRPC: invalid pubkey from contract");
+                                    }
                                 }
                                 continue;
                             }
@@ -322,7 +329,15 @@ impl GeyserSubscriber {
                         Some(Ok(msg)) => match msg.update_oneof {
                              Some(UpdateOneof::Account(SubscribeUpdateAccount{account, ..})) => {
                                 if let Some(acc) = account {
-                                    leaders_selector.update_list(&acc.data, encode(acc.pubkey).into_string()).await;
+                                    let pubkey_bytes  = acc.pubkey;
+
+                                    if pubkey_bytes.len() == 32 {
+                                        let pubkey_array: [u8; 32] = pubkey_bytes.try_into().expect("slice with incorrect length");
+                                        let pubkey = Pubkey::new_from_array(pubkey_array);
+                                        leaders_selector.update_list(&acc.data, pubkey).await;
+                                    } else {
+                                        warn!("gRPC: invalid pubkey from contract");
+                                    }
                                 }
                                 continue;
                             }

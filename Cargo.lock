@@ -5389,7 +5389,7 @@ dependencies = [
 [[package]]
 name = "solana-yellowstone-blocklist"
 version = "0.1.0"
-source = "git+https://github.com/rpcpool/solana-yellowstone-blocklist.git#0329bc965aa1ae667d5fe03bee295f12deb82413"
+source = "git+https://github.com/rpcpool/solana-yellowstone-blocklist.git?tag=1.0.0#0329bc965aa1ae667d5fe03bee295f12deb82413"
 dependencies = [
  "bincode",
  "borsh 1.5.5",

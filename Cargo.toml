@@ -54,7 +54,7 @@ solana-streamer = "~2.1.11"
 solana-tpu-client = "~2.1.11"
 solana-transaction-status = "~2.1.11"
 solana-version = "~2.1.11"
-solana-yellowstone-blocklist = { git = "https://github.com/rpcpool/solana-yellowstone-blocklist.git" }
+solana-yellowstone-blocklist = { git = "https://github.com/rpcpool/solana-yellowstone-blocklist.git", tag="1.0.0"}
 thiserror = "1.0.58"
 tokio = { version = "1.36.0", features = ["rt-multi-thread", "macros"] }
 tokio-stream = "0.1.15"

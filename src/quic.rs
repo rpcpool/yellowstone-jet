@@ -215,7 +215,7 @@ impl QuicClient {
     pub async fn reserve_send_permit(
         &self,
         leader_forward_count: usize,
-        list_pda_keys: Vec<String>,
+        blocklist_keys: Vec<Pubkey>,
     ) -> Option<QuicSendTxPermit> {
         let mut tpus_info = self
             .upcoming_leader_schedule
@@ -224,7 +224,7 @@ impl QuicClient {
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
         self.leaders_selector
-            .block_leaders(&mut tpus_info, &list_pda_keys)
+            .block_leaders(&mut tpus_info, &blocklist_keys)
             .await;
 
         let futs = tpus_info
@@ -259,7 +259,7 @@ impl QuicClient {
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
         leader_forward_count: usize,
-        list_pda_keys: Vec<String>,
+        blocklist_keys: Vec<Pubkey>,
     ) {
         let mut tpus_info = self
             .upcoming_leader_schedule
@@ -268,7 +268,7 @@ impl QuicClient {
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
         self.leaders_selector
-            .block_leaders(&mut tpus_info, &list_pda_keys)
+            .block_leaders(&mut tpus_info, &blocklist_keys)
             .await;
 
         let tpu_send_fut = tpus_info.into_iter().map(|tpu_info| {

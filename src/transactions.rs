@@ -12,6 +12,7 @@ use {
     futures::future::BoxFuture,
     solana_sdk::{
         clock::{Slot, MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES},
+        pubkey::Pubkey,
         signature::Signature,
         transaction::VersionedTransaction,
     },
@@ -223,7 +224,7 @@ pub struct SendTransactionRequest {
     pub transaction: VersionedTransaction,
     pub wire_transaction: Vec<u8>,
     pub max_retries: Option<usize>,
-    pub list_pda_keys: Vec<String>,
+    pub blocklist_keys: Vec<Pubkey>,
 }
 
 #[derive(Debug, Clone)]
@@ -318,7 +319,7 @@ struct SendTransactionInfo {
     max_retries: usize,
     last_valid_block_height: BlockHeight,
     landed: bool,
-    list_pda_keys: Vec<String>,
+    blocklist_keys: Vec<Pubkey>,
 }
 
 impl SendTransactionInfo {
@@ -391,7 +392,7 @@ pub trait TxChannel {
     async fn reserve(
         &self,
         leader_foward_count: usize,
-        list_pda_keys: Vec<String>,
+        blocklist_keys: Vec<Pubkey>,
     ) -> Option<BoxedTxChannelPermit>;
 }
 
@@ -412,9 +413,9 @@ impl TxChannel for QuicClient {
     async fn reserve(
         &self,
         leader_foward_count: usize,
-        list_pda_keys: Vec<String>,
+        blocklist_keys: Vec<Pubkey>,
     ) -> Option<BoxedTxChannelPermit> {
-        QuicClient::reserve_send_permit(self, leader_foward_count, list_pda_keys)
+        QuicClient::reserve_send_permit(self, leader_foward_count, blocklist_keys)
             .await
             .map(BoxedTxChannelPermit::new)
     }
@@ -424,7 +425,7 @@ pub struct TransactionInfo {
     pub id: SendTransactionInfoId,
     pub signature: Signature,
     pub wire_transaction: Arc<Vec<u8>>,
-    pub list_pda_keys: Vec<String>,
+    pub blocklist_keys: Vec<Pubkey>,
 }
 
 pub struct SendTransactionsPoolTask {
@@ -627,7 +628,7 @@ impl SendTransactionsPoolTask {
                 tx_info.id,
                 tx_info.signature,
                 tx_info.wire_transaction,
-                tx_info.list_pda_keys,
+                tx_info.blocklist_keys,
             );
         }
 
@@ -644,7 +645,7 @@ impl SendTransactionsPoolTask {
             transaction,
             wire_transaction,
             max_retries,
-            list_pda_keys,
+            blocklist_keys,
         }: SendTransactionRequest,
     ) {
         if self.transactions.contains_key(&signature) {
@@ -706,7 +707,7 @@ impl SendTransactionsPoolTask {
             max_retries,
             last_valid_block_height,
             landed,
-            list_pda_keys: list_pda_keys.clone(),
+            blocklist_keys: blocklist_keys.clone(),
         };
         let update_existed = self.transactions.insert(signature, info).is_some();
         if !update_existed {
@@ -731,7 +732,7 @@ impl SendTransactionsPoolTask {
             self.schedule_transaction_retry(signature, retry_timestamp)
                 .await;
         } else {
-            self.spawn_connect(id, signature, wire_transaction, list_pda_keys);
+            self.spawn_connect(id, signature, wire_transaction, blocklist_keys);
         }
     }
 
@@ -753,14 +754,14 @@ impl SendTransactionsPoolTask {
         id: SendTransactionInfoId,
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
-        list_pda_keys: Vec<String>,
+        blocklist_keys: Vec<Pubkey>,
     ) {
         let leader_forward_count = self.config.leader_forward_count;
         let tx_channel = Arc::clone(&self.tx_channel);
-        let list_pda_keys_clone = list_pda_keys.clone();
+        let blocklist_keys_clone = blocklist_keys.clone();
         let abort_handle = self.connecting_tasks.spawn(async move {
             tx_channel
-                .reserve(leader_forward_count, list_pda_keys_clone)
+                .reserve(leader_forward_count, blocklist_keys_clone)
                 .await
         });
         self.connecting_map.insert(
@@ -769,7 +770,7 @@ impl SendTransactionsPoolTask {
                 id,
                 signature,
                 wire_transaction,
-                list_pda_keys,
+                blocklist_keys,
             },
         );
     }
@@ -831,7 +832,7 @@ impl SendTransactionsPoolTask {
                             info.id,
                             info.signature,
                             Arc::clone(&info.wire_transaction),
-                            info.list_pda_keys.clone(),
+                            info.blocklist_keys.clone(),
                         );
                     } else {
                         let retry_timestamp = Instant::now() + self.config.retry_rate;

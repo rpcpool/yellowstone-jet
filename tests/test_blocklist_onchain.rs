@@ -24,12 +24,10 @@ async fn test_blocklist_onchain_blocks_every_tpu_leaders() {
     let tpu2 = get_tpu_info(&leader2);
     let mut tpus = vec![tpu1, tpu2];
 
-    let deny_lists = hashmap! { leader1.to_string() => hashset! {leader1, leader2}};
+    let deny_lists = hashmap! { leader1 => hashset! {leader1, leader2}};
     let leaders_selector = LeadersSelector::new(hashset! {}, deny_lists, hashmap! {});
 
-    leaders_selector
-        .block_leaders(&mut tpus, &[leader1.to_string()])
-        .await;
+    leaders_selector.block_leaders(&mut tpus, &[leader1]).await;
 
     assert!(tpus.is_empty());
 }
@@ -42,12 +40,10 @@ async fn test_blocklist_onchain_blocks_only_one_tpu_leader() {
     let tpu2 = get_tpu_info(&leader2);
     let mut tpus = vec![tpu1, tpu2];
 
-    let deny_lists = hashmap! { leader1.to_string() => hashset! {leader1}};
+    let deny_lists = hashmap! { leader1 => hashset! {leader1}};
     let leaders_selector = LeadersSelector::new(hashset! {}, deny_lists, hashmap! {});
 
-    leaders_selector
-        .block_leaders(&mut tpus, &[leader1.to_string()])
-        .await;
+    leaders_selector.block_leaders(&mut tpus, &[leader1]).await;
 
     assert!(tpus.len() == 1);
     assert!(tpus[0].leader == leader2);
@@ -61,12 +57,10 @@ async fn test_blocklist_onchain_tpu_in_every_allowlist() {
     let tpu2 = get_tpu_info(&leader2);
     let mut tpus = vec![tpu1, tpu2];
 
-    let allow_lists = hashmap! { leader1.to_string() => hashset! {leader1, leader2}};
+    let allow_lists = hashmap! { leader1 => hashset! {leader1, leader2}};
     let leaders_selector = LeadersSelector::new(hashset! {}, hashmap! {}, allow_lists);
 
-    leaders_selector
-        .block_leaders(&mut tpus, &[leader1.to_string()])
-        .await;
+    leaders_selector.block_leaders(&mut tpus, &[leader1]).await;
 
     assert!(tpus.len() == 2);
     assert!(tpus[0].leader == leader1);
@@ -81,12 +75,10 @@ async fn test_blocklist_onchain_tpu_in_one_allowlist() {
     let tpu2 = get_tpu_info(&leader2);
     let mut tpus = vec![tpu1, tpu2];
 
-    let allow_lists = hashmap! { leader1.to_string() => hashset! {leader1}};
+    let allow_lists = hashmap! { leader1 => hashset! {leader1}};
     let leaders_selector = LeadersSelector::new(hashset! {}, hashmap! {}, allow_lists);
 
-    leaders_selector
-        .block_leaders(&mut tpus, &[leader1.to_string()])
-        .await;
+    leaders_selector.block_leaders(&mut tpus, &[leader1]).await;
 
     assert!(tpus.len() == 1);
     assert!(tpus[0].leader == leader1);
@@ -100,12 +92,11 @@ async fn test_blocklist_onchain_no_tpu_in_any_allowlist() {
     let tpu2 = get_tpu_info(&leader2);
     let mut tpus = vec![tpu1, tpu2];
 
-    let allow_lists =
-        hashmap! { leader1.to_string() => hashset! {}, leader2.to_string() => hashset! {}};
+    let allow_lists = hashmap! { leader1 => hashset! {}, leader2 => hashset! {}};
     let leaders_selector = LeadersSelector::new(hashset! {}, hashmap! {}, allow_lists);
 
     leaders_selector
-        .block_leaders(&mut tpus, &[leader1.to_string(), leader2.to_string()])
+        .block_leaders(&mut tpus, &[leader1, leader2])
         .await;
 
     assert!(tpus.is_empty());
@@ -119,12 +110,12 @@ async fn test_blocklist_onchain_allowlist_denylist_block_one_tpu() {
     let tpu2 = get_tpu_info(&leader2);
     let mut tpus = vec![tpu1, tpu2];
 
-    let allow_lists = hashmap! { leader2.to_string() => hashset! {leader1, leader2}};
-    let deny_lists = hashmap! { leader1.to_string() => hashset! {leader1}};
+    let allow_lists = hashmap! { leader2 => hashset! {leader1, leader2}};
+    let deny_lists = hashmap! { leader1 => hashset! {leader1}};
     let leaders_selector = LeadersSelector::new(hashset! {}, deny_lists, allow_lists);
 
     leaders_selector
-        .block_leaders(&mut tpus, &[leader1.to_string(), leader2.to_string()])
+        .block_leaders(&mut tpus, &[leader1, leader2])
         .await;
 
     assert!(tpus.len() == 1);
@@ -142,12 +133,10 @@ async fn blocklist_onchain_takes_prescendence_over_config_blocklist() {
     let mut config_blocklist = ConfigBlocklist::default();
     config_blocklist.leaders.insert(leader1);
 
-    let allow_lists = hashmap! { leader2.to_string() => hashset! {leader1}};
+    let allow_lists = hashmap! { leader2 => hashset! {leader1}};
     let leaders_selector = LeadersSelector::new(hashset! {leader1}, hashmap! {}, allow_lists);
 
-    leaders_selector
-        .block_leaders(&mut tpus, &[leader2.to_string()])
-        .await;
+    leaders_selector.block_leaders(&mut tpus, &[leader2]).await;
 
     assert!(tpus.len() == 1);
     assert!(tpus[0].leader == leader1);

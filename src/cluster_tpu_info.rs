@@ -302,9 +302,6 @@ impl ClusterTpuInfo {
                     Ok(Some(leader_schedule)) => {
                         let mut locked = inner.write().await;
 
-                        // TODO: Vincent, I'm not pretty sure about this silly number
-                        // I'd be cool to receive any indication about this number
-
                         locked
                             .leader_schedule
                             .retain(|leader_schedule_slot, _pubkey| {
@@ -378,8 +375,8 @@ impl ClusterTpuInfo {
 #[derive(Default, Clone)]
 pub struct LeadersSelector {
     blocklist: HashSet<Pubkey>,
-    deny_lists: Arc<RwLock<HashMap<String, HashSet<Pubkey>>>>,
-    allow_lists: Arc<RwLock<HashMap<String, HashSet<Pubkey>>>>,
+    deny_lists: Arc<RwLock<HashMap<Pubkey, HashSet<Pubkey>>>>,
+    allow_lists: Arc<RwLock<HashMap<Pubkey, HashSet<Pubkey>>>>,
 }
 
 impl LeadersSelector {
@@ -391,18 +388,18 @@ impl LeadersSelector {
         if let Some(contract_pubkey) = contract_pubkey {
             let rpc = RpcClient::new(url);
             let accounts = rpc.get_program_accounts(contract_pubkey).await?;
-            let accounts_parsed: Vec<(String, HashSet<Pubkey>, AclType)> = accounts
+            let accounts_parsed: Vec<(Pubkey, HashSet<Pubkey>, AclType)>= accounts
                 .iter()
-                .map(|account| {
+                .filter_map(|account| {
                     match ListState::deserialize(account.1.data.as_slice()) {
-                        Ok(state) => (
-                            account.0.to_string(),
+                        Ok(state) => Some((
+                            account.0,
                             Self::get_hashset(state.list),
                             state.meta.acl_type,
-                        ),
+                        )),
                         Err(_) => {
                             tracing::error!("Error parsing account data from {:?}. \n Maybe you should check program pubkey", account.0);
-                            ("".to_string(), HashSet::new(), AclType::Allow)
+                            None
                         }
                     }
                 })
@@ -436,8 +433,8 @@ impl LeadersSelector {
 
     pub fn new(
         blocklist: HashSet<Pubkey>,
-        deny_list: HashMap<String, HashSet<Pubkey>>,
-        allow_list: HashMap<String, HashSet<Pubkey>>,
+        deny_list: HashMap<Pubkey, HashSet<Pubkey>>,
+        allow_list: HashMap<Pubkey, HashSet<Pubkey>>,
     ) -> Self {
         Self {
             blocklist,
@@ -453,12 +450,15 @@ impl LeadersSelector {
 
 #[async_trait::async_trait]
 pub trait BlocklistUpdater {
-    async fn update_list(&self, acc_data: &[u8], key: String);
+    /// Used to update lists from contract Yellowstone-blocklist
+    /// It parses the bytes in acc_data into an specified struct
+    /// and then insert its data into a collection using key as index
+    async fn update_list(&self, acc_data: &[u8], key: Pubkey);
 }
 
 #[async_trait::async_trait]
 impl BlocklistUpdater for LeadersSelector {
-    async fn update_list(&self, acc_data: &[u8], key: String) {
+    async fn update_list(&self, acc_data: &[u8], key: Pubkey) {
         match ListState::deserialize(acc_data) {
             Ok(state) => {
                 let mut deny_lists = self.deny_lists.write().await;
@@ -484,13 +484,57 @@ impl BlocklistUpdater for LeadersSelector {
 
 #[async_trait::async_trait]
 pub trait BlockLeaders {
-    async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, pda_keys: &[String]);
+    /// Takes a mutable reference of a vector containing TpuInfo and retain only those allowed by the
+    /// lists indicated by blocklist_keys
+    /// # Example
+    /// ```
+    ///
+    /// struct BlocklistYellowstone {
+    ///     blocklist: HashMap<Pubkey, HashSet<Pubkey>>
+    /// }
+    ///
+    ///
+    /// #[async_trait::async_trait]
+    /// impl BlockLeaders for Blocklists {
+    ///     async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, blocklist_keys: &[Pubkey]) {
+    ///         let blocklist = self.blocklist;
+    ///
+    ///         tpus.retain(|info| {
+    ///             for key_list in blocklist_keys.iter() {
+    ///                if let Some(blocklist_hash) = blocklist.get(key_list) {
+    ///                    if blocklist_hash.contains(&info.leader) {
+    ///                         return false;
+    ///                    }
+    ///                }
+    ///                true
+    ///              }
+    ///            }
+    ///         )
+    ///     }
+    /// }
+    ///
+    ///
+    /// async fn main() {
+    ///     let key1 = Pubkey::new_unique();
+    ///     let mut tpus = vec![TpuInfo {
+    ///         leader: key1,
+    ///         ...
+    ///     }]
+    ///     let blocklist_yellowstone = {
+    ///         blocklist: hashmap!{key1 => hashset!{key1}}
+    ///     }
+    ///     blocklist_yellowstone.block_leaders(&mut tpus, &[key1]).await;
+    ///     // Now tpus should have a length of zero
+    ///     assert!(tpus.is_empty());
+    /// }
+    /// ```
+    async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, blocklist_keys: &[Pubkey]);
 }
 
 #[async_trait::async_trait]
 
 impl BlockLeaders for LeadersSelector {
-    async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, pda_keys: &[String]) {
+    async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, blocklist_keys: &[Pubkey]) {
         let mut blocklisted = 0;
         let allow_lists = self.allow_lists.read().await;
         let deny_lists = self.deny_lists.read().await;
@@ -498,7 +542,7 @@ impl BlockLeaders for LeadersSelector {
         tpus.retain(|info| {
             let mut is_allow = false;
 
-            for key_list in pda_keys.iter() {
+            for key_list in blocklist_keys.iter() {
                 if let Some(deny_hash) = deny_lists.get(key_list) {
                     if deny_hash.contains(&info.leader) {
                         blocklisted += 1;
