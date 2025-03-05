@@ -109,25 +109,32 @@ message SubscribeRequest {
   oneof message {
     Ping ping = 1;
     Pong pong = 2;
-    SubscribeUpdateLimit update_limit = 3; // first message to send
+    SubscribeUpdateLimit update_limit = 3;
+    // first message to send
     InitialSubscribeRequest init = 4;
   }
 }
+
 message InitialSubscribeRequest {
   FeatureFlags features = 1;
 }
 
-// feature unspecified is for the purpose of initializing
-// without any flags
+// Feature flags to negotiate capabilities between client and server
 enum Feature {
+  // Default value when no feature is specified (Protocol Buffers default)
+  // This enables backward compatibility with older clients/servers
   FEATURE_UNSPECIFIED = 0;
+
+  // Enables structured transaction format with additional metadata
   TRANSACTION_PAYLOAD_V2 = 1;
+
   // Future features flags
 }
 
 message FeatureFlags {
   repeated Feature supported_features = 1;
 }
+
 
 message SubscribeUpdateLimit {
   uint64 messages_per100ms = 1;

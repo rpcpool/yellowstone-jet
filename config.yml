@@ -138,4 +138,5 @@ quic:
 #       - DUND26mEDfFeaPsVof3YvbXDRvpuQX7HMUJrLgEWzYw4
 
 features:
-  enabled_features: []
+  enabled_features:
+    - transaction_payload_v2
