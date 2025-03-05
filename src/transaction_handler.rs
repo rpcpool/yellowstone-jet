@@ -240,3 +240,172 @@ impl TransactionHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_client::{
+        nonblocking::pubsub_client::PubsubClientResult, rpc_response::RpcResponseContext,
+    };
+    use solana_sdk::{
+        hash::Hash,
+        message::Message,
+        pubkey::Pubkey,
+        signature::{Keypair, Signer},
+        system_instruction,
+        transaction::Transaction,
+    };
+
+    #[derive(Debug)]
+    struct MockRpcClient;
+
+    impl MockRpcClient {
+        fn new() -> Arc<Self> {
+            Arc::new(Self)
+        }
+
+        async fn simulate_transaction_with_config(
+            &self,
+            _transaction: &VersionedTransaction,
+            _config: RpcSimulateTransactionConfig,
+        ) -> PubsubClientResult<RpcResponse<RpcSimulateTransactionResult>> {
+            Ok(RpcResponse {
+                context: RpcResponseContext {
+                    slot: 0,
+                    api_version: None,
+                },
+                value: RpcSimulateTransactionResult {
+                    err: Some(solana_sdk::transaction::TransactionError::AccountBorrowOutstanding),
+                    logs: None,
+                    accounts: None,
+                    units_consumed: None,
+                    return_data: None,
+                    inner_instructions: None,
+                    replacement_blockhash: None,
+                },
+            })
+        }
+
+        async fn sanitize_transaction(
+            &self,
+            _transaction: &VersionedTransaction,
+            _config: RcpSanitizeTransactionConfig,
+        ) -> PubsubClientResult<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockTxHandler {
+        rpc: Arc<MockRpcClient>,
+    }
+
+    impl MockTxHandler {
+        fn new() -> Self {
+            Self {
+                rpc: MockRpcClient::new(),
+            }
+        }
+
+        async fn handle_preflight(
+            &self,
+            transaction: &VersionedTransaction,
+            config: &RpcSendTransactionConfig,
+        ) -> Result<(), TransactionHandlerError> {
+            match self
+                .rpc
+                .simulate_transaction_with_config(
+                    transaction,
+                    RpcSimulateTransactionConfig {
+                        sig_verify: true,
+                        commitment: config
+                            .preflight_commitment
+                            .map(|commitment| CommitmentConfig { commitment }),
+                        min_context_slot: config.min_context_slot,
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Ok(RpcResponse {
+                    value:
+                        RpcSimulateTransactionResult {
+                            err: Some(error), ..
+                        },
+                    ..
+                }) => Err(TransactionHandlerError::SimulationFailed(error.to_string())),
+                Ok(_) => Ok(()),
+                Err(error) => Err(TransactionHandlerError::SimulationFailed(error.to_string())),
+            }
+        }
+
+        async fn handle_sanitize(
+            &self,
+            transaction: &VersionedTransaction,
+            config: &RpcSendTransactionConfig,
+        ) -> Result<(), TransactionHandlerError> {
+            if let Err(error) = self
+                .rpc
+                .sanitize_transaction(
+                    transaction,
+                    RcpSanitizeTransactionConfig {
+                        sig_verify: true,
+                        commitment: config
+                            .preflight_commitment
+                            .map(|commitment| CommitmentConfig { commitment }),
+                        min_context_slot: config.min_context_slot,
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Err(TransactionHandlerError::SanitizeCheckFailed(
+                    error.to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_preflight_invalid_transaction() {
+        let handler = MockTxHandler::new();
+
+        let keypair = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let instruction =
+            system_instruction::transfer(&keypair.pubkey(), &recipient, 1_000_000_000_000);
+        let message = Message::new(&[instruction], Some(&keypair.pubkey()));
+        let tx = Transaction::new(&[&keypair], message, Hash::default());
+        let versioned_tx = VersionedTransaction::from(tx);
+
+        let result = handler
+            .handle_preflight(&versioned_tx, &RpcSendTransactionConfig::default())
+            .await;
+
+        assert!(result.is_err());
+        match result {
+            Err(TransactionHandlerError::SimulationFailed(_)) => {}
+            _ => panic!("Expected SimulationFailed error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_sanitize_check() {
+        let handler = MockTxHandler::new();
+
+        let keypair = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let instruction = system_instruction::transfer(&keypair.pubkey(), &recipient, 1_000);
+        let message = Message::new(&[instruction], Some(&keypair.pubkey()));
+        let tx = Transaction::new(&[&keypair], message, Hash::default());
+        let versioned_tx = VersionedTransaction::from(tx);
+
+        let result = handler
+            .handle_sanitize(&versioned_tx, &RpcSendTransactionConfig::default())
+            .await;
+
+        assert!(result.is_ok());
+    }
+}

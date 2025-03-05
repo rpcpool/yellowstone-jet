@@ -10,6 +10,21 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+### Breaking Changes
+
+### Features
+
+### Fixes
+
+## [11.0.0]
+
+### Breaking Changes
+
+- Modified transaction payload structure:
+  - Changed base transaction message format
+  - Updated protobuf definitions for compatibility
+  - Modified legacy payload handling
+
 ### Features
 
 - Implemented a comprehensive dual-format transaction system:
@@ -26,13 +41,6 @@ The minor version will be incremented upon a breaking change and the patch versi
   - Transaction encoding configuration
   - Extended transaction validation options
   - Support for blocklist PDAs
-
-### Breaking Changes
-
-- Modified transaction payload structure:
-  - Changed base transaction message format
-  - Updated protobuf definitions for compatibility
-  - Modified legacy payload handling
 
 ### Fixes
 

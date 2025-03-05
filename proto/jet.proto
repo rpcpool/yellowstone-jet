@@ -117,8 +117,10 @@ message InitialSubscribeRequest {
   FeatureFlags features = 1;
 }
 
+// feature unspecified is for the purpose of initializing
+// without any flags
 enum Feature {
-  FEATURE_UNSPECIFIED = 0;  // Required default for proto3
+  FEATURE_UNSPECIFIED = 0;
   TRANSACTION_PAYLOAD_V2 = 1;
   // Future features flags
 }

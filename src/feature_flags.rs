@@ -10,20 +10,49 @@
 //! 3. Providing utility methods to check if features are enabled
 
 use crate::proto::jet::Feature;
-use serde::Deserialize;
+use serde::{de, Deserialize};
 use std::collections::HashSet;
 
-fn string_to_proto_feature(feature_str: &str) -> Option<Feature> {
-    match feature_str {
-        "transaction_payload_v2" => Some(Feature::TransactionPayloadV2),
-        _ => None,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FeatureFlag {
+    TransactionPayloadV2,
+}
+
+impl<'de> Deserialize<'de> for FeatureFlag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let feature_str = String::deserialize(deserializer)?;
+        match feature_str.as_str() {
+            "transaction_payload_v2" => Ok(FeatureFlag::TransactionPayloadV2),
+            _ => Err(de::Error::custom(format!(
+                "Unknown feature: {}",
+                feature_str
+            ))),
+        }
+    }
+}
+
+impl FeatureFlag {
+    fn to_proto_feature(&self) -> Feature {
+        match self {
+            FeatureFlag::TransactionPayloadV2 => Feature::TransactionPayloadV2,
+        }
+    }
+
+    fn from_str(feature_str: impl AsRef<str>) -> Option<Self> {
+        match feature_str.as_ref() {
+            "transaction_payload_v2" => Some(FeatureFlag::TransactionPayloadV2),
+            _ => None,
+        }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeatureSet {
     #[serde(default = "HashSet::new")]
-    enabled_features: HashSet<String>,
+    enabled_features: HashSet<FeatureFlag>,
 }
 
 impl Default for FeatureSet {
@@ -35,13 +64,19 @@ impl Default for FeatureSet {
 }
 
 impl FeatureSet {
-    pub fn is_enabled(&self, feature_str: &str) -> bool {
-        self.enabled_features.contains(feature_str)
+    pub fn is_enabled(&self, feature_str: impl AsRef<str>) -> bool {
+        if let Some(feature) = FeatureFlag::from_str(feature_str) {
+            self.enabled_features.contains(&feature)
+        } else {
+            false
+        }
     }
 
     pub fn is_feature_enabled(&self, feature: Feature) -> bool {
         match feature {
-            Feature::TransactionPayloadV2 => self.is_enabled("transaction_payload_v2"),
+            Feature::TransactionPayloadV2 => self
+                .enabled_features
+                .contains(&FeatureFlag::TransactionPayloadV2),
             Feature::Unspecified => false,
         }
     }
@@ -49,8 +84,7 @@ impl FeatureSet {
     pub fn enabled_features(&self) -> Vec<i32> {
         self.enabled_features
             .iter()
-            .filter_map(|s| string_to_proto_feature(s))
-            .map(|f| f as i32)
+            .map(|f| f.to_proto_feature() as i32)
             .collect()
     }
 
@@ -60,7 +94,10 @@ impl FeatureSet {
 
     #[cfg(test)]
     pub fn new_with_features(features: &[&str]) -> Self {
-        let enabled_features = features.iter().map(|f| f.to_string()).collect();
+        let enabled_features = features
+            .iter()
+            .filter_map(|f| FeatureFlag::from_str(*f))
+            .collect();
         Self { enabled_features }
     }
 }
