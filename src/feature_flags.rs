@@ -9,9 +9,11 @@
 //! 2. Translating them to proto enum values when sending to the gateway
 //! 3. Providing utility methods to check if features are enabled
 
-use crate::proto::jet::Feature;
-use serde::{de, Deserialize};
-use std::collections::HashSet;
+use {
+    crate::proto::jet::Feature,
+    serde::{de, Deserialize},
+    std::collections::HashSet,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FeatureFlag {
@@ -104,8 +106,7 @@ impl FeatureSet {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_yaml::from_str;
+    use {super::*, serde_yaml::from_str};
 
     #[test]
     fn test_feature_serialization() {

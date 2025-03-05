@@ -243,17 +243,19 @@ impl TransactionHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use solana_client::{
-        nonblocking::pubsub_client::PubsubClientResult, rpc_response::RpcResponseContext,
-    };
-    use solana_sdk::{
-        hash::Hash,
-        message::Message,
-        pubkey::Pubkey,
-        signature::{Keypair, Signer},
-        system_instruction,
-        transaction::Transaction,
+    use {
+        super::*,
+        solana_client::{
+            nonblocking::pubsub_client::PubsubClientResult, rpc_response::RpcResponseContext,
+        },
+        solana_sdk::{
+            hash::Hash,
+            message::Message,
+            pubkey::Pubkey,
+            signature::{Keypair, Signer},
+            system_instruction,
+            transaction::Transaction,
+        },
     };
 
     #[derive(Debug)]
