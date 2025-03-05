@@ -76,22 +76,6 @@ impl From<TransactionWrapper> for SubscribeTransaction {
     }
 }
 
-impl HasLegacyPayload for PublishTransaction {
-    fn from_legacy_payload(bytes: Vec<u8>) -> Self {
-        Self {
-            payload: Some(publish_transaction::Payload::LegacyPayload(bytes)),
-        }
-    }
-}
-
-impl HasLegacyPayload for SubscribeTransaction {
-    fn from_legacy_payload(bytes: Vec<u8>) -> Self {
-        Self {
-            payload: Some(subscribe_transaction::Payload::LegacyPayload(bytes)),
-        }
-    }
-}
-
 impl TryFrom<SubscribeTransaction> for TransactionPayload {
     type Error = PayloadError;
 
@@ -103,6 +87,14 @@ impl TryFrom<SubscribeTransaction> for TransactionPayload {
             }
             Some(Payload::NewPayload(wrapper)) => Ok(Self::New(wrapper)),
             None => Err(PayloadError::EmptyPayload),
+        }
+    }
+}
+
+impl From<Vec<u8>> for PublishTransaction {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self {
+            payload: Some(publish_transaction::Payload::LegacyPayload(bytes)),
         }
     }
 }
@@ -134,20 +126,24 @@ impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfig)> for TransactionP
     }
 }
 
-pub trait HasLegacyPayload {
-    fn from_legacy_payload(bytes: Vec<u8>) -> Self;
+impl From<Vec<u8>> for SubscribeTransaction {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self {
+            payload: Some(subscribe_transaction::Payload::LegacyPayload(bytes)),
+        }
+    }
 }
 
 impl TransactionPayload {
     pub fn to_proto<T>(&self) -> T
     where
         T: From<TransactionWrapper>, // For the New variant
-        T: HasLegacyPayload,         // For the Legacy variant
+        T: From<Vec<u8>>,            // For the Legacy variant
     {
         match self {
             Self::Legacy(legacy) => {
                 let bytes = serde_json::to_vec(legacy).expect("Failed to serialize legacy payload");
-                T::from_legacy_payload(bytes)
+                T::from(bytes)
             }
             Self::New(wrapper) => T::from(wrapper.clone()),
         }
