@@ -306,7 +306,7 @@ pub mod rpc_solana_like {
             &self,
             transaction: VersionedTransaction,
             config: Option<RpcSendTransactionConfig>,
-        ) -> RpcResult<String> {
+        ) -> RpcResult<String /* Signature */> {
             debug!("handling internal versioned transaction");
 
             let handler = TransactionHandler::new(
@@ -334,7 +334,7 @@ pub mod rpc_solana_like {
             &self,
             data: String,
             config: Option<RpcSendTransactionConfig>,
-        ) -> RpcResult<String> {
+        ) -> RpcResult<String /* Signature */> {
             debug!("send_transaction rpc request received");
 
             let encoding = config

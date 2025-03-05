@@ -93,7 +93,7 @@ impl TransactionHandler {
         &self,
         transaction: VersionedTransaction,
         config: Option<RpcSendTransactionConfig>,
-    ) -> Result<String, TransactionHandlerError> {
+    ) -> Result<String /* Signature */, TransactionHandlerError> {
         let config = config.unwrap_or_default();
 
         // Basic sanitize check first
@@ -127,7 +127,7 @@ impl TransactionHandler {
         &self,
         data: String,
         config: Option<RpcSendTransactionConfig>,
-    ) -> Result<String, TransactionHandlerError> {
+    ) -> Result<String /* Signature */, TransactionHandlerError> {
         let (wire_transaction, transaction) = self.prepare_transaction(data, config).await?;
         let signature = transaction.signatures[0];
 
