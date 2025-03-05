@@ -55,6 +55,18 @@ pub const DEFAULT_LOCK_KEY: &str = "jet-gateway";
 
 const X_ONE_TIME_AUTH_TOKEN: &str = "x-one-time-auth-token";
 
+#[derive(Debug, thiserror::Error)]
+pub enum TransactionHandlerError {
+    #[error("failed to parse transaction payload: {0}")]
+    PayloadParseError(String),
+
+    #[error("failed to decode transaction: {0}")]
+    DecodeError(String),
+
+    #[error("failed to send transaction: {0}")]
+    SendError(String),
+}
+
 pub struct GrpcTransactionHandler {
     tx_sender: RpcServerImplSolanaLike,
 }
@@ -70,17 +82,19 @@ impl GrpcTransactionHandler {
     pub async fn handle_transaction(
         &self,
         transaction: SubscribeTransaction,
-    ) -> anyhow::Result<String> {
+    ) -> Result<(), TransactionHandlerError> {
         let payload = TransactionPayload::try_from(transaction)
-            .map_err(|e| anyhow::anyhow!("Failed to parse transaction payload: {}", e))?;
+            .map_err(|e| TransactionHandlerError::PayloadParseError(e.to_string()))?;
 
         let (transaction, config) = TransactionDecoder::decode(&payload)
-            .map_err(|e| anyhow::anyhow!("Failed to decode transaction: {}", e))?;
+            .map_err(|e| TransactionHandlerError::DecodeError(e.to_string()))?;
 
         self.tx_sender
             .handle_internal_transaction(transaction, config)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send transaction: {}", e))
+            .map_err(|e| TransactionHandlerError::SendError(e.to_string()))?;
+
+        Ok(())
     }
 }
 
@@ -150,8 +164,17 @@ async fn get_jet_gw_subscribe_auth_token(
 
 /// Establish a bidirectional streaming connection to the jet-gateway
 ///
-/// Handles authentication and feature negotiation with graceful fallback if features
-/// aren't supported by the gateway server.
+/// Protocol initialization sequence:
+/// 1. For new servers (v2+):
+///    - First message: Init with feature flags
+///    - Second message: UpdateLimit
+///    If Init fails, fallback to legacy protocol
+///
+/// 2. For legacy servers (v1):
+///    - Only send UpdateLimit message
+///
+/// This approach ensures backward compatibility while enabling
+/// new features when supported by the server.
 pub async fn grpc_subscribe_jet_gw(
     signer: ArcSigner,
     endpoint: String,
@@ -162,15 +185,16 @@ pub async fn grpc_subscribe_jet_gw(
     impl Sink<SubscribeRequest, Error = futures::channel::mpsc::SendError>,
     impl Stream<Item = Result<SubscribeResponse, Status>>,
 )> {
-    // First get the OTAK
+    // First get the OTAK authentication token
     let otak =
         get_jet_gw_subscribe_auth_token(Arc::clone(&signer), endpoint.clone(), x_token.clone())
             .await?;
 
-    // Create channel with adequate buffer size
+    // Set up communication channels
     let (subscribe_tx, subscribe_rx) = futures::channel::mpsc::channel(stream_buffer_size);
+    let (init_tx, init_rx) = futures::channel::mpsc::channel(2);
 
-    // Connect to the gateway for the actual subscription
+    // Establish GRPC connection
     let channel = Endpoint::from_shared(endpoint.clone())?
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(1))
@@ -180,10 +204,7 @@ pub async fn grpc_subscribe_jet_gw(
 
     let mut client = JetGatewayClient::with_interceptor(channel, x_token);
 
-    // Construct the initial message pipeline with buffer for our initialization sequence
-    let (init_tx, init_rx) = futures::channel::mpsc::channel(2); // Small buffer for init messages
-
-    // Prepare OTAK authentication
+    // Set up authenticated connection
     let mut subscribe_req = Request::new(init_rx);
     let ser_otak = bincode::serialize(&otak).expect("failed to serialize one-time-auth-token");
     let bs58_otak = bs58::encode(ser_otak).into_string();
@@ -194,8 +215,7 @@ pub async fn grpc_subscribe_jet_gw(
             .expect("failed to convert to AsciiMetadataValue"),
     );
 
-    // Establish authenticated connection first
-    let response = match client.subscribe(subscribe_req).await {
+    let stream = match client.subscribe(subscribe_req).await {
         Ok(resp) => resp.into_inner(),
         Err(status) => {
             return Err(anyhow::anyhow!(
@@ -205,23 +225,11 @@ pub async fn grpc_subscribe_jet_gw(
         }
     };
 
-    let stream = response;
-
-    // Important: Send rate limit message first - this is always expected
-    let limit_message = SubscribeRequest {
-        message: Some(SubscribeRequestMessage::UpdateLimit(SubscribeUpdateLimit {
-            messages_per100ms: 100, // Default limit, will be updated by the server loop
-        })),
-    };
-
-    if let Err(e) = init_tx.clone().send(limit_message).await {
-        return Err(anyhow::anyhow!("Failed to send rate limit message: {}", e));
-    }
-
-    // Try to send feature flags if any are enabled - but after the limit message
+    // Try to initialize as v2 client if features are enabled
+    let mut is_legacy_server = false;
     if !features.is_empty() {
         debug!(
-            "Sending InitialSubscribeRequest with feature flags: {:?}",
+            "Attempting v2 protocol - sending feature flags: {:?}",
             features.enabled_features()
         );
         let init_request = SubscribeRequest {
@@ -232,16 +240,26 @@ pub async fn grpc_subscribe_jet_gw(
             })),
         };
 
-        // Try to send feature flags, but don't fail completely if they're rejected
         if let Err(e) = init_tx.clone().send(init_request).await {
-            return Err(anyhow::anyhow!(
-                "Failed to send feature initialization request: {}. \
-                The gateway may not support requested features - consider disabling them",
-                e
-            ));
+            debug!("Server rejected v2 protocol: {}. Falling back to v1", e);
+            is_legacy_server = true;
         }
+    } else {
+        is_legacy_server = true;
     }
 
+    // Always send rate limit update (works for both v1 and v2)
+    let limit_message = SubscribeRequest {
+        message: Some(SubscribeRequestMessage::UpdateLimit(SubscribeUpdateLimit {
+            messages_per100ms: 100,
+        })),
+    };
+
+    if let Err(e) = init_tx.clone().send(limit_message).await {
+        return Err(anyhow::anyhow!("Failed to send rate limit message: {}", e));
+    }
+
+    // Forward remaining messages
     tokio::spawn(async move {
         let mut subscribe_rx: futures::channel::mpsc::Receiver<SubscribeRequest> = subscribe_rx;
         let mut init_tx = init_tx;
@@ -256,6 +274,12 @@ pub async fn grpc_subscribe_jet_gw(
             }
         }
     });
+
+    if is_legacy_server {
+        debug!("Connected using legacy v1 protocol");
+    } else {
+        debug!("Connected using v2 protocol with feature flags");
+    }
 
     Ok((subscribe_tx, stream))
 }
