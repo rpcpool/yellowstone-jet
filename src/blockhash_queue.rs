@@ -1,6 +1,6 @@
 use {
     crate::{
-        grpc_geyser::{GeyserStreams, SlotUpdateInfoWithCommitment},
+        grpc_geyser::{GeyserSubscriber, SlotUpdateInfoWithCommitment},
         metrics::jet as metrics,
         util::{
             BlockHeight, CommitmentLevel, WaitShutdown, WaitShutdownJoinHandleResult,
@@ -34,10 +34,7 @@ impl WaitShutdown for BlockhashQueue {
 }
 
 impl BlockhashQueue {
-    pub fn new<G>(grpc: &G) -> Self
-    where
-        G: GeyserStreams + Send + Sync + 'static,
-    {
+    pub fn new(grpc: &GeyserSubscriber) -> Self {
         let shutdown = Arc::new(Notify::new());
         let slots = Arc::new(RwLock::new(HashMap::new()));
         Self {
