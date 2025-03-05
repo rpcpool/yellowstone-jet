@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "10.6.0"
+version = "11.0.0"
 authors = ["Triton One"]
 edition = "2021"
 description = "Yellowstone Jet"
@@ -88,12 +88,6 @@ codegen-units = 1
 lto = true
 
 [patch.crates-io]
-# solana-account-decoder = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-program = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-rpc-client-api = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-sdk = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-transaction-status = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
 solana-account-decoder = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
 solana-program = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
 solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
