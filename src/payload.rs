@@ -197,7 +197,7 @@ impl TransactionDecoder {
                 Ok((
                     tx,
                     Some(RpcSendTransactionConfigWithBlockList {
-                        config: Some(legacy.config.clone()),
+                        config: Some(legacy.config),
                         blocklist_pdas: vec![], // Legacy format doesn't have blocklist
                     }),
                 ))

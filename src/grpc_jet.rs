@@ -170,7 +170,7 @@ async fn get_jet_gw_subscribe_auth_token(
 /// 1. For new servers (v2+):
 ///    - First message: Init with feature flags
 ///    - Second message: UpdateLimit
-///    If Init fails, fallback to legacy protocol
+///      If Init fails, fallback to legacy protocol
 ///
 /// 2. For legacy servers (v1):
 ///    - Only send UpdateLimit message
