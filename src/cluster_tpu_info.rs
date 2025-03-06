@@ -26,7 +26,7 @@ use {
         sync::{broadcast, RwLock},
         time::{sleep, Duration, Instant},
     },
-    tracing::{info, warn},
+    tracing::{debug, info, warn},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -484,50 +484,52 @@ impl BlocklistUpdater for LeadersSelector {
 
 #[async_trait::async_trait]
 pub trait BlockLeaders {
-    /// Takes a mutable reference of a vector containing TpuInfo and retain only those allowed by the
-    /// lists indicated by blocklist_keys
-    /// # Example
-    /// ```
-    ///
-    /// struct BlocklistYellowstone {
-    ///     blocklist: HashMap<Pubkey, HashSet<Pubkey>>
-    /// }
-    ///
-    ///
-    /// #[async_trait::async_trait]
-    /// impl BlockLeaders for Blocklists {
-    ///     async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, blocklist_keys: &[Pubkey]) {
-    ///         let blocklist = self.blocklist;
-    ///
-    ///         tpus.retain(|info| {
-    ///             for key_list in blocklist_keys.iter() {
-    ///                if let Some(blocklist_hash) = blocklist.get(key_list) {
-    ///                    if blocklist_hash.contains(&info.leader) {
-    ///                         return false;
-    ///                    }
-    ///                }
-    ///                true
-    ///              }
-    ///            }
-    ///         )
-    ///     }
-    /// }
-    ///
-    ///
-    /// async fn main() {
-    ///     let key1 = Pubkey::new_unique();
-    ///     let mut tpus = vec![TpuInfo {
-    ///         leader: key1,
-    ///         ...
-    ///     }]
-    ///     let blocklist_yellowstone = {
-    ///         blocklist: hashmap!{key1 => hashset!{key1}}
-    ///     }
-    ///     blocklist_yellowstone.block_leaders(&mut tpus, &[key1]).await;
-    ///     // Now tpus should have a length of zero
-    ///     assert!(tpus.is_empty());
-    /// }
-    /// ```
+    /*
+    Takes a mutable reference of a vector containing TpuInfo and retain only those allowed by the
+    lists indicated by blocklist_keys
+    # Example
+    ```
+
+    struct BlocklistYellowstone {
+        blocklist: HashMap<Pubkey, HashSet<Pubkey>>
+    }
+
+
+    #[async_trait::async_trait]
+    impl BlockLeaders for Blocklists {
+        async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, blocklist_keys: &[Pubkey]) {
+            let blocklist = self.blocklist;
+
+            tpus.retain(|info| {
+                for key_list in blocklist_keys.iter() {
+                   if let Some(blocklist_hash) = blocklist.get(key_list) {
+                       if blocklist_hash.contains(&info.leader) {
+                            return false;
+                       }
+                   }
+                   true
+                 }
+               }
+            )
+        }
+    }
+
+
+    async fn main() {
+        let key1 = Pubkey::new_unique();
+        let mut tpus = vec![TpuInfo {
+            leader: key1,
+            ...
+        }]
+        let blocklist_yellowstone = {
+            blocklist: hashmap!{key1 => hashset!{key1}}
+        }
+        blocklist_yellowstone.block_leaders(&mut tpus, &[key1]).await;
+       // Now tpus should have a length of zero
+        assert!(tpus.is_empty());
+    }
+    ```
+    */
     async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, blocklist_keys: &[Pubkey]);
 }
 
@@ -541,18 +543,31 @@ impl BlockLeaders for LeadersSelector {
 
         tpus.retain(|info| {
             let mut is_allow = false;
+            let leader = info.leader;
 
-            for key_list in blocklist_keys.iter() {
+            // Check deny lists first
+            for key_list in blocklist_keys {
                 if let Some(deny_hash) = deny_lists.get(key_list) {
-                    if deny_hash.contains(&info.leader) {
+                    if deny_hash.contains(&leader) {
                         blocklisted += 1;
+                        debug!(
+                            "Leader {} BLOCKED - found in deny list {}",
+                            leader, key_list
+                        );
                         return false;
                     }
                 }
+            }
 
+            // Then check allow lists
+            for key_list in blocklist_keys {
                 if let Some(allow_hash) = allow_lists.get(key_list) {
-                    if !allow_hash.contains(&info.leader) {
+                    if !allow_hash.contains(&leader) {
                         blocklisted += 1;
+                        debug!(
+                            "Leader {} BLOCKED - not found in allow list {}",
+                            leader, key_list
+                        );
                         return false;
                     } else {
                         is_allow = true;
@@ -560,8 +575,9 @@ impl BlockLeaders for LeadersSelector {
                 }
             }
 
-            if !is_allow && self.blocklist.contains(&info.leader) {
+            if !is_allow && self.blocklist.contains(&leader) {
                 blocklisted += 1;
+                debug!("Leader {} BLOCKED - found in global blocklist", leader);
                 return false;
             }
             true

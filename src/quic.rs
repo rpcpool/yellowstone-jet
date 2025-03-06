@@ -221,11 +221,18 @@ impl QuicClient {
             .upcoming_leader_schedule
             .get_leader_tpus(leader_forward_count)
             .await;
+        debug!(
+            "Attempting to send to {} leaders before filtering",
+            tpus_info.len()
+        );
+
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
         self.leaders_selector
             .block_leaders(&mut tpus_info, &blocklist_keys)
             .await;
+
+        debug!("After filtering, sending to {} leaders", tpus_info.len());
 
         let futs = tpus_info
             .into_iter()

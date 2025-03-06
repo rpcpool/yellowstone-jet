@@ -127,6 +127,41 @@ impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfigWithBlockList)>
             RpcSendTransactionConfigWithBlockList,
         ),
     ) -> Result<Self, Self::Error> {
+        let tx_bytes = bincode::serialize(transaction)?;
+
+        Ok(Self::New(TransactionWrapper {
+            transaction: tx_bytes,
+            config: Some(TransactionConfig {
+                max_retries: config_with_blocklist
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.max_retries.map(|r| r as u32)),
+                blocklist_pdas: config_with_blocklist
+                    .blocklist_pdas
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect(),
+                skip_preflight: config_with_blocklist
+                    .config
+                    .as_ref()
+                    .map(|c| c.skip_preflight)
+                    .unwrap_or_default(),
+                skip_sanitize: config_with_blocklist
+                    .config
+                    .as_ref()
+                    .map(|c| c.skip_sanitize)
+                    .unwrap_or_default(),
+            }),
+            timestamp: Some(ms_since_epoch()),
+        }))
+    }
+}
+
+impl TransactionPayload {
+    pub fn to_legacy(
+        transaction: &VersionedTransaction,
+        config_with_blocklist: &RpcSendTransactionConfigWithBlockList,
+    ) -> Result<Self, PayloadError> {
         let encoding = config_with_blocklist
             .config
             .as_ref()
@@ -144,7 +179,6 @@ impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfigWithBlockList)>
             _ => BASE64_STANDARD.encode(tx_bytes),
         };
 
-        // Create a new legacy payload with the config preserved
         Ok(Self::Legacy(LegacyPayload {
             transaction: tx_str,
             config: config_with_blocklist.config.unwrap_or_default(),

@@ -61,6 +61,10 @@ struct Args {
     /// Check the balance of the wallet and airdrop Solana (devnet and testnet only)
     #[clap(long)]
     pub airdrop: bool, // default is false
+
+    /// Use legacy payload format
+    #[clap(long)]
+    pub legacy: bool, // default is the new tx payload
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,9 +105,10 @@ struct Config {
 
 impl Config {
     pub async fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let path = path.as_ref();
         let contents = fs::read(path)
             .await
-            .with_context(|| "failed to read config")?;
+            .with_context(|| format!("failed to read config from {:?}", path))?;
         Ok(serde_yaml::from_slice(&contents)?)
     }
 
@@ -183,6 +188,7 @@ impl TransactionSender {
         &self,
         transaction: VersionedTransaction,
         config: RpcSendTransactionConfigWithBlockList,
+        should_use_legacy_txn: bool,
     ) -> anyhow::Result<Signature> {
         match self {
             Self::Jet { rpc } => rpc
@@ -191,7 +197,11 @@ impl TransactionSender {
                 .map_err(Into::into),
             Self::JetGateway { tx } => {
                 let signature = transaction.signatures[0];
-                let payload = TransactionPayload::try_from((&transaction, config))?;
+                let payload = if should_use_legacy_txn {
+                    TransactionPayload::to_legacy(&transaction, &config)?
+                } else {
+                    TransactionPayload::try_from((&transaction, config))?
+                };
                 let proto_tx = payload.to_proto::<PublishTransaction>();
                 tx.lock()
                     .await
@@ -272,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
         latest_slot,
         latest_block.block_height.unwrap_or(0)
     );
+    let should_use_legacy_txn = args.legacy;
 
     let landed = Arc::new(AtomicUsize::new(0));
     let sender = Arc::new(TransactionSender::from_config(config.output.clone()).await?);
@@ -322,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
                     .filter_map(|addr| Pubkey::from_str(addr).ok())
                     .collect(),
             };
-            match sender.send(transaction, config).await {
+            match sender.send(transaction, config, should_use_legacy_txn).await {
                 Ok(send_signature) => {
                     anyhow::ensure!(signature == send_signature, "received invalid signature from sender");
                     info!("successfully send transaction {signature}");

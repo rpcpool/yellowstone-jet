@@ -276,6 +276,10 @@ impl SendTransactionsPool {
     }
 
     pub fn send_transaction(&self, request: SendTransactionRequest) -> anyhow::Result<()> {
+        debug!(
+            "Sending transaction with signature {} and blocklist: {:?}",
+            request.signature, request.blocklist_pdas
+        );
         anyhow::ensure!(
             self.new_transactions_tx.send(request).is_ok(),
             "send service task finished"
@@ -415,6 +419,10 @@ impl TxChannel for QuicClient {
         leader_foward_count: usize,
         blocklist_keys: Vec<Pubkey>,
     ) -> Option<BoxedTxChannelPermit> {
+        debug!(
+            "QuicClient::reserve called with blocklist: {:?}",
+            blocklist_keys
+        );
         QuicClient::reserve_send_permit(self, leader_foward_count, blocklist_keys)
             .await
             .map(BoxedTxChannelPermit::new)
@@ -756,10 +764,18 @@ impl SendTransactionsPoolTask {
         wire_transaction: Arc<Vec<u8>>,
         blocklist_keys: Vec<Pubkey>,
     ) {
+        debug!(
+            "Spawning connect for tx {}, id {}, with blocklist: {:?}",
+            signature, id, blocklist_keys
+        );
         let leader_forward_count = self.config.leader_forward_count;
         let tx_channel = Arc::clone(&self.tx_channel);
         let blocklist_keys_clone = blocklist_keys.clone();
         let abort_handle = self.connecting_tasks.spawn(async move {
+            debug!(
+                "Reserving tx {} with blocklist: {:?}",
+                signature, blocklist_keys_clone
+            );
             tx_channel
                 .reserve(leader_forward_count, blocklist_keys_clone)
                 .await

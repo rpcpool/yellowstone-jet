@@ -202,6 +202,7 @@ impl GeyserSubscriber {
                         Some(Ok(msg)) => match msg.update_oneof {
                             Some(UpdateOneof::Account(SubscribeUpdateAccount{account, ..})) => {
                                 if let Some(acc) = account {
+                                    // todo: add a verification to ensure the owner is the blocklist program
                                     let pubkey_bytes  = acc.pubkey;
 
                                     if pubkey_bytes.len() == 32 {
@@ -395,6 +396,8 @@ impl GeyserSubscriber {
             }
             .and_then(|builder| async {
                 builder
+                    // todo: we might want to consider reducing this since we are not using this much
+                    // for transactions/slots
                     .max_decoding_message_size(128 * 1024 * 1024) // 128MiB, BlockMeta with rewards can be bigger than 60MiB
                     .connect_timeout(Duration::from_secs(3))
                     .timeout(Duration::from_secs(3))
