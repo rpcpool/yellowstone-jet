@@ -77,6 +77,86 @@ pub enum TransactionPayload {
     New(TransactionWrapper),
 }
 
+impl TransactionPayload {
+    /// Creates a payload in either legacy or new format based on use_legacy flag
+    pub fn create(
+        transaction: &VersionedTransaction,
+        config: RpcSendTransactionConfigWithBlockList,
+        use_legacy: bool,
+    ) -> Result<Self, PayloadError> {
+        if use_legacy {
+            Self::to_legacy(transaction, &config)
+        } else {
+            Self::try_from((transaction, config))
+        }
+    }
+
+    /// Encodes a transaction using the specified encoding
+    fn encode_transaction(
+        tx: &VersionedTransaction,
+        encoding: UiTransactionEncoding,
+    ) -> Result<String, PayloadError> {
+        let tx_bytes = bincode::serialize(tx)?;
+        Ok(match encoding {
+            UiTransactionEncoding::Base58 => bs58::encode(tx_bytes).into_string(),
+            UiTransactionEncoding::Base64 => BASE64_STANDARD.encode(tx_bytes),
+            _ => return Err(PayloadError::UnsupportedEncoding),
+        })
+    }
+
+    /// Decodes a transaction string using the specified encoding
+    fn decode_transaction(
+        tx_string: &str,
+        encoding: UiTransactionEncoding,
+    ) -> Result<Vec<u8>, PayloadError> {
+        Ok(match encoding {
+            UiTransactionEncoding::Base58 => bs58::decode(tx_string).into_vec()?,
+            UiTransactionEncoding::Base64 => BASE64_STANDARD.decode(tx_string)?,
+            _ => return Err(PayloadError::UnsupportedEncoding),
+        })
+    }
+
+    /// Creates a legacy payload from a transaction and configuration
+    pub fn to_legacy(
+        transaction: &VersionedTransaction,
+        config_with_blocklist: &RpcSendTransactionConfigWithBlockList,
+    ) -> Result<Self, PayloadError> {
+        let encoding = config_with_blocklist
+            .config
+            .as_ref()
+            .and_then(|c| c.encoding)
+            .unwrap_or(UiTransactionEncoding::Base58);
+
+        match encoding {
+            UiTransactionEncoding::Base64 | UiTransactionEncoding::Base58 => (),
+            _ => return Err(PayloadError::UnsupportedEncoding),
+        }
+
+        let tx_str = Self::encode_transaction(transaction, encoding)?;
+
+        Ok(Self::Legacy(LegacyPayload {
+            transaction: tx_str,
+            config: config_with_blocklist.config.unwrap_or_default(),
+            timestamp: Some(ms_since_epoch()),
+        }))
+    }
+
+    /// Converts the payload to an appropriate protobuf message type
+    pub fn to_proto<T>(&self) -> T
+    where
+        T: From<TransactionWrapper>, // For the New Payload
+        T: From<Vec<u8>>,            // For the Legacy Payload
+    {
+        match self {
+            Self::Legacy(legacy) => {
+                let bytes = serde_json::to_vec(legacy).expect("Failed to serialize legacy payload");
+                T::from(bytes)
+            }
+            Self::New(wrapper) => T::from(wrapper.clone()),
+        }
+    }
+}
+
 impl From<TransactionWrapper> for PublishTransaction {
     fn from(wrapper: TransactionWrapper) -> Self {
         Self {
@@ -116,6 +196,14 @@ impl From<Vec<u8>> for PublishTransaction {
     }
 }
 
+impl From<Vec<u8>> for SubscribeTransaction {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self {
+            payload: Some(subscribe_transaction::Payload::LegacyPayload(bytes)),
+        }
+    }
+}
+
 impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfigWithBlockList)>
     for TransactionPayload
 {
@@ -129,6 +217,7 @@ impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfigWithBlockList)>
     ) -> Result<Self, Self::Error> {
         let tx_bytes = bincode::serialize(transaction)?;
 
+        // Create new payload format with blocklist_pdas supported
         Ok(Self::New(TransactionWrapper {
             transaction: tx_bytes,
             config: Some(TransactionConfig {
@@ -157,60 +246,6 @@ impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfigWithBlockList)>
     }
 }
 
-impl TransactionPayload {
-    pub fn to_legacy(
-        transaction: &VersionedTransaction,
-        config_with_blocklist: &RpcSendTransactionConfigWithBlockList,
-    ) -> Result<Self, PayloadError> {
-        let encoding = config_with_blocklist
-            .config
-            .as_ref()
-            .and_then(|c| c.encoding)
-            .unwrap_or(UiTransactionEncoding::Base58);
-
-        match encoding {
-            UiTransactionEncoding::Base64 | UiTransactionEncoding::Base58 => (),
-            _ => return Err(PayloadError::UnsupportedEncoding),
-        }
-
-        let tx_bytes = bincode::serialize(transaction)?;
-        let tx_str = match encoding {
-            UiTransactionEncoding::Base58 => bs58::encode(tx_bytes).into_string(),
-            _ => BASE64_STANDARD.encode(tx_bytes),
-        };
-
-        Ok(Self::Legacy(LegacyPayload {
-            transaction: tx_str,
-            config: config_with_blocklist.config.unwrap_or_default(),
-            timestamp: Some(ms_since_epoch()),
-        }))
-    }
-}
-
-impl From<Vec<u8>> for SubscribeTransaction {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self {
-            payload: Some(subscribe_transaction::Payload::LegacyPayload(bytes)),
-        }
-    }
-}
-
-impl TransactionPayload {
-    pub fn to_proto<T>(&self) -> T
-    where
-        T: From<TransactionWrapper>, // For the New variant
-        T: From<Vec<u8>>,            // For the Legacy variant
-    {
-        match self {
-            Self::Legacy(legacy) => {
-                let bytes = serde_json::to_vec(legacy).expect("Failed to serialize legacy payload");
-                T::from(bytes)
-            }
-            Self::New(wrapper) => T::from(wrapper.clone()),
-        }
-    }
-}
-
 pub struct TransactionDecoder;
 
 impl TransactionDecoder {
@@ -225,23 +260,18 @@ impl TransactionDecoder {
     > {
         match payload {
             TransactionPayload::Legacy(legacy) => {
-                let tx_bytes = match legacy
+                let encoding = legacy
                     .config
                     .encoding
-                    .unwrap_or(UiTransactionEncoding::Base58)
-                {
-                    UiTransactionEncoding::Base58 => {
-                        bs58::decode(&legacy.transaction).into_vec()?
-                    }
-                    UiTransactionEncoding::Base64 => BASE64_STANDARD.decode(&legacy.transaction)?,
-                    _ => return Err(PayloadError::UnsupportedEncoding),
-                };
+                    .unwrap_or(UiTransactionEncoding::Base58);
+                let tx_bytes =
+                    TransactionPayload::decode_transaction(&legacy.transaction, encoding)?;
 
                 let tx = bincode::deserialize(&tx_bytes)?;
                 Ok((
                     tx,
                     Some(RpcSendTransactionConfigWithBlockList {
-                        config: Some(legacy.config),
+                        config: Some(legacy.config.clone()),
                         blocklist_pdas: vec![], // Legacy format doesn't have blocklist
                     }),
                 ))

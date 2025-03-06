@@ -197,11 +197,8 @@ impl TransactionSender {
                 .map_err(Into::into),
             Self::JetGateway { tx } => {
                 let signature = transaction.signatures[0];
-                let payload = if should_use_legacy_txn {
-                    TransactionPayload::to_legacy(&transaction, &config)?
-                } else {
-                    TransactionPayload::try_from((&transaction, config))?
-                };
+                let payload =
+                    TransactionPayload::create(&transaction, config, should_use_legacy_txn)?;
                 let proto_tx = payload.to_proto::<PublishTransaction>();
                 tx.lock()
                     .await
