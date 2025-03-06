@@ -99,6 +99,6 @@ solana-derivation-path = { git = "https://github.com/rpcpool/solana-public.git",
 solana-feature-set = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
 
 # https://github.com/anza-xyz/agave/blob/v2.0.4/Cargo.toml#L502-L533
-# [patch.crates-io.curve25519-dalek]
-# git = "https://github.com/anza-xyz/curve25519-dalek.git"
-# rev = "b500cdc2a920cd5bff9e2dd974d7b97349d61464"
+[patch.crates-io.curve25519-dalek]
+git = "https://github.com/anza-xyz/curve25519-dalek.git"
+rev = "b500cdc2a920cd5bff9e2dd974d7b97349d61464"
