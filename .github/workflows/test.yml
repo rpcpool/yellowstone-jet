@@ -65,6 +65,11 @@ jobs:
         with:
           command: check advisories
 
+      - name: install protoc
+        run: |
+          sudo apt update
+          sudo apt install protobuf-compiler
+
       - name: Run clippy
         run: cargo clippy --all-targets --tests -- -Dwarnings
 
