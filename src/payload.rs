@@ -116,13 +116,22 @@ impl From<Vec<u8>> for PublishTransaction {
     }
 }
 
-impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfig)> for TransactionPayload {
+impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfigWithBlockList)>
+    for TransactionPayload
+{
     type Error = PayloadError;
 
     fn try_from(
-        (transaction, config): (&VersionedTransaction, RpcSendTransactionConfig),
+        (transaction, config_with_blocklist): (
+            &VersionedTransaction,
+            RpcSendTransactionConfigWithBlockList,
+        ),
     ) -> Result<Self, Self::Error> {
-        let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
+        let encoding = config_with_blocklist
+            .config
+            .as_ref()
+            .and_then(|c| c.encoding)
+            .unwrap_or(UiTransactionEncoding::Base58);
 
         match encoding {
             UiTransactionEncoding::Base64 | UiTransactionEncoding::Base58 => (),
@@ -135,9 +144,10 @@ impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfig)> for TransactionP
             _ => BASE64_STANDARD.encode(tx_bytes),
         };
 
+        // Create a new legacy payload with the config preserved
         Ok(Self::Legacy(LegacyPayload {
             transaction: tx_str,
-            config,
+            config: config_with_blocklist.config.unwrap_or_default(),
             timestamp: Some(ms_since_epoch()),
         }))
     }
@@ -263,14 +273,17 @@ mod tests {
     #[test]
     fn test_legacy_format() {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfig {
-            encoding: Some(UiTransactionEncoding::Base58),
-            skip_preflight: true,
-            skip_sanitize: true,
-            ..Default::default()
+        let config = RpcSendTransactionConfigWithBlockList {
+            config: Some(RpcSendTransactionConfig {
+                encoding: Some(UiTransactionEncoding::Base58),
+                skip_preflight: true,
+                skip_sanitize: true,
+                ..Default::default()
+            }),
+            blocklist_pdas: vec![],
         };
 
-        let payload = TransactionPayload::try_from((&tx, config)).unwrap();
+        let payload = TransactionPayload::try_from((&tx, config.clone())).unwrap();
 
         let proto_tx = payload.to_proto::<SubscribeTransaction>();
         let decoded = TransactionPayload::try_from(proto_tx).unwrap();
@@ -282,7 +295,10 @@ mod tests {
         assert_eq!(decoded_tx.signatures, tx.signatures);
         assert!(config_with_blocklist.config.is_some());
         let decoded_config = config_with_blocklist.config.unwrap();
-        assert_eq!(decoded_config.skip_preflight, config.skip_preflight);
+        assert_eq!(
+            decoded_config.skip_preflight,
+            config.config.unwrap().skip_preflight
+        );
     }
 
     #[test]
@@ -375,11 +391,14 @@ mod tests {
     #[test]
     fn test_transaction_config_sanitize_flags() {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfig {
-            skip_preflight: true,
-            skip_sanitize: true,
-            encoding: Some(UiTransactionEncoding::Base64),
-            ..Default::default()
+        let config = RpcSendTransactionConfigWithBlockList {
+            config: Some(RpcSendTransactionConfig {
+                skip_preflight: true,
+                skip_sanitize: true,
+                encoding: Some(UiTransactionEncoding::Base64),
+                ..Default::default()
+            }),
+            blocklist_pdas: vec![],
         };
 
         let payload = TransactionPayload::try_from((&tx, config)).unwrap();
@@ -399,37 +418,48 @@ mod tests {
     #[test]
     fn test_config_preservation_through_conversion() {
         let tx = VersionedTransaction::default();
-        let original_config = RpcSendTransactionConfig {
-            skip_preflight: true,
-            skip_sanitize: false,
-            max_retries: Some(3),
-            preflight_commitment: None,
-            encoding: Some(UiTransactionEncoding::Base64),
-            min_context_slot: None,
+        let original_config = RpcSendTransactionConfigWithBlockList {
+            config: Some(RpcSendTransactionConfig {
+                skip_preflight: true,
+                skip_sanitize: false,
+                max_retries: Some(3),
+                preflight_commitment: None,
+                encoding: Some(UiTransactionEncoding::Base64),
+                min_context_slot: None,
+            }),
+            blocklist_pdas: vec![],
         };
 
-        let payload = TransactionPayload::try_from((&tx, original_config)).unwrap();
-
+        let payload = TransactionPayload::try_from((&tx, original_config.clone())).unwrap();
         let (_, decoded_config) = TransactionDecoder::decode(&payload).unwrap();
 
         assert!(decoded_config.is_some());
         let config_with_blocklist = decoded_config.unwrap();
         assert!(config_with_blocklist.config.is_some());
         let decoded_config = config_with_blocklist.config.unwrap();
-        assert_eq!(decoded_config.max_retries, original_config.max_retries);
+        assert_eq!(
+            decoded_config.max_retries,
+            original_config.config.unwrap().max_retries
+        );
         assert_eq!(
             decoded_config.skip_preflight,
-            original_config.skip_preflight
+            original_config.config.unwrap().skip_preflight
         );
-        assert_eq!(decoded_config.skip_sanitize, original_config.skip_sanitize);
+        assert_eq!(
+            decoded_config.skip_sanitize,
+            original_config.config.unwrap().skip_sanitize
+        );
     }
 
     #[test]
     fn test_invalid_encoding() {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfig {
-            encoding: Some(UiTransactionEncoding::JsonParsed),
-            ..Default::default()
+        let config = RpcSendTransactionConfigWithBlockList {
+            config: Some(RpcSendTransactionConfig {
+                encoding: Some(UiTransactionEncoding::JsonParsed),
+                ..Default::default()
+            }),
+            blocklist_pdas: vec![],
         };
 
         assert!(TransactionPayload::try_from((&tx, config)).is_err());

@@ -21,6 +21,7 @@ use {
     solana_transaction_status::{TransactionDetails, UiTransactionEncoding},
     std::{
         path::{Path, PathBuf},
+        str::FromStr,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -37,7 +38,7 @@ use {
     },
     tracing::{error, info},
     yellowstone_jet::{
-        payload::TransactionPayload,
+        payload::{RpcSendTransactionConfigWithBlockList, TransactionPayload},
         proto::jet::{
             jet_gateway_client::JetGatewayClient, publish_request::Message as PublishMessage,
             PublishRequest, PublishResponse, PublishTransaction,
@@ -92,6 +93,10 @@ struct Config {
     /// Number of send retries in STS
     #[serde(default)]
     pub max_retries: Option<usize>,
+
+    /// List of program derived addresses to blocklistS
+    #[serde(default)]
+    pub blocklist_pdas: Vec<String>,
 }
 
 impl Config {
@@ -177,11 +182,11 @@ impl TransactionSender {
     async fn send(
         &self,
         transaction: VersionedTransaction,
-        config: RpcSendTransactionConfig,
+        config: RpcSendTransactionConfigWithBlockList,
     ) -> anyhow::Result<Signature> {
         match self {
             Self::Jet { rpc } => rpc
-                .send_transaction_with_config(&transaction, config)
+                .send_transaction_with_config(&transaction, config.config.unwrap_or_default())
                 .await
                 .map_err(Into::into),
             Self::JetGateway { tx } => {
@@ -303,13 +308,19 @@ async fn main() -> anyhow::Result<()> {
             let signature = transaction.signatures[0];
             info!("generate transaction {signature} with send lamports {lamports}");
 
-            let config = RpcSendTransactionConfig {
-                skip_preflight: true,
-                skip_sanitize: false,
-                preflight_commitment: Some(CommitmentLevel::Finalized),
-                encoding: Some(UiTransactionEncoding::Base64), // we opt here to use base64 encoding
-                max_retries: config.max_retries,
-                min_context_slot: None,
+           let config = RpcSendTransactionConfigWithBlockList {
+                config: Some(RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    skip_sanitize: false,
+                    preflight_commitment: Some(CommitmentLevel::Finalized),
+                    encoding: Some(UiTransactionEncoding::Base64),
+                    max_retries: config.max_retries,
+                    min_context_slot: None,
+                }),
+                blocklist_pdas: config.blocklist_pdas
+                    .iter()
+                    .filter_map(|addr| Pubkey::from_str(addr).ok())
+                    .collect(),
             };
             match sender.send(transaction, config).await {
                 Ok(send_signature) => {
