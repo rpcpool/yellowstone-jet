@@ -28,6 +28,7 @@ use {
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::{BlocklistUpdater, ClusterTpuInfo, LeadersSelector},
         config::{load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream},
+        feature_flags::FeatureSet,
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_jet::GrpcServer,
         grpc_metrics::GrpcClient as GrpcMetricsClient,
@@ -156,11 +157,13 @@ async fn spawn_jet_gw_listener(
     mut identity_observer: ValueObserver<PubkeySigner>,
     tx_sender: RpcServerImpl,
     expected_identity: Option<Pubkey>,
+    features: FeatureSet,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     loop {
         let jet_gw_config2 = jet_gw_config.clone();
         let tx_sender2 = tx_sender.clone();
+        let features = features.clone();
         let mut identity_observer2 = identity_observer.clone();
         let (stop_tx2, stop_rx2) = tokio::sync::oneshot::channel();
         let fut = identity_observer.until_value_change(move |current_identity| {
@@ -175,6 +178,7 @@ async fn spawn_jet_gw_listener(
                         Arc::new(current_identity),
                         jet_gw_config2.clone(),
                         tx_sender2.clone(),
+                        features,
                         stop_rx2,
                     ).boxed()
                 }
@@ -183,6 +187,7 @@ async fn spawn_jet_gw_listener(
                     Arc::new(current_identity),
                     jet_gw_config2.clone(),
                     tx_sender2.clone(),
+                    features,
                     stop_rx2,
                 ).boxed()
             }
@@ -384,6 +389,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                     quic_identity_observer,
                     tx_sender,
                     expected_identity,
+                    config.features,
                     stop_jet_gw_listener_rx,
                 )
                 .await

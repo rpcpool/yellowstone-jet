@@ -51,7 +51,7 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
         signature: tx.signatures[0],
         wire_transaction,
         transaction: tx,
-        blocklist_keys: vec![],
+        blocklist_pdas: vec![],
     }
 }
 

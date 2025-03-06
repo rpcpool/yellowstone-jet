@@ -10,23 +10,61 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+### Breaking Changes
+
 ### Features
 
 ### Fixes
 
+## [11.0.0]
+
+### Breaking Changes
+
+- Modified transaction payload structure:
+  - Changed base transaction message format
+  - Updated protobuf definitions for compatibility
+  - Modified legacy payload handling
+
+### Features
+
+- Implemented a comprehensive dual-format transaction system:
+  - Legacy format support with base58/base64 encoding options
+  - New structured format with enhanced configuration capabilities
+  - Automatic format detection and graceful degradation
+- Added feature flag system for negotiating capabilities with gateway servers
+- Enhanced gRPC connection stability:
+  - Improved error handling for disconnections
+  - Better detection of problematic connections
+  - Added feature flag negotiation with graceful fallback
+- Improved empty message handling to prevent protocol errors
+- Added comprehensive configuration support:
+  - Transaction encoding configuration
+  - Extended transaction validation options
+  - Support for blocklist PDAs
+
+### Fixes
+
+- Fixed encoding/decoding edge cases in transaction handling
+- Improved feature flag compatibility detection
+- Enhanced transaction validation reliability
+- Fixed connection stability issues
+
 ## [10.7.0]
 
 ### Features
+
 - Added support for block leaders from yellowstone-blocklist smart contract
 - Refactor `cluster_tpu_info.rs` and `grpc_geyser.rs`
 - Added SelectLeaders struct to handle blocking tpus
 
 ### Fixes
+
 - Added tests for blocklist
 - Added tests for ClusterTpuInfo
 - Fix on QuicClient
 
 ## [10.6.0]
+
 - Added 'IdentityFlusherWaitGroup' struct which function is to control when an identity is updated in Jet.
 - Added reset_identity method in RPC.
 - Added flush transactions while updating identity.
@@ -34,7 +72,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-- Refactor `SendTransactionsPool`, `SendTransactionsPoolTask`, `RootedTransactions`, `QuicClient`, `ClusterTpuInfo`, `BlockhasQueue` 
+- Refactor `SendTransactionsPool`, `SendTransactionsPoolTask`, `RootedTransactions`, `QuicClient`, `ClusterTpuInfo`, `BlockhasQueue`
 - Added integration test for `SendTransactionsPool`, `IdentityFlusherWaitGroup` and `RpcServer`.
 
 ## [10.5.0]
@@ -49,7 +87,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 ### Fixes
 
 - Added `finish` and `stopped` call in `quic_solana::QuicClientsend_buffer_using_conn` to properly awaits acks making sure transaction are truely handled by
-a remote validator.
+  a remote validator.
 
 ## [10.4.0]
 

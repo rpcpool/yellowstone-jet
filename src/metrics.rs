@@ -171,7 +171,6 @@ pub mod jet {
             &["leader"]
         ).unwrap();
 
-        // static ref LEADER_PMTUD:
     }
 
     pub fn observe_leader_rtt(leader: Pubkey, rtt: Duration) {

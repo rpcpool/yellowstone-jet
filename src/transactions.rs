@@ -224,7 +224,7 @@ pub struct SendTransactionRequest {
     pub transaction: VersionedTransaction,
     pub wire_transaction: Vec<u8>,
     pub max_retries: Option<usize>,
-    pub blocklist_keys: Vec<Pubkey>,
+    pub blocklist_pdas: Vec<Pubkey>,
 }
 
 #[derive(Debug, Clone)]
@@ -645,7 +645,7 @@ impl SendTransactionsPoolTask {
             transaction,
             wire_transaction,
             max_retries,
-            blocklist_keys,
+            blocklist_pdas,
         }: SendTransactionRequest,
     ) {
         if self.transactions.contains_key(&signature) {
@@ -707,7 +707,7 @@ impl SendTransactionsPoolTask {
             max_retries,
             last_valid_block_height,
             landed,
-            blocklist_keys: blocklist_keys.clone(),
+            blocklist_keys: blocklist_pdas.clone(),
         };
         let update_existed = self.transactions.insert(signature, info).is_some();
         if !update_existed {
@@ -732,7 +732,7 @@ impl SendTransactionsPoolTask {
             self.schedule_transaction_retry(signature, retry_timestamp)
                 .await;
         } else {
-            self.spawn_connect(id, signature, wire_transaction, blocklist_keys);
+            self.spawn_connect(id, signature, wire_transaction, blocklist_pdas);
         }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "10.7.0"
+version = "11.0.0"
 authors = ["Triton One"]
 edition = "2021"
 description = "Yellowstone Jet"
@@ -54,7 +54,7 @@ solana-streamer = "~2.1.11"
 solana-tpu-client = "~2.1.11"
 solana-transaction-status = "~2.1.11"
 solana-version = "~2.1.11"
-solana-yellowstone-blocklist = { git = "https://github.com/rpcpool/solana-yellowstone-blocklist.git", tag="1.0.0"}
+solana-yellowstone-blocklist = { git = "https://github.com/rpcpool/solana-yellowstone-blocklist.git", tag = "1.0.0" }
 thiserror = "1.0.58"
 tokio = { version = "1.36.0", features = ["rt-multi-thread", "macros"] }
 tokio-stream = "0.1.15"
@@ -89,12 +89,6 @@ codegen-units = 1
 lto = true
 
 [patch.crates-io]
-# solana-account-decoder = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-program = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-rpc-client-api = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-sdk = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
-# solana-transaction-status = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.0.14-triton-public" }
 solana-account-decoder = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
 solana-program = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
 solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }

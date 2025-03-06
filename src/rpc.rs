@@ -263,39 +263,21 @@ pub mod rpc_admin {
 
 pub mod rpc_solana_like {
     use {
-        super::invalid_params,
         crate::{
-            solana::decode_and_deserialize,
-            transactions::{SendTransactionRequest, SendTransactionsPool},
+            payload::RpcSendTransactionConfigWithBlockList, rpc::invalid_params,
+            solana::decode_and_deserialize, transaction_handler::TransactionHandler,
+            transactions::SendTransactionsPool,
         },
         jsonrpsee::{
             core::{async_trait, RpcResult},
             proc_macros::rpc,
-            types::error::{
-                ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MSG,
-            },
         },
-        solana_client::{
-            client_error::{ClientError, ClientErrorKind},
-            nonblocking::rpc_client::RpcClient as SolanaRpcClient,
-            rpc_config::{RcpSanitizeTransactionConfig, RpcSimulateTransactionConfig},
-            rpc_request::{RpcError, RpcResponseErrorData},
-            rpc_response::{Response as RpcResponse, RpcSimulateTransactionResult},
-        },
-        solana_rpc_client_api::{
-            config::RpcSendTransactionConfig,
-            custom_error::{
-                NodeUnhealthyErrorData, JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
-            },
-            response::RpcVersionInfo,
-        },
-        solana_sdk::{
-            commitment_config::CommitmentConfig,
-            transaction::{TransactionError, VersionedTransaction},
-        },
+        solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient,
+        solana_rpc_client_api::response::RpcVersionInfo,
+        solana_sdk::transaction::VersionedTransaction,
         solana_transaction_status::UiTransactionEncoding,
         std::sync::Arc,
-        tracing::{debug, warn},
+        tracing::debug,
     };
 
     #[rpc(server, client)]
@@ -307,7 +289,7 @@ pub mod rpc_solana_like {
         async fn send_transaction(
             &self,
             data: String,
-            config: Option<RpcSendTransactionConfig>,
+            config: Option<RpcSendTransactionConfigWithBlockList>,
         ) -> RpcResult<String>;
     }
 
@@ -319,168 +301,56 @@ pub mod rpc_solana_like {
         pub proxy_preflight_check: bool,
     }
 
+    impl RpcServerImpl {
+        // Internal method specifically for handling VersionedTransaction directly
+        pub async fn handle_internal_transaction(
+            &self,
+            transaction: VersionedTransaction,
+            config: RpcSendTransactionConfigWithBlockList,
+        ) -> RpcResult<String /* Signature */> {
+            debug!("handling internal versioned transaction");
+
+            let handler = TransactionHandler::new(
+                self.sts.clone(),
+                &self.rpc,
+                self.proxy_sanitize_check,
+                self.proxy_preflight_check,
+            );
+
+            handler
+                .handle_versioned_transaction(transaction, config)
+                .await
+                .map_err(Into::into)
+        }
+    }
+
     #[async_trait]
     impl RpcServer for RpcServerImpl {
         fn get_version(&self) -> RpcResult<RpcVersionInfo> {
             debug!("get_version rpc request received");
-            let version = solana_version::Version::default();
-            Ok(RpcVersionInfo {
-                solana_core: version.to_string(),
-                feature_set: Some(version.feature_set),
-            })
+            Ok(TransactionHandler::get_version())
         }
 
         async fn send_transaction(
             &self,
             data: String,
-            config: Option<RpcSendTransactionConfig>,
-        ) -> RpcResult<String> {
+            config_with_blocklist: Option<RpcSendTransactionConfigWithBlockList>,
+        ) -> RpcResult<String /* Signature */> {
             debug!("send_transaction rpc request received");
-            let RpcSendTransactionConfig {
-                skip_preflight,
-                skip_sanitize,
-                preflight_commitment,
-                encoding,
-                max_retries,
-                min_context_slot,
-            } = config.unwrap_or_default();
-            let tx_encoding = encoding.unwrap_or(UiTransactionEncoding::Base58);
-            let binary_encoding = tx_encoding.into_binary_encoding().ok_or_else(|| {
-                invalid_params(format!(
-                    "unsupported encoding: {tx_encoding}. Supported encodings: base58, base64"
-                ))
-            })?;
-            let (wire_transaction, unsanitized_tx) =
-                decode_and_deserialize::<VersionedTransaction>(data, binary_encoding)?;
+            let config_with_blocklist = config_with_blocklist.unwrap_or_default();
+            let config = config_with_blocklist.config.unwrap_or_default();
 
-            if !skip_preflight {
-                if self.proxy_preflight_check {
-                    match self
-                        .rpc
-                        .simulate_transaction_with_config(
-                            &unsanitized_tx,
-                            RpcSimulateTransactionConfig {
-                                sig_verify: true,
-                                commitment: preflight_commitment
-                                    .map(|commitment| CommitmentConfig { commitment }),
-                                min_context_slot,
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                    {
-                        Ok(RpcResponse {
-                            context: _,
-                            value:
-                                RpcSimulateTransactionResult {
-                                    err,
-                                    logs,
-                                    units_consumed,
-                                    return_data,
-                                    ..
-                                },
-                        }) => {
-                            if let Some(error) = err {
-                                return Err(ErrorObject::owned(
-                                    JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE as i32,
-                                    format!("Transaction simulation failed: {error}"),
-                                    Some(RpcSimulateTransactionResult {
-                                        err: Some(error),
-                                        logs,
-                                        accounts: None,
-                                        units_consumed,
-                                        return_data,
-                                        inner_instructions: None,
-                                        replacement_blockhash: None,
-                                    }),
-                                ));
-                            }
-                        }
-                        Err(error) => {
-                            return Err(unwrap_client_error("simulate_transaction", error));
-                        }
-                    }
-                } else {
-                    warn!("received TX with preflight check");
-                    return Err(invalid_params("proxy_preflight_check option is not active"));
-                }
-            } else if !skip_sanitize && self.proxy_sanitize_check {
-                if let Err(error) = self
-                    .rpc
-                    .sanitize_transaction(
-                        &unsanitized_tx,
-                        RcpSanitizeTransactionConfig {
-                            sig_verify: true,
-                            commitment: preflight_commitment
-                                .map(|commitment| CommitmentConfig { commitment }),
-                            min_context_slot,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
-                    return Err(unwrap_client_error("sanitize_transaction", error));
-                }
-            } else {
-                // We can not sanitize transaction because we need access to Bank, so we use `VersionedTransaction::sanitize`
-                // let preflight_commitment =
-                //     preflight_commitment.map(|commitment| CommitmentConfig { commitment });
-                // let preflight_bank = &*meta.get_bank_with_config(RpcContextConfig {
-                //     commitment: preflight_commitment,
-                //     min_context_slot,
-                // })?;
-                // let transaction = sanitize_transaction(unsanitized_tx, preflight_bank)?;
-                // let signature = *transaction.signature();
-                unsanitized_tx.sanitize().map_err(|error| {
-                    let error: TransactionError = error.into();
-                    invalid_params(format!("invalid transaction: {error}"))
-                })?;
-            }
+            let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
 
-            let transaction = unsanitized_tx;
-            let signature = transaction.signatures[0];
+            let (_, transaction) = decode_and_deserialize(
+                data,
+                encoding
+                    .into_binary_encoding()
+                    .ok_or_else(|| invalid_params("unsupported encoding"))?,
+            )?;
 
-            if let Err(error) = self.sts.send_transaction(SendTransactionRequest {
-                signature,
-                transaction,
-                wire_transaction,
-                max_retries,
-                blocklist_keys: vec![], // This is temporal, I think I'll need the proto file
-            }) {
-                return Err(ErrorObject::owned(
-                    INTERNAL_ERROR_CODE,
-                    INTERNAL_ERROR_MSG,
-                    Some(format!("{error}")),
-                ));
-            }
-
-            Ok(signature.to_string())
-        }
-    }
-
-    fn unwrap_client_error(call: &str, error: ClientError) -> ErrorObjectOwned {
-        if let ClientErrorKind::RpcError(RpcError::RpcResponseError {
-            code,
-            message,
-            data,
-        }) = error.kind
-        {
-            ErrorObject::owned(
-                code as i32,
-                message,
-                match data {
-                    RpcResponseErrorData::Empty => None,
-                    RpcResponseErrorData::SendTransactionPreflightFailure(_) => {
-                        unreachable!("impossible response")
-                    }
-                    RpcResponseErrorData::NodeUnhealthy { num_slots_behind } => {
-                        Some(NodeUnhealthyErrorData { num_slots_behind })
-                    }
-                },
-            )
-        } else {
-            warn!("{call} failed: {error}");
-            ErrorObject::owned::<()>(INTERNAL_ERROR_CODE, INTERNAL_ERROR_MSG, None)
+            self.handle_internal_transaction(transaction, config_with_blocklist)
+                .await
         }
     }
 }

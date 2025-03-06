@@ -79,7 +79,23 @@ message PublishRequest {
 }
 
 message PublishTransaction {
-  bytes payload = 1;
+  oneof payload {
+    bytes legacy_payload = 1;  // For backwards compatibility
+    TransactionWrapper new_payload = 2;  // New structured format
+  }
+}
+
+message TransactionWrapper {
+  bytes transaction = 1;
+  optional TransactionConfig config = 2;
+  optional uint64 timestamp = 3;
+}
+
+message TransactionConfig {
+  bool skip_preflight = 1;
+  bool skip_sanitize = 2;
+  optional uint32 max_retries = 3;
+  repeated string blocklist_pdas = 4;
 }
 
 message PublishResponse {
@@ -94,8 +110,31 @@ message SubscribeRequest {
     Ping ping = 1;
     Pong pong = 2;
     SubscribeUpdateLimit update_limit = 3;
+    // first message to send
+    InitialSubscribeRequest init = 4;
   }
 }
+
+message InitialSubscribeRequest {
+  FeatureFlags features = 1;
+}
+
+// Feature flags to negotiate capabilities between client and server
+enum Feature {
+  // Default value when no feature is specified (Protocol Buffers default)
+  // This enables backward compatibility with older clients/servers
+  FEATURE_UNSPECIFIED = 0;
+
+  // Enables structured transaction format with additional metadata
+  TRANSACTION_PAYLOAD_V2 = 1;
+
+  // Future features flags
+}
+
+message FeatureFlags {
+  repeated Feature supported_features = 1;
+}
+
 
 message SubscribeUpdateLimit {
   uint64 messages_per100ms = 1;
@@ -110,5 +149,8 @@ message SubscribeResponse {
 }
 
 message SubscribeTransaction {
-  bytes payload = 1;
+  oneof payload {
+    bytes legacy_payload = 1;  // For backwards compatibility
+    TransactionWrapper new_payload = 2;  // New structured format
+  }
 }

@@ -1,5 +1,5 @@
 use {
-    crate::util::CommitmentLevel,
+    crate::{feature_flags::FeatureSet, util::CommitmentLevel},
     anyhow::Context,
     serde::{
         de::{self, Deserializer},
@@ -71,6 +71,9 @@ pub struct ConfigJet {
     /// Yellowstone-blocklist
     #[serde(default)]
     pub yellowstone_blocklist: YellowstoneBlocklist,
+    /// Features Flags
+    #[serde(default)]
+    pub features: FeatureSet,
 }
 
 #[derive(Debug, Deserialize)]

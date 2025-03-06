@@ -1,0 +1,73 @@
+---
+name: Test code
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-20.04, ubuntu-22.04, ubuntu-24.04]
+
+    runs-on: [ "${{ matrix.os }}"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ./target
+          key: v0001-${{ matrix.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            v0001-${{ matrix.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Set rust version
+        run: |
+          echo "channel=$(cat rust-toolchain.toml | grep channel | awk '{print $3}' | sed 's/"//g')" >> "$GITHUB_ENV"
+          echo "targets=$(cat rust-toolchain.toml | grep targets | awk '{print $3}' | sed 's/\[//' | sed 's/\]//' | sed 's/"//g')" >> "$GITHUB_ENV"
+          echo "components=$(cat rust-toolchain.toml | grep components | awk -F = '{print $2}' | sed 's/\[//' | sed 's/\]//' | sed 's/"//g')" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.channel }}
+          components: ${{ env.components }}
+
+      - name: cargo tree
+        run: |
+          cargo tree
+          git checkout Cargo.lock
+          cargo tree --frozen --offline
+
+      - name: Run fmt
+        run: cargo +nightly fmt --all -- --check
+
+      - name: cargo deny check advisories
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check advisories
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --tests -- -Dwarnings
+
+      - name: Test build
+        run: |
+          cargo build
