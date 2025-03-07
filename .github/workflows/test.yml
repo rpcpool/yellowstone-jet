@@ -17,7 +17,7 @@ jobs:
       matrix:
         os: [ubuntu-20.04, ubuntu-22.04, ubuntu-24.04]
 
-    runs-on: [ "${{ matrix.os }}"]
+    runs-on: ["${{ matrix.os }}"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,6 +56,11 @@ jobs:
           cargo tree
           git checkout Cargo.lock
           cargo tree --frozen --offline
+
+      - name: Install toolchain components
+        run: |
+          rustup component add --toolchain nightly rustfmt
+          rustup component add --toolchain ${{ env.channel }} clippy
 
       - name: Run fmt
         run: cargo +nightly fmt --all -- --check

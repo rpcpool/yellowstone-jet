@@ -1,6 +1,6 @@
 use {
     crate::{
-        cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
+        cluster_tpu_info::{BlockLeaders, ClusterTpuInfo, TpuInfo},
         config::{ConfigQuic, ConfigQuicTpuPort},
         metrics::jet as metrics,
         quic_solana::{ConnectionCache, ConnectionCacheSendPermit},
@@ -23,6 +23,7 @@ pub struct QuicClient {
     connection_cache: Arc<ConnectionCache>,
     extra_tpu_forward: Vec<TpuInfo>,
     tx_broadcast_metrics: broadcast::Sender<QuicClientMetric>,
+    leaders_selector: Arc<dyn BlockLeaders + Send + Sync + 'static>,
 }
 
 impl fmt::Debug for QuicClient {
@@ -61,25 +62,12 @@ impl fmt::Display for SendError {
 /// Trait for getting the upcoming leader schedule
 ///
 pub trait UpcomingLeaderSchedule {
-    fn get_leader_tpus(
-        &self,
-        leader_forward_lookahead: usize,
-        extra_tpu_forward: Vec<TpuInfo>,
-    ) -> BoxFuture<'_, Vec<TpuInfo>>;
+    fn get_leader_tpus(&self, leader_forward_lookahead: usize) -> BoxFuture<'_, Vec<TpuInfo>>;
 }
 
 impl UpcomingLeaderSchedule for ClusterTpuInfo {
-    fn get_leader_tpus(
-        &self,
-        leader_forward_lookahead: usize,
-        extra_tpu_forward: Vec<TpuInfo>,
-    ) -> BoxFuture<'_, Vec<TpuInfo>> {
-        let extra_tpu_forward = extra_tpu_forward.into_iter().collect::<Vec<_>>();
-        async move {
-            self.get_leader_tpus(leader_forward_lookahead, extra_tpu_forward)
-                .await
-        }
-        .boxed()
+    fn get_leader_tpus(&self, leader_forward_lookahead: usize) -> BoxFuture<'_, Vec<TpuInfo>> {
+        async move { self.get_leader_tpus(leader_forward_lookahead).await }.boxed()
     }
 }
 
@@ -189,6 +177,7 @@ impl QuicClient {
         upcoming_leader_schedule: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
         config: ConfigQuic,
         connection_cache: Arc<ConnectionCache>,
+        leaders_selector: Arc<dyn BlockLeaders + Send + Sync + 'static>,
     ) -> Self {
         let extra_tpu_forward = config
             .extra_tpu_forward
@@ -208,6 +197,7 @@ impl QuicClient {
             connection_cache,
             extra_tpu_forward,
             tx_broadcast_metrics: tx,
+            leaders_selector,
         }
     }
 
@@ -225,14 +215,27 @@ impl QuicClient {
     pub async fn reserve_send_permit(
         &self,
         leader_forward_count: usize,
+        blocklist_keys: Vec<Pubkey>,
     ) -> Option<QuicSendTxPermit> {
-        let tpus_info = self
+        let mut tpus_info = self
             .upcoming_leader_schedule
-            .get_leader_tpus(leader_forward_count, self.extra_tpu_forward.clone())
+            .get_leader_tpus(leader_forward_count)
             .await;
+        debug!(
+            "Attempting to send to {} leaders before filtering",
+            tpus_info.len()
+        );
+
+        tpus_info.extend(self.extra_tpu_forward.iter().cloned());
+
+        self.leaders_selector
+            .block_leaders(&mut tpus_info, &blocklist_keys)
+            .await;
+
+        debug!("After filtering, sending to {} leaders", tpus_info.len());
+
         let futs = tpus_info
             .into_iter()
-            .chain(self.extra_tpu_forward.iter().cloned())
             .filter_map(|tpu_info| {
                 match self.config.tpu_port {
                     ConfigQuicTpuPort::Normal => tpu_info.quic,
@@ -263,12 +266,17 @@ impl QuicClient {
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
         leader_forward_count: usize,
+        blocklist_keys: Vec<Pubkey>,
     ) {
         let mut tpus_info = self
             .upcoming_leader_schedule
-            .get_leader_tpus(leader_forward_count, self.extra_tpu_forward.clone())
+            .get_leader_tpus(leader_forward_count)
             .await;
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
+
+        self.leaders_selector
+            .block_leaders(&mut tpus_info, &blocklist_keys)
+            .await;
 
         let tpu_send_fut = tpus_info.into_iter().map(|tpu_info| {
             let send_retry_count = self.config.send_retry_count;
@@ -413,11 +421,7 @@ pub mod teskit {
     }
 
     impl UpcomingLeaderSchedule for MockClusterTpuInfo {
-        fn get_leader_tpus(
-            &self,
-            _leader_forward_lookahead: usize,
-            _extra_tpu_forward: Vec<TpuInfo>,
-        ) -> BoxFuture<'_, Vec<TpuInfo>> {
+        fn get_leader_tpus(&self, _leader_forward_lookahead: usize) -> BoxFuture<'_, Vec<TpuInfo>> {
             let leaders = self.leaders.clone();
             async move { leaders }.boxed()
         }

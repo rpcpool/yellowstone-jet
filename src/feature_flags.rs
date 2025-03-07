@@ -37,7 +37,7 @@ impl<'de> Deserialize<'de> for FeatureFlag {
 }
 
 impl FeatureFlag {
-    fn to_proto_feature(&self) -> Feature {
+    const fn to_proto_feature(&self) -> Feature {
         match self {
             FeatureFlag::TransactionPayloadV2 => Feature::TransactionPayloadV2,
         }
@@ -51,18 +51,10 @@ impl FeatureFlag {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Default, Debug, Clone, Deserialize)]
 pub struct FeatureSet {
     #[serde(default = "HashSet::new")]
     enabled_features: HashSet<FeatureFlag>,
-}
-
-impl Default for FeatureSet {
-    fn default() -> Self {
-        Self {
-            enabled_features: HashSet::new(),
-        }
-    }
 }
 
 impl FeatureSet {

@@ -264,15 +264,16 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            rpc::invalid_params, solana::decode_and_deserialize,
-            transaction_handler::TransactionHandler, transactions::SendTransactionsPool,
+            payload::RpcSendTransactionConfigWithBlockList, rpc::invalid_params,
+            solana::decode_and_deserialize, transaction_handler::TransactionHandler,
+            transactions::SendTransactionsPool,
         },
         jsonrpsee::{
             core::{async_trait, RpcResult},
             proc_macros::rpc,
         },
         solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient,
-        solana_rpc_client_api::{config::RpcSendTransactionConfig, response::RpcVersionInfo},
+        solana_rpc_client_api::response::RpcVersionInfo,
         solana_sdk::transaction::VersionedTransaction,
         solana_transaction_status::UiTransactionEncoding,
         std::sync::Arc,
@@ -288,7 +289,7 @@ pub mod rpc_solana_like {
         async fn send_transaction(
             &self,
             data: String,
-            config: Option<RpcSendTransactionConfig>,
+            config: Option<RpcSendTransactionConfigWithBlockList>,
         ) -> RpcResult<String>;
     }
 
@@ -305,7 +306,7 @@ pub mod rpc_solana_like {
         pub async fn handle_internal_transaction(
             &self,
             transaction: VersionedTransaction,
-            config: Option<RpcSendTransactionConfig>,
+            config: RpcSendTransactionConfigWithBlockList,
         ) -> RpcResult<String /* Signature */> {
             debug!("handling internal versioned transaction");
 
@@ -333,14 +334,13 @@ pub mod rpc_solana_like {
         async fn send_transaction(
             &self,
             data: String,
-            config: Option<RpcSendTransactionConfig>,
+            config_with_blocklist: Option<RpcSendTransactionConfigWithBlockList>,
         ) -> RpcResult<String /* Signature */> {
             debug!("send_transaction rpc request received");
+            let config_with_blocklist = config_with_blocklist.unwrap_or_default();
+            let config = config_with_blocklist.config.unwrap_or_default();
 
-            let encoding = config
-                .as_ref()
-                .and_then(|c| c.encoding)
-                .unwrap_or(UiTransactionEncoding::Base58);
+            let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
 
             let (_, transaction) = decode_and_deserialize(
                 data,
@@ -349,7 +349,8 @@ pub mod rpc_solana_like {
                     .ok_or_else(|| invalid_params("unsupported encoding"))?,
             )?;
 
-            self.handle_internal_transaction(transaction, config).await
+            self.handle_internal_transaction(transaction, config_with_blocklist)
+                .await
         }
     }
 }

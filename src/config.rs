@@ -68,6 +68,9 @@ pub struct ConfigJet {
     #[serde(default)]
     pub blocklist: ConfigBlocklist,
 
+    /// Yellowstone-blocklist
+    #[serde(default)]
+    pub yellowstone_blocklist: YellowstoneBlocklist,
     /// Features Flags
     #[serde(default)]
     pub features: FeatureSet,
@@ -543,5 +546,23 @@ impl ConfigBlocklist {
         }
 
         Ok(pubkeys)
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct YellowstoneBlocklist {
+    #[serde(deserialize_with = "YellowstoneBlocklist::deserialize_pubkey")]
+    pub contract_pubkey: Option<Pubkey>,
+}
+
+impl YellowstoneBlocklist {
+    fn deserialize_pubkey<'de, D>(deserializer: D) -> Result<Option<Pubkey>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse::<Pubkey>()
+            .map(Some)
+            .map_err(de::Error::custom)
     }
 }

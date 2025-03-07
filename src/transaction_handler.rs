@@ -1,5 +1,6 @@
 use {
     crate::{
+        payload::RpcSendTransactionConfigWithBlockList,
         solana::decode_and_deserialize,
         transactions::{SendTransactionRequest, SendTransactionsPool},
     },
@@ -92,9 +93,9 @@ impl TransactionHandler {
     pub async fn handle_versioned_transaction(
         &self,
         transaction: VersionedTransaction,
-        config: Option<RpcSendTransactionConfig>,
+        config_with_blocklist: RpcSendTransactionConfigWithBlockList,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
-        let config = config.unwrap_or_default();
+        let config = config_with_blocklist.config.unwrap_or_default();
 
         // Basic sanitize check first
         transaction
@@ -116,6 +117,7 @@ impl TransactionHandler {
             transaction,
             wire_transaction,
             max_retries: config.max_retries,
+            blocklist_pdas: config_with_blocklist.blocklist_pdas,
         }) {
             return Err(TransactionHandlerError::SendFailed(error.to_string()));
         }
@@ -126,16 +128,22 @@ impl TransactionHandler {
     pub async fn handle_transaction(
         &self,
         data: String,
-        config: Option<RpcSendTransactionConfig>,
+        config_with_blocklist: Option<RpcSendTransactionConfigWithBlockList>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
-        let (wire_transaction, transaction) = self.prepare_transaction(data, config).await?;
+        let config_with_blocklist = config_with_blocklist.unwrap_or_default();
+        let config = config_with_blocklist.config.unwrap_or_default();
+
+        let (wire_transaction, transaction) = self
+            .prepare_transaction(data, config_with_blocklist.config)
+            .await?;
         let signature = transaction.signatures[0];
 
         if let Err(error) = self.stp.send_transaction(SendTransactionRequest {
             signature,
             transaction,
             wire_transaction,
-            max_retries: config.and_then(|c| c.max_retries),
+            max_retries: config.max_retries,
+            blocklist_pdas: config_with_blocklist.blocklist_pdas,
         }) {
             return Err(TransactionHandlerError::SendFailed(error.to_string()));
         }

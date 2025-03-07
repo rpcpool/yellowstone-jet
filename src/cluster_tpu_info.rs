@@ -1,26 +1,32 @@
 use {
     crate::{
-        config::ConfigBlocklist,
-        grpc_geyser::{GeyserSubscriber, SlotUpdateInfoWithCommitment},
+        grpc_geyser::SlotUpdateInfoWithCommitment,
         metrics::jet as metrics,
-        util::{
-            CommitmentLevel, IncrementalBackoff, WaitShutdown, WaitShutdownJoinHandleResult,
-            WaitShutdownSharedJoinHandle,
-        },
+        util::{CommitmentLevel, IncrementalBackoff},
     },
-    futures::future::{try_join_all, FutureExt},
-    solana_client::{nonblocking::rpc_client::RpcClient, rpc_response::RpcContactInfo},
+    futures::future::FutureExt,
+    solana_client::{
+        client_error::Result as ClientResult,
+        nonblocking::rpc_client::RpcClient,
+        rpc_response::{RpcContactInfo, RpcLeaderSchedule},
+    },
     solana_sdk::{
         clock::{Slot, NUM_CONSECUTIVE_LEADER_SLOTS},
         epoch_schedule::EpochSchedule,
         pubkey::Pubkey,
     },
-    std::{collections::HashMap, net::SocketAddr, ops::DerefMut, sync::Arc},
+    solana_yellowstone_blocklist::state::{AclType, ListState},
+    std::{
+        collections::{HashMap, HashSet},
+        future::Future,
+        net::SocketAddr,
+        sync::Arc,
+    },
     tokio::{
-        sync::{broadcast, Notify, RwLock},
+        sync::{broadcast, RwLock},
         time::{sleep, Duration, Instant},
     },
-    tracing::{info, warn},
+    tracing::{debug, info, warn},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -29,6 +35,35 @@ pub struct TpuInfo {
     pub slots: [Slot; NUM_CONSECUTIVE_LEADER_SLOTS as usize],
     pub quic: Option<SocketAddr>,
     pub quic_forwards: Option<SocketAddr>,
+}
+
+#[async_trait::async_trait]
+pub trait ClusterTpuRpcClient {
+    async fn get_leader_schedule(
+        &self,
+        slot: Option<Slot>,
+    ) -> ClientResult<Option<RpcLeaderSchedule>>;
+
+    async fn get_cluster_nodes(&self) -> ClientResult<Vec<RpcContactInfo>>;
+    async fn get_epoch_schedule(&self) -> ClientResult<EpochSchedule>;
+}
+
+#[async_trait::async_trait]
+
+impl ClusterTpuRpcClient for RpcClient {
+    async fn get_leader_schedule(
+        &self,
+        slot: Option<Slot>,
+    ) -> ClientResult<Option<RpcLeaderSchedule>> {
+        self.get_leader_schedule(slot).await
+    }
+
+    async fn get_cluster_nodes(&self) -> ClientResult<Vec<RpcContactInfo>> {
+        self.get_cluster_nodes().await
+    }
+    async fn get_epoch_schedule(&self) -> ClientResult<EpochSchedule> {
+        self.get_epoch_schedule().await
+    }
 }
 
 #[derive(Debug, Default)]
@@ -40,6 +75,22 @@ struct ClusterTpuInfoInner {
 }
 
 impl ClusterTpuInfoInner {
+    async fn get_epoch_schedule(
+        rpc: Arc<dyn ClusterTpuRpcClient + Send + Sync + 'static>,
+    ) -> EpochSchedule {
+        let mut backoff = IncrementalBackoff::default();
+        loop {
+            backoff.maybe_tick().await;
+            match rpc.get_epoch_schedule().await {
+                Ok(epoch_schedule) => break epoch_schedule,
+                Err(error) => {
+                    backoff.init();
+                    warn!("failed to get epoch schedule: {error:?}");
+                }
+            }
+        }
+    }
+
     fn get_tpu_info(&self, leader_slot: Slot) -> Option<TpuInfo> {
         if let Some(leader) = self.leader_schedule.get(&leader_slot) {
             if let Some(tpu_info) = self.cluster_nodes.get(leader) {
@@ -59,98 +110,125 @@ impl ClusterTpuInfoInner {
     }
 }
 
-type ClusterTpuInfoInnerShared = Arc<RwLock<ClusterTpuInfoInner>>;
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClusterTpuInfo {
-    inner: ClusterTpuInfoInnerShared,
-    shutdown_schedule: Arc<Notify>,
-    shutdown_nodes: Arc<Notify>,
-    join_handle: WaitShutdownSharedJoinHandle,
-    blocklist: ConfigBlocklist,
-}
-
-impl WaitShutdown for ClusterTpuInfo {
-    fn shutdown(&self) {
-        self.shutdown_schedule.notify_one();
-        self.shutdown_nodes.notify_one();
-    }
-
-    async fn wait_shutdown_future(self) -> WaitShutdownJoinHandleResult {
-        let mut locked = self.join_handle.lock().await;
-        locked.deref_mut().await
-    }
+    inner: Arc<RwLock<ClusterTpuInfoInner>>,
+    shutdown_update: broadcast::Sender<()>,
 }
 
 impl ClusterTpuInfo {
     pub async fn new(
-        rpc: String,
-        grpc: &GeyserSubscriber,
+        rpc: Arc<dyn ClusterTpuRpcClient + Send + Sync + 'static>,
+        slots_rx: broadcast::Receiver<SlotUpdateInfoWithCommitment>,
         cluster_nodes_update_interval: Duration,
-        blocklist: ConfigBlocklist,
-    ) -> Self {
+    ) -> (Self, impl Future<Output = ()>) {
         assert_eq!(NUM_CONSECUTIVE_LEADER_SLOTS, 4);
 
-        let shutdown_schedule = Arc::new(Notify::new());
-        let shutdown_nodes = Arc::new(Notify::new());
-
+        let (tx, mut rx) = broadcast::channel(1);
         let inner = Arc::new(RwLock::new(ClusterTpuInfoInner {
-            epoch_schedule: Self::get_epoch_schedule(rpc.clone()).await,
+            epoch_schedule: ClusterTpuInfoInner::get_epoch_schedule(Arc::clone(&rpc)).await,
             ..Default::default()
         }));
-        let slots_rx = grpc.subscribe_slots();
 
-        Self {
-            inner: Arc::clone(&inner),
-            shutdown_schedule: Arc::clone(&shutdown_schedule),
-            shutdown_nodes: Arc::clone(&shutdown_nodes),
-            join_handle: Self::spawn(async move {
-                try_join_all(&mut [
-                    Self::update_leader_schedule(
-                        shutdown_schedule,
-                        Arc::clone(&inner),
-                        rpc.clone(),
-                        slots_rx,
-                    )
-                    .boxed(),
-                    Self::update_cluster_nodes(
-                        inner,
-                        rpc,
-                        cluster_nodes_update_interval,
-                        shutdown_nodes,
-                    )
-                    .boxed(),
-                ])
-                .await
-                .map(|_| ())
-            }),
-            blocklist,
-        }
-    }
-
-    async fn get_epoch_schedule(rpc: String) -> EpochSchedule {
-        let rpc = RpcClient::new(rpc);
-        let mut backoff = IncrementalBackoff::default();
-        loop {
-            backoff.maybe_tick().await;
-            match rpc.get_epoch_schedule().await {
-                Ok(epoch_schedule) => break epoch_schedule,
-                Err(error) => {
-                    backoff.init();
-                    warn!("failed to get epoch schedule: {error:?}");
+        (
+            Self {
+                inner: Arc::clone(&inner),
+                shutdown_update: tx
+            },
+            async move {
+                tokio::select! {
+                    _ = rx.recv() => {
+                        info!("shutdown signal received in ClusterTpuInfo");
+                    }
+                    _ = ClusterTpuInfo::update_leader_schedule(Arc::clone(&inner),Arc::clone(&rpc), slots_rx) => {
+                        info!("Update leader schedule suddenly finished");
+                    }
+                    _ = ClusterTpuInfo::update_cluster_nodes(inner, rpc, cluster_nodes_update_interval) => {
+                        info!("Update cluster nodes suddenly finished");
+                    }
                 }
             }
+            .boxed(),
+        )
+    }
+
+    pub async fn processed_slot(&self) -> Slot {
+        self.inner.read().await.processed_slot
+    }
+
+    pub async fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
+        self.inner.read().await.cluster_nodes.clone()
+    }
+
+    pub async fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey> {
+        self.inner.read().await.leader_schedule.clone()
+    }
+
+    async fn update_cluster_nodes(
+        inner: Arc<RwLock<ClusterTpuInfoInner>>,
+        rpc: Arc<dyn ClusterTpuRpcClient + Send + Sync + 'static>,
+        cluster_nodes_update_interval: Duration,
+    ) -> anyhow::Result<()> {
+        let mut backoff = IncrementalBackoff::default();
+        let mut old_cluster = { inner.read().await.cluster_nodes.clone() };
+        loop {
+            tokio::select! {
+                _ = backoff.maybe_tick() => {}
+            }
+
+            let ts = Instant::now();
+            let nodes = match rpc.get_cluster_nodes().await {
+                Ok(nodes) => {
+                    backoff.reset();
+                    nodes
+                        .into_iter()
+                        .filter_map(|info| match info.pubkey.parse() {
+                            Ok(pubkey) => Some((pubkey, info)),
+                            Err(error) => {
+                                warn!(
+                                    "failed to parse cluster node identity {}: {error:?}",
+                                    info.pubkey
+                                );
+                                None
+                            }
+                        })
+                        .collect::<HashMap<Pubkey, RpcContactInfo>>()
+                }
+                Err(error) => {
+                    metrics::cluster_nodes_set_size(0);
+                    warn!("failed to get cluster nodes: {error:?}");
+                    backoff.init();
+                    continue;
+                }
+            };
+
+            metrics::cluster_nodes_set_size(nodes.len());
+            if old_cluster != nodes {
+                if old_cluster.len() != nodes.len() {
+                    info!(
+                        size = nodes.len(),
+                        elapsed_ms = ts.elapsed().as_millis(),
+                        "update total number of cluster nodes",
+                    );
+                }
+                let mut inner = inner.write().await;
+                inner.cluster_nodes = nodes.clone();
+                old_cluster = nodes;
+                drop(inner);
+            }
+
+            tokio::select! {
+                _ = sleep(cluster_nodes_update_interval) => {}
+            };
         }
     }
 
     async fn update_leader_schedule(
-        shutdown: Arc<Notify>,
-        inner: ClusterTpuInfoInnerShared,
-        rpc: String,
+        inner: Arc<RwLock<ClusterTpuInfoInner>>,
+        rpc: Arc<dyn ClusterTpuRpcClient + Send + Sync + 'static>,
         mut slots_rx: broadcast::Receiver<SlotUpdateInfoWithCommitment>,
     ) -> anyhow::Result<()> {
         let mut backoff = IncrementalBackoff::default();
-        let rpc = RpcClient::new(rpc);
 
         let epoch_schedule = { inner.read().await.epoch_schedule.clone() };
 
@@ -159,7 +237,6 @@ impl ClusterTpuInfo {
             let mut slot_schedule = None;
 
             tokio::select! {
-                _ = shutdown.notified() => return Ok(()),
                 message = slots_rx.recv() => match message {
                     Ok(slot_update) => match slot_update.commitment {
                         CommitmentLevel::Processed => {
@@ -217,7 +294,6 @@ impl ClusterTpuInfo {
                 epoch_schedule.get_first_slot_in_epoch(epoch_schedule.get_epoch(slot));
             loop {
                 tokio::select! {
-                    _ = shutdown.notified() => return Ok(()),
                     _ = backoff.maybe_tick() => {}
                 }
 
@@ -226,7 +302,6 @@ impl ClusterTpuInfo {
                     Ok(Some(leader_schedule)) => {
                         let mut locked = inner.write().await;
 
-                        // remove outdated
                         locked
                             .leader_schedule
                             .retain(|leader_schedule_slot, _pubkey| {
@@ -279,108 +354,235 @@ impl ClusterTpuInfo {
         }
     }
 
-    async fn update_cluster_nodes(
-        inner: ClusterTpuInfoInnerShared,
-        rpc: String,
-        cluster_nodes_update_interval: Duration,
-        shutdown: Arc<Notify>,
-    ) -> anyhow::Result<()> {
-        let mut backoff = IncrementalBackoff::default();
-        let rpc = RpcClient::new(rpc);
-        loop {
-            tokio::select! {
-                _ = shutdown.notified() => return Ok(()),
-                _ = backoff.maybe_tick() => {}
-            }
+    // I don't really know if this is necessary. I could just add an underscore before shutdown_update and it would work
+    // In any case, those futures will be shutdown if all tx references are dropped or task_group cancels them
+    pub async fn shutdown(&self) {
+        let _ = self.shutdown_update.send(());
+    }
 
-            let ts = Instant::now();
-            let nodes = match rpc.get_cluster_nodes().await {
-                Ok(nodes) => {
-                    backoff.reset();
-                    nodes
-                        .into_iter()
-                        .filter_map(|info| match info.pubkey.parse() {
-                            Ok(pubkey) => Some((pubkey, info)),
-                            Err(error) => {
-                                warn!(
-                                    "failed to parse cluster node identity {}: {error:?}",
-                                    info.pubkey
-                                );
-                                None
-                            }
-                        })
-                        .collect::<HashMap<Pubkey, RpcContactInfo>>()
-                }
-                Err(error) => {
-                    metrics::cluster_nodes_set_size(0);
-                    warn!("failed to get cluster nodes: {error:?}");
-                    backoff.init();
-                    continue;
-                }
-            };
+    pub async fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo> {
+        let inner = self.inner.read().await;
 
-            metrics::cluster_nodes_set_size(nodes.len());
-            let mut inner = inner.write().await;
-            if inner.cluster_nodes.len() != nodes.len() {
-                info!(
-                    size = nodes.len(),
-                    elapsed_ms = ts.elapsed().as_millis(),
-                    "update total number of cluster nodes",
-                );
-            }
-            inner.cluster_nodes = nodes;
-            drop(inner);
+        (0..=leader_forward_count as u64)
+            .filter_map(|i| {
+                let leader_slot = inner.processed_slot + i * NUM_CONSECUTIVE_LEADER_SLOTS;
+                inner.get_tpu_info(leader_slot)
+            })
+            .collect::<Vec<_>>()
+    }
+}
 
-            tokio::select! {
-                _ = shutdown.notified() => return Ok(()),
-                _ = sleep(cluster_nodes_update_interval) => {}
-            };
+#[derive(Default, Clone)]
+pub struct LeadersSelector {
+    blocklist: HashSet<Pubkey>,
+    deny_lists: Arc<RwLock<HashMap<Pubkey, HashSet<Pubkey>>>>,
+    allow_lists: Arc<RwLock<HashMap<Pubkey, HashSet<Pubkey>>>>,
+}
+
+impl LeadersSelector {
+    pub async fn new_from_blockchain(
+        url: String,
+        blocklist: HashSet<Pubkey>,
+        contract_pubkey: &Option<Pubkey>,
+    ) -> Result<Self, anyhow::Error> {
+        if let Some(contract_pubkey) = contract_pubkey {
+            let rpc = RpcClient::new(url);
+            let accounts = rpc.get_program_accounts(contract_pubkey).await?;
+            let accounts_parsed: Vec<(Pubkey, HashSet<Pubkey>, AclType)>= accounts
+                .iter()
+                .filter_map(|account| {
+                    match ListState::deserialize(account.1.data.as_slice()) {
+                        Ok(state) => Some((
+                            account.0,
+                            Self::get_hashset(state.list),
+                            state.meta.acl_type,
+                        )),
+                        Err(_) => {
+                            tracing::error!("Error parsing account data from {:?}. \n Maybe you should check program pubkey", account.0);
+                            None
+                        }
+                    }
+                })
+                .collect();
+
+            let mut deny_list = HashMap::new();
+            let mut allow_list = HashMap::new();
+
+            accounts_parsed
+                .into_iter()
+                .for_each(|(key, hash_keys, acl)| match acl {
+                    AclType::Allow => {
+                        allow_list.insert(key, hash_keys);
+                    }
+                    AclType::Deny => {
+                        deny_list.insert(key, hash_keys);
+                    }
+                });
+            Ok(Self {
+                blocklist,
+                deny_lists: Arc::new(RwLock::new(deny_list)),
+                allow_lists: Arc::new(RwLock::new(allow_list)),
+            })
+        } else {
+            Ok(Self {
+                blocklist,
+                ..Default::default()
+            })
         }
     }
 
-    pub async fn get_leader_tpus(
-        &self,
-        leader_forward_count: usize,
-        extra_tpu_forwards: impl IntoIterator<Item = TpuInfo>,
-    ) -> Vec<TpuInfo> {
-        let inner = self.inner.read().await;
+    pub fn new(
+        blocklist: HashSet<Pubkey>,
+        deny_list: HashMap<Pubkey, HashSet<Pubkey>>,
+        allow_list: HashMap<Pubkey, HashSet<Pubkey>>,
+    ) -> Self {
+        Self {
+            blocklist,
+            deny_lists: Arc::new(RwLock::new(deny_list)),
+            allow_lists: Arc::new(RwLock::new(allow_list)),
+        }
+    }
 
-        let mut blocklisted = 0;
+    pub fn get_hashset(list: &[Pubkey]) -> HashSet<Pubkey> {
+        list.iter().cloned().collect()
+    }
+}
 
-        let mut tpus = (0..=leader_forward_count as u64)
-            .filter_map(|i| {
-                let leader_slot = inner.processed_slot + i * NUM_CONSECUTIVE_LEADER_SLOTS;
-                inner.get_tpu_info(leader_slot).and_then(|info| {
-                    if self.blocklist.leaders.contains(&info.leader) {
-                        blocklisted += 1;
-                        None
-                    } else {
-                        Some(info)
+#[async_trait::async_trait]
+pub trait BlocklistUpdater {
+    /// Used to update lists from contract Yellowstone-blocklist
+    /// It parses the bytes in acc_data into an specified struct
+    /// and then insert its data into a collection using key as index
+    async fn update_list(&self, acc_data: &[u8], key: Pubkey);
+}
+
+#[async_trait::async_trait]
+impl BlocklistUpdater for LeadersSelector {
+    async fn update_list(&self, acc_data: &[u8], key: Pubkey) {
+        match ListState::deserialize(acc_data) {
+            Ok(state) => {
+                let mut deny_lists = self.deny_lists.write().await;
+                let mut allow_lists = self.allow_lists.write().await;
+
+                match state.meta.acl_type {
+                    AclType::Allow => {
+                        deny_lists.remove(&key);
+                        allow_lists.insert(key, Self::get_hashset(state.list));
                     }
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for extra_tpu in extra_tpu_forwards.into_iter() {
-            if self.blocklist.leaders.contains(&extra_tpu.leader) {
-                blocklisted += 1;
-            } else if tpus.iter().all(|tpu| tpu.leader != extra_tpu.leader) {
-                let contact_info = inner.cluster_nodes.get(&extra_tpu.leader);
-                tpus.push(TpuInfo {
-                    leader: extra_tpu.leader,
-                    slots: extra_tpu.slots,
-                    quic: extra_tpu
-                        .quic
-                        .or(contact_info.and_then(|info| info.tpu_quic)),
-                    quic_forwards: extra_tpu
-                        .quic_forwards
-                        .or(contact_info.and_then(|info| info.tpu_forwards_quic)),
-                });
+                    AclType::Deny => {
+                        allow_lists.remove(&key);
+                        deny_lists.insert(key, Self::get_hashset(state.list));
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::error!("Unable to parse account {key:?} data. Maybe you should check program pubkey. Error: {err:?}");
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+pub trait BlockLeaders {
+    /*
+    Takes a mutable reference of a vector containing TpuInfo and retain only those allowed by the
+    lists indicated by blocklist_keys
+    # Example
+    ```
+
+    struct BlocklistYellowstone {
+        blocklist: HashMap<Pubkey, HashSet<Pubkey>>
+    }
+
+
+    #[async_trait::async_trait]
+    impl BlockLeaders for Blocklists {
+        async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, blocklist_keys: &[Pubkey]) {
+            let blocklist = self.blocklist;
+
+            tpus.retain(|info| {
+                for key_list in blocklist_keys.iter() {
+                   if let Some(blocklist_hash) = blocklist.get(key_list) {
+                       if blocklist_hash.contains(&info.leader) {
+                            return false;
+                       }
+                   }
+                   true
+                 }
+               }
+            )
+        }
+    }
+
+
+    async fn main() {
+        let key1 = Pubkey::new_unique();
+        let mut tpus = vec![TpuInfo {
+            leader: key1,
+            ...
+        }]
+        let blocklist_yellowstone = {
+            blocklist: hashmap!{key1 => hashset!{key1}}
+        }
+        blocklist_yellowstone.block_leaders(&mut tpus, &[key1]).await;
+       // Now tpus should have a length of zero
+        assert!(tpus.is_empty());
+    }
+    ```
+    */
+    async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, blocklist_keys: &[Pubkey]);
+}
+
+#[async_trait::async_trait]
+
+impl BlockLeaders for LeadersSelector {
+    async fn block_leaders(&self, tpus: &mut Vec<TpuInfo>, blocklist_keys: &[Pubkey]) {
+        let mut blocklisted = 0;
+        let allow_lists = self.allow_lists.read().await;
+        let deny_lists = self.deny_lists.read().await;
+
+        tpus.retain(|info| {
+            let mut is_allow = false;
+            let leader = info.leader;
+
+            // Check deny lists first
+            for key_list in blocklist_keys {
+                if let Some(deny_hash) = deny_lists.get(key_list) {
+                    if deny_hash.contains(&leader) {
+                        blocklisted += 1;
+                        debug!(
+                            "Leader {} BLOCKED - found in deny list {}",
+                            leader, key_list
+                        );
+                        return false;
+                    }
+                }
+            }
+
+            // Then check allow lists
+            for key_list in blocklist_keys {
+                if let Some(allow_hash) = allow_lists.get(key_list) {
+                    if !allow_hash.contains(&leader) {
+                        blocklisted += 1;
+                        debug!(
+                            "Leader {} BLOCKED - not found in allow list {}",
+                            leader, key_list
+                        );
+                        return false;
+                    } else {
+                        is_allow = true;
+                    }
+                }
+            }
+
+            if !is_allow && self.blocklist.contains(&leader) {
+                blocklisted += 1;
+                debug!("Leader {} BLOCKED - found in global blocklist", leader);
+                return false;
+            }
+            true
+        });
 
         metrics::sts_tpu_blocklisted_inc(blocklisted);
-
-        tpus
     }
 }

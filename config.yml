@@ -126,16 +126,8 @@ quic:
 #   # Event buffer queue size
 #   queue_size_buffer: 100000
 
-# Allow users to specify validators to skip when forwarding transactons.
-# blocklist:
-#   leaders:
-#     files:
-#       - /home/solana/jet/leaders_bloclist.txt
-#     pubkeys:
-#       - FugJZepeGfh1Ruunhep19JC4F3Hr2FL3oKUMezoK8ajp
-#       - 6TkKqq15wXjqEjNg9zqTKADwuVATR9dW3rkNnsYme1ea
-#       - q9XWcZ7T1wP4bW9SB4XgNNwjnFEJ982nE8aVbbNuwot
-#       - DUND26mEDfFeaPsVof3YvbXDRvpuQX7HMUJrLgEWzYw4
+# yellowstone_blocklist:
+#   contract_pubkey: E47XuTVcCMMYZSmeaybv3BMu6hYktvvFgeZkAJbVgmUx
 
 features:
   enabled_features:
