@@ -13,4 +13,7 @@ ignore = [
     "RUSTSEC-2025-0004",
 
     "RUSTSEC-2022-0093", # ed25519-dalek 1.0.1
+
+    # ring vulnerability - coming from Solana dependencies
+    "RUSTSEC-2025-0009",
 ]
