@@ -16,4 +16,14 @@ ignore = [
 
     # ring vulnerability - coming from Solana dependencies
     "RUSTSEC-2025-0009",
+
+    # protobuf issue
+    "RUSTSEC-2024-0437",
+
+    # paste
+    "RUSTSEC-2024-0436",
+
+    # humantime -- unmaintened
+    "RUSTSEC-2025-0014",
+
 ]
