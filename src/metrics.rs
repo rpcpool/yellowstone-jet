@@ -18,7 +18,7 @@ macro_rules! register {
     ($collector:ident) => {
         REGISTRY
             .register(Box::new($collector.clone()))
-            .expect("collector can't be registered");
+            .expect("collector can't be registered")
     };
 }
 
@@ -220,6 +220,10 @@ pub mod jet {
             register!(TRANSACTION_DESERIALIZE_ERRORS);
             register!(SEND_TRANSACTION_ERROR);
             register!(SEND_TRANSACTION_SUCCESS);
+            register!(LEADER_MTU);
+            register!(LEADER_RTT);
+            register!(SEND_TRANSACTION_E2E_LATENCY);
+            register!(SEND_TRANSACTION_ATTEMPT)
         });
     }
 
@@ -432,5 +436,13 @@ pub mod jet {
         GATEWAY_CONNECTED
             .with_label_values(&[endpoint.as_ref()])
             .set(1);
+    }
+
+    pub fn gateway_set_disconnected(endpoints: &[String]) {
+        for endpoint in endpoints {
+            GATEWAY_CONNECTED
+                .with_label_values(&[endpoint.as_ref()])
+                .set(0);
+        }
     }
 }

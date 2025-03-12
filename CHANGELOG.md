@@ -16,6 +16,16 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [11.1.1]
+
+### Fixes
+
+- Added missing `LEADER_MTU` metrics registration
+- Added missing `LEADER_RTT` metrics registration
+- Added missing `SEND_TRANSACTION_E2E_LATENCY` metrics registration
+- Added missing `SEND_TRANSACTION_ATTEMPT` metrics registration
+- Added missing `GATEWAY_CONNECTED` metric upodate on disconnection logic
+
 ## [11.1.0]
 
 ### Features
