@@ -437,6 +437,8 @@ impl GrpcServer {
                 }
             }.await;
 
+            metrics::jet::gateway_set_disconnected(&config.endpoints);
+
             // If we get disconnected quickly too many times, there might be a protocol issue
             if last_connect_time.elapsed() < Duration::from_secs(2) {
                 quick_disconnects += 1;
@@ -482,46 +484,26 @@ impl GrpcServer {
         }
 
         let mut last_err = None;
-        let mut feature_err = false;
 
-        loop {
-            match tasks.join_next().await {
-                Some(Ok((Ok((sink, stream)), endpoint))) => {
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok((Ok((sink, stream)), endpoint)) => {
                     info!(endpoint, "jet connected to gateway");
                     metrics::jet::gateway_set_connected(endpoints, endpoint);
                     return Ok((sink, stream));
                 }
-                Some(Ok((Err(error), endpoint))) => {
-                    // Check if error is related to feature flags
-                    if error.to_string().contains("features") {
-                        feature_err = true;
-                        error!(
-                            endpoint,
-                            "Gateway rejected feature flags - disable them in your configuration file: {:?}",
-                            error
-                        );
-                    } else {
-                        debug!(endpoint, ?error, "failed to connect");
-                    }
+                Ok((Err(error), _endpoint)) => {
                     last_err = Some(error);
                     continue;
                 }
-                Some(Err(error)) => {
+                Err(error) => {
                     debug!(?error, "failed to join future with connecting to proxy");
                     last_err = Some(anyhow::anyhow!(error));
                     continue;
                 }
-                None => {
-                    if feature_err {
-                        return Err(anyhow::anyhow!(
-                            "Failed to connect to any gateway: Feature flags not supported. \
-                        Remove 'features.enabled_features' from your configuration file."
-                        ));
-                    }
-                    return Err(last_err.expect("error should exist"));
-                }
             }
         }
+        Err(last_err.expect("error should exist"))
     }
 }
 
