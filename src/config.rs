@@ -195,7 +195,6 @@ impl ConfigUpstreamGrpc {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigJetGatewayClient {
     /// gRPC service endpoints, only one connection would be used
     pub endpoints: Vec<String>,
