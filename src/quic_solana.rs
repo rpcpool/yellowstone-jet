@@ -7,6 +7,7 @@ use {
             self as metrics, incr_send_tx_attempt, observe_leader_rtt,
             observe_send_transaction_e2e_latency, set_leader_mtu,
         },
+        stake::StakeInfoMap,
         util::{PubkeySigner, ValueObserver},
     },
     lru::LruCache,
@@ -149,6 +150,7 @@ impl ConnectionCache {
     pub fn new<F>(
         config: ConfigQuic,
         initial_identity: Keypair,
+        stake_info_map: StakeInfoMap,
         flush_identity: F,
     ) -> (Self, ConnectionCacheIdentity)
     where
@@ -163,6 +165,7 @@ impl ConnectionCache {
         let shared = Arc::new(Mutex::new(QuicSessionInner {
             client_certificate,
             connection_pools,
+            stake_info_map,
         }));
         let (identity_watcher, _) = watch::channel(initial_identity.pubkey());
         let (reactive_signer, _) = watch::channel(initial_signer);
@@ -192,10 +195,13 @@ impl ConnectionCache {
     async fn get_connection(&self, addr: SocketAddr) -> Arc<QuicClient> {
         let pool = {
             let mut locked = self.shared.lock().await;
+            // let current_identity = locked.client_certificate.pubkey;
+            // let stake_limits = locked.stake_info_map.get_stake_limits(current_identity).await;
             match locked.connection_pools.get(&addr) {
                 Some(pool) => Arc::clone(pool),
                 None => {
                     let pool = Arc::new(Mutex::new(QuicPool {
+                        stake_info_map: locked.stake_info_map.clone(),
                         endpoint: Arc::new(QuicLazyInitializedEndpoint::new(
                             Arc::clone(&locked.client_certificate),
                             Arc::clone(&self.config),
@@ -208,8 +214,20 @@ impl ConnectionCache {
             }
         };
 
-        let mut locked = pool.lock().await;
-        locked.get_connection(addr)
+        let mut pool = pool.lock().await;
+        let status = pool.check_pool_status();
+        match status {
+            PoolStatus::Empty => {
+                pool.create_connection(addr);
+                pool.borrow_connection()
+            }
+            PoolStatus::PartiallyFull => {
+                let conn = pool.borrow_connection();
+                pool.create_connection(addr);
+                conn
+            }
+            PoolStatus::Full => pool.borrow_connection(),
+        }
     }
 
     pub async fn reserve_send_permit(
@@ -236,6 +254,7 @@ impl ConnectionCache {
 }
 
 struct QuicSessionInner {
+    stake_info_map: StakeInfoMap,
     client_certificate: Arc<QuicClientCertificate>,
     connection_pools: LruCache<SocketAddr, Arc<Mutex<QuicPool>>>,
 }
@@ -247,38 +266,48 @@ struct QuicClientCertificate {
 }
 
 struct QuicPool {
+    stake_info_map: StakeInfoMap,
     endpoint: Arc<QuicLazyInitializedEndpoint>,
     connections: Vec<Arc<QuicClient>>,
 }
 
+enum PoolStatus {
+    Empty,
+    PartiallyFull,
+    Full,
+}
+
 impl QuicPool {
-    fn get_connection(&mut self, addr: SocketAddr) -> Arc<QuicClient> {
+    /// Get a connection from the pool. It must have at least one connection in the pool.
+    /// This randomly picks a connection in the pool.
+    fn borrow_connection(&self) -> Arc<QuicClient> {
+        self.connections
+            .get(thread_rng().gen_range(0..self.connections.len()))
+            .cloned()
+            .expect("index is within connections")
+    }
+
+    fn check_pool_status(&self) -> PoolStatus {
+        if self.connections.len() == self.connections.capacity() {
+            PoolStatus::Full
+        } else if self.connections.is_empty() {
+            PoolStatus::Empty
+        } else {
+            PoolStatus::PartiallyFull
+        }
+    }
+
+    fn create_connection(&mut self, addr: SocketAddr) {
         if self.connections.len() < self.connections.capacity() {
+            let validator_identity = self.endpoint.client_certificate.pubkey;
+            let limits = self.stake_info_map.get_stake_limits(validator_identity);
+            let max_stream_limit = limits.max_streams;
             let connection = Arc::new(QuicClient::new(
-                Semaphore::new(self.endpoint.config.send_max_concurrent_streams),
+                Semaphore::new(max_stream_limit as usize),
                 Arc::clone(&self.endpoint),
                 addr,
             ));
             self.connections.push(Arc::clone(&connection));
-            connection
-        } else {
-            let mut max_available_permits = 0;
-            let mut connections = Vec::with_capacity(self.connections.len());
-
-            for connection in self.connections.iter() {
-                if connection.sem.available_permits() > max_available_permits {
-                    max_available_permits = connection.sem.available_permits();
-                    connections.clear();
-                }
-                connections.push(connection);
-            }
-
-            Arc::clone(
-                connections
-                    .get(thread_rng().gen_range(0..connections.len()))
-                    .cloned()
-                    .expect("index is within connections"),
-            )
         }
     }
 }

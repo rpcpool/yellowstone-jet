@@ -11,6 +11,7 @@ use {
     yellowstone_jet::{
         cluster_tpu_info::TpuInfo,
         quic_solana::{ConnectionCache, NullIdentityFlusher, QuicError},
+        stake::StakeInfoMap,
     },
 };
 
@@ -46,6 +47,7 @@ fn send_buffer_should_timeout_on_idle_connection() {
             let (quic_session, _identity_map) = ConnectionCache::new(
                 config,
                 connection_cache_kp.insecure_clone(),
+                StakeInfoMap::empty(),
                 NullIdentityFlusher,
             );
             let buf = "helloworld".as_bytes();
@@ -76,6 +78,7 @@ async fn send_buffer_should_land_properly() {
     let (quic_session, _identity_map) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
+        StakeInfoMap::empty(),
         NullIdentityFlusher,
     );
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
@@ -139,6 +142,7 @@ async fn test_update_identity() {
     let (quic_session, identity_map) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
+        StakeInfoMap::empty(),
         NullIdentityFlusher,
     );
 
@@ -224,6 +228,7 @@ async fn update_identity_should_drop_all_connections() {
     let (quic_session, identity_map) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
+        StakeInfoMap::empty(),
         NullIdentityFlusher,
     );
 
