@@ -11,6 +11,7 @@ use {
     yellowstone_jet::{
         quic_solana::{ConnectionCache, NullIdentityFlusher},
         rpc::{rpc_admin::RpcClient, RpcServer, RpcServerType},
+        stake::StakeInfoMap,
     },
 };
 
@@ -31,6 +32,7 @@ pub async fn set_identity_if_expected() {
     let (_quic_session, quic_identity_man) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
+        StakeInfoMap::empty(),
         NullIdentityFlusher,
     );
 
@@ -78,6 +80,7 @@ pub async fn set_identity_wrong_keypair() {
     let (_quic_session, quic_identity_man) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
+        StakeInfoMap::empty(),
         NullIdentityFlusher,
     );
 
@@ -118,6 +121,7 @@ pub async fn set_identity_from_file() {
     let (_quic_session, quic_identity_man) = ConnectionCache::new(
         config,
         connection_cache_kp.insecure_clone(),
+        StakeInfoMap::empty(),
         NullIdentityFlusher,
     );
     let mut value_observer = quic_identity_man.observe_identity_change();
@@ -164,6 +168,7 @@ pub async fn get_identity() {
     let (_quic_session, quic_identity_man) = ConnectionCache::new(
         config,
         expected_identity.insecure_clone(),
+        StakeInfoMap::empty(),
         NullIdentityFlusher,
     );
 
@@ -196,6 +201,7 @@ pub async fn reset_identity_to_random() {
     let (_quic_session, quic_identity_man) = ConnectionCache::new(
         config,
         expected_identity.insecure_clone(),
+        StakeInfoMap::empty(),
         NullIdentityFlusher,
     );
 
