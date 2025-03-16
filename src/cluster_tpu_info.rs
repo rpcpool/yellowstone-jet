@@ -20,7 +20,7 @@ use {
         sync::{broadcast, RwLock},
         time::{sleep, Duration, Instant},
     },
-    tracing::{ info, warn},
+    tracing::{info, warn},
 };
 
 #[derive(Debug, Clone, Copy)]
