@@ -16,6 +16,15 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [11.1.2]
+
+### Features
+- Added support to block transaction signed by a banned account. 
+- Created file `blocking_services.rs` to store all logic related to blocking
+
+### Fixes
+- Added tests for `BannedSigners`
+
 ## [11.1.1]
 
 ### Fixes

@@ -2,7 +2,8 @@ use {
     maplit::{hashmap, hashset},
     solana_sdk::pubkey::Pubkey,
     yellowstone_jet::{
-        cluster_tpu_info::{BlockLeaders, LeadersSelector, TpuInfo},
+        blocking_services::{BlockLeaders, LeadersSelector},
+        cluster_tpu_info::TpuInfo,
         config::ConfigBlocklist,
     },
 };

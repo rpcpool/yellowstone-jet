@@ -126,6 +126,14 @@ quic:
 #   # Event buffer queue size
 #   queue_size_buffer: 100000
 
+# Allow users to specify validators to skip when forwarding transactons.
+# blocklist:
+#   banned_signers: 
+#     files: 
+#       - banned_signers.txt
+#     pubkeys: 
+#       - DwPgmDwM9EMu7izQ9DmMRX8qwn91uu4rZeq7dnXHHCTk
+
 # yellowstone_blocklist:
 #   contract_pubkey: E47XuTVcCMMYZSmeaybv3BMu6hYktvvFgeZkAJbVgmUx
 

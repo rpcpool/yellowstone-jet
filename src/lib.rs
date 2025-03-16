@@ -8,6 +8,7 @@ use {
 };
 
 pub mod blockhash_queue;
+pub mod blocking_services;
 pub mod cluster_tpu_info;
 pub mod config;
 pub mod crypto_provider;
