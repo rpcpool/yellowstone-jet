@@ -1,6 +1,6 @@
 use {
     crate::{
-        cluster_tpu_info::BlocklistUpdater,
+        blocking_services::BlocklistUpdater,
         config::ConfigUpstreamGrpc,
         metrics::jet as metrics,
         util::{fork_oneshot, BlockHeight, CommitmentLevel, IncrementalBackoff},
@@ -202,8 +202,20 @@ impl GeyserSubscriber {
                         Some(Ok(msg)) => match msg.update_oneof {
                             Some(UpdateOneof::Account(SubscribeUpdateAccount{account, ..})) => {
                                 if let Some(acc) = account {
-                                    // todo: add a verification to ensure the owner is the blocklist program
                                     let pubkey_bytes  = acc.pubkey;
+                                    let owner_bytes = acc.owner;
+
+                                    if owner_bytes.len() == 32 {
+                                        let owner_array: [u8; 32] = owner_bytes.try_into().expect("slice with incorrect length");
+                                        let owner = Pubkey::new_from_array(owner_array);
+                                        if let Some(program_account) = blocklist_program_key{
+                                            if program_account != &owner {
+                                                continue;
+                                            }
+                                        } else {
+                                            continue;
+                                        }
+                                    }
 
                                     if pubkey_bytes.len() == 32 {
                                         let pubkey_array: [u8; 32] = pubkey_bytes.try_into().expect("slice with incorrect length");

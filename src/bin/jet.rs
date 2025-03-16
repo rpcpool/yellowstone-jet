@@ -26,7 +26,8 @@ use {
     tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
-        cluster_tpu_info::{BlocklistUpdater, ClusterTpuInfo, LeadersSelector},
+        blocking_services::{BannedSigners, BlocklistUpdater, LeadersSelector},
+        cluster_tpu_info::ClusterTpuInfo,
         config::{load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream},
         feature_flags::FeatureSet,
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
@@ -267,6 +268,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .await?,
     );
 
+    let banned_signers = BannedSigners::new(config.blocklist.banned_signers);
+
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
         shutdown_geyser_rx,
@@ -358,6 +361,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             rpc: config.upstream.rpc.clone(),
             proxy_sanitize_check: config.listen_solana_like.proxy_sanitize_check,
             proxy_preflight_check: config.listen_solana_like.proxy_preflight_check,
+            banned_signers: banned_signers.clone(),
         },
     )
     .await?;
@@ -378,6 +382,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                 config.upstream.rpc.clone(),
                 config.listen_solana_like.proxy_sanitize_check,
                 config.listen_solana_like.proxy_preflight_check,
+                banned_signers,
             )
             .await
             .expect("rpc server impl");

@@ -1,7 +1,7 @@
 use {
     crate::{
-        quic_solana::ConnectionCacheIdentity, solana::sanitize_transaction_support_check,
-        transactions::SendTransactionsPool,
+        blocking_services::BannedSigners, quic_solana::ConnectionCacheIdentity,
+        solana::sanitize_transaction_support_check, transactions::SendTransactionsPool,
     },
     anyhow::Context as _,
     futures::future::{ready, BoxFuture, FutureExt, TryFutureExt},
@@ -40,6 +40,7 @@ pub enum RpcServerType {
         rpc: String,
         proxy_sanitize_check: bool,
         proxy_preflight_check: bool,
+        banned_signers: BannedSigners,
     },
 }
 
@@ -106,6 +107,7 @@ impl RpcServer {
                 rpc,
                 proxy_sanitize_check,
                 proxy_preflight_check,
+                banned_signers,
             } => {
                 use rpc_solana_like::RpcServer;
 
@@ -114,6 +116,7 @@ impl RpcServer {
                     rpc,
                     proxy_sanitize_check,
                     proxy_preflight_check,
+                    banned_signers,
                 )
                 .await?;
 
@@ -137,6 +140,7 @@ impl RpcServer {
         rpc: String,
         proxy_sanitize_check: bool,
         proxy_preflight_check: bool,
+        banned_signers: BannedSigners,
     ) -> anyhow::Result<rpc_solana_like::RpcServerImpl> {
         let rpc = Arc::new(SolanaRpcClient::new(rpc));
         let sanitize_supported = sanitize_transaction_support_check(&rpc).await?;
@@ -146,6 +150,7 @@ impl RpcServer {
             rpc,
             proxy_sanitize_check: proxy_sanitize_check && sanitize_supported,
             proxy_preflight_check,
+            banned_signers,
         })
     }
 
@@ -264,13 +269,14 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            payload::RpcSendTransactionConfigWithBlockList, rpc::invalid_params,
-            solana::decode_and_deserialize, transaction_handler::TransactionHandler,
-            transactions::SendTransactionsPool,
+            blocking_services::BannedSigners, payload::RpcSendTransactionConfigWithBlockList,
+            rpc::invalid_params, solana::decode_and_deserialize,
+            transaction_handler::TransactionHandler, transactions::SendTransactionsPool,
         },
         jsonrpsee::{
             core::{async_trait, RpcResult},
             proc_macros::rpc,
+            types::{error::INVALID_REQUEST_CODE, ErrorObject},
         },
         solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient,
         solana_rpc_client_api::response::RpcVersionInfo,
@@ -299,6 +305,7 @@ pub mod rpc_solana_like {
         pub rpc: Arc<SolanaRpcClient>,
         pub proxy_sanitize_check: bool,
         pub proxy_preflight_check: bool,
+        pub banned_signers: BannedSigners,
     }
 
     impl RpcServerImpl {
@@ -348,6 +355,14 @@ pub mod rpc_solana_like {
                     .into_binary_encoding()
                     .ok_or_else(|| invalid_params("unsupported encoding"))?,
             )?;
+
+            if self.banned_signers.contains_banned_signer(&transaction) {
+                return Err(ErrorObject::owned::<()>(
+                    INVALID_REQUEST_CODE,
+                    "Transaction signer is banned",
+                    None,
+                ));
+            }
 
             self.handle_internal_transaction(transaction, config_with_blocklist)
                 .await

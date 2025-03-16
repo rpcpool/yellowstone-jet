@@ -514,6 +514,8 @@ where
 pub struct ConfigBlocklist {
     #[serde(default, deserialize_with = "ConfigBlocklist::deserialize_leaders")]
     pub leaders: HashSet<Pubkey>,
+    #[serde(default, deserialize_with = "ConfigBlocklist::deserialize_leaders")]
+    pub banned_signers: HashSet<Pubkey>,
 }
 
 impl ConfigBlocklist {
