@@ -135,6 +135,12 @@ pub struct ConfigUpstream {
     #[serde(default = "ConfigUpstream::default_rpc")]
     pub rpc: String,
 
+    ///
+    /// RPC retry strategy
+    /// This strategy will be used when `rpc` call failed due to transient error.
+    #[serde(default = "ConfigUpstream::default_rpc_retry")]
+    pub rpc_on_error: RpcErrorStrategy,
+
     /// Cluster nodes information update interval in milliseconds
     #[serde(
         default = "ConfigUpstream::default_cluster_nodes_update_interval",
@@ -151,6 +157,13 @@ pub struct ConfigUpstream {
 }
 
 impl ConfigUpstream {
+    const fn default_rpc_retry() -> RpcErrorStrategy {
+        RpcErrorStrategy::Fixed {
+            interval: Duration::from_millis(100),
+            retries: unsafe { NonZeroUsize::new_unchecked(3) },
+        }
+    }
+
     fn default_rpc() -> String {
         "http://127.0.0.1:8899".to_owned()
     }
@@ -182,11 +195,7 @@ impl ConfigUpstreamGrpc {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigJetGatewayClient {
-    /// Max transactions requested from proxy (every 100ms), by default calculated from stake value
-    pub max_streams: Option<u64>,
-
     /// gRPC service endpoints, only one connection would be used
     pub endpoints: Vec<String>,
 
@@ -564,5 +573,36 @@ impl YellowstoneBlocklist {
             .parse::<Pubkey>()
             .map(Some)
             .map_err(de::Error::custom)
+    }
+}
+
+///
+/// THIS CODE HAS BEEN COPY-PASTED FROM THE `jet-gateway` repo
+/// TODO: Refactor this code to be shared common lib.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "strategy", rename_all = "lowercase")]
+pub enum RpcErrorStrategy {
+    #[serde(rename = "fixed")]
+    Fixed {
+        #[serde(with = "humantime_serde")]
+        interval: Duration,
+        #[serde(default = "RpcErrorStrategy::default_retries")]
+        retries: NonZeroUsize,
+    },
+    #[serde(rename = "exponential")]
+    Exponential {
+        #[serde(with = "humantime_serde")]
+        base: Duration,
+        factor: f64,
+        #[serde(default = "RpcErrorStrategy::default_retries")]
+        retries: NonZeroUsize,
+    },
+    #[serde(rename = "fail")]
+    Fail,
+}
+
+impl RpcErrorStrategy {
+    const fn default_retries() -> NonZeroUsize {
+        unsafe { NonZeroUsize::new_unchecked(3) }
     }
 }

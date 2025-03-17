@@ -324,6 +324,7 @@ pub mod jet {
     pub enum ClusterIdentityStakeKind {
         Total,
         Jet,
+        MaxPermitPer100ms,
         MaxStreams,
     }
 
@@ -332,7 +333,8 @@ pub mod jet {
             match self {
                 Self::Total => "total",
                 Self::Jet => "jet",
-                Self::MaxStreams => "max_streams",
+                Self::MaxPermitPer100ms => "max_per100ms",
+                Self::MaxStreams => "max_stream",
             }
         }
     }
@@ -345,7 +347,7 @@ pub mod jet {
 
     pub fn cluster_identity_stake_get_max_streams() -> u64 {
         CLUSTER_IDENTITY_STAKE
-            .with_label_values(&[ClusterIdentityStakeKind::MaxStreams.as_str()])
+            .with_label_values(&[ClusterIdentityStakeKind::MaxPermitPer100ms.as_str()])
             .get()
             .try_into()
             .expect("failed to convert to u64")
