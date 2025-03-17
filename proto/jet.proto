@@ -1,8 +1,6 @@
 syntax = "proto3";
 package jet;
 
-option go_package = "github.com/rpcpool/yellowstone-jet/proto;jet_gateway_grpc";
-
 service JetGateway {
   rpc GetVersion(VersionRequest) returns (VersionResponse);
 
