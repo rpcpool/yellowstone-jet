@@ -93,7 +93,7 @@ pub mod jet {
             Opts::new("sts_tpu_send_total", "Number of transactions sent to TPU"),
             &["leaders"]
         ).unwrap();
-        static ref STS_TPU_BLOCKLISTED_TOTAL: IntCounter = IntCounter::new("sts_tpu_blocklisted_total", "Total number of blocklisted TPUs").unwrap();
+        static ref STS_TPU_DENIED_TOTAL: IntCounter = IntCounter::new("sts_tpu_denied_total", "Total number of denied TPUs by Shield policy").unwrap();
 
         static ref QUIC_IDENTITY: IntGaugeVec = IntGaugeVec::new(Opts::new("quic_identity", "Current QUIC identity"), &["identity"]).unwrap();
         static ref QUIC_IDENTITY_EXPECTED: IntGaugeVec = IntGaugeVec::new(Opts::new("quic_identity_expected", "Expected QUIC identity"), &["identity"]).unwrap();
@@ -127,6 +127,9 @@ pub mod jet {
             ]),
             &[]
         ).unwrap();
+
+        static ref SHIELD_POLICIES_NOT_FOUND_TOTAL: IntCounter =
+            IntCounter::new("shield_policies_not_found_total", "Number of shield policies not found").unwrap();
 
         static ref TRANSACTION_DECODE_ERRORS: IntCounterVec = IntCounterVec::new(
             Opts::new("transaction_decode_errors_total", "Number of transaction decoding errors (base58/base64)"),
@@ -196,34 +199,35 @@ pub mod jet {
 
         static REGISTER: Once = Once::new();
         REGISTER.call_once(|| {
-            register!(GRPC_SLOT_RECEIVED);
-            register!(BLOCKHASH_QUEUE_SIZE);
             register!(BLOCKHASH_QUEUE_LATEST);
-            register!(CLUSTER_NODES_TOTAL);
-            register!(CLUSTER_LEADERS_SCHEDULE_SIZE);
+            register!(BLOCKHASH_QUEUE_SIZE);
             register!(CLUSTER_IDENTITY_STAKE);
-            register!(ROOTED_TRANSACTIONS_POOL_SIZE);
-            register!(STS_POOL_SIZE);
-            register!(STS_INFLIGHT_SIZE);
-            register!(STS_RECEIVED_TOTAL);
-            register!(STS_LANDED_TOTAL);
-            register!(STS_TPU_SEND);
-            register!(STS_TPU_BLOCKLISTED_TOTAL);
+            register!(CLUSTER_LEADERS_SCHEDULE_SIZE);
+            register!(CLUSTER_NODES_TOTAL);
+            register!(FORWADED_TRANSACTION_LATENCY);
+            register!(GATEWAY_CONNECTED);
+            register!(GRPC_SLOT_RECEIVED);
+            register!(LEADER_MTU);
+            register!(LEADER_RTT);
+            register!(METRICS_UPSTREAM_FEED);
+            register!(METRICS_UPSTREAM_PUSH);
             register!(QUIC_IDENTITY);
             register!(QUIC_IDENTITY_EXPECTED);
             register!(QUIC_SEND_ATTEMPTS);
-            register!(METRICS_UPSTREAM_PUSH);
-            register!(METRICS_UPSTREAM_FEED);
-            register!(GATEWAY_CONNECTED);
-            register!(FORWADED_TRANSACTION_LATENCY);
-            register!(TRANSACTION_DECODE_ERRORS);
-            register!(TRANSACTION_DESERIALIZE_ERRORS);
+            register!(ROOTED_TRANSACTIONS_POOL_SIZE);
+            register!(SEND_TRANSACTION_ATTEMPT);
+            register!(SEND_TRANSACTION_E2E_LATENCY);
             register!(SEND_TRANSACTION_ERROR);
             register!(SEND_TRANSACTION_SUCCESS);
-            register!(LEADER_MTU);
-            register!(LEADER_RTT);
-            register!(SEND_TRANSACTION_E2E_LATENCY);
-            register!(SEND_TRANSACTION_ATTEMPT)
+            register!(SHIELD_POLICIES_NOT_FOUND_TOTAL);
+            register!(STS_INFLIGHT_SIZE);
+            register!(STS_LANDED_TOTAL);
+            register!(STS_POOL_SIZE);
+            register!(STS_RECEIVED_TOTAL);
+            register!(STS_TPU_DENIED_TOTAL);
+            register!(STS_TPU_SEND);
+            register!(TRANSACTION_DECODE_ERRORS);
+            register!(TRANSACTION_DESERIALIZE_ERRORS);
         });
     }
 
@@ -383,8 +387,12 @@ pub mod jet {
             .inc();
     }
 
-    pub fn sts_tpu_blocklisted_inc(blocklisted: usize) {
-        STS_TPU_BLOCKLISTED_TOTAL.inc_by(blocklisted as u64)
+    pub fn sts_tpu_denied_inc_by(denied: usize) {
+        STS_TPU_DENIED_TOTAL.inc_by(denied as u64);
+    }
+
+    pub fn shield_policies_not_found_inc() {
+        SHIELD_POLICIES_NOT_FOUND_TOTAL.inc();
     }
 
     pub fn quic_set_identity(identity: Pubkey) {
