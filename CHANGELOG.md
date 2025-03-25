@@ -16,7 +16,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-## [11.1.2]
+## [11.2.0]
 
 ### Features
 - Added support to block transaction signed by a banned account. 
@@ -24,6 +24,14 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 - Added tests for `BannedSigners`
+
+## [11.1.2]
+
+### Fixes
+
+- Added stake-based max_streams formula when creating QUIC connection in `QuicPool` so max stream per connection is
+derived from current stake weight.
+- Remove custom max_stream from configuration options, it should stay dynamic and computed based off validator stake.
 
 ## [11.1.1]
 

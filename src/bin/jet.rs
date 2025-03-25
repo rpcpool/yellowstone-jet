@@ -3,6 +3,8 @@ use {
     clap::{Parser, Subcommand},
     futures::future::{self, Either, FutureExt},
     jsonrpsee::http_client::HttpClientBuilder,
+    solana_client::rpc_client::RpcClientConfig,
+    solana_rpc_client::http_sender::HttpSender,
     solana_sdk::{
         commitment_config::CommitmentConfig,
         pubkey::Pubkey,
@@ -28,7 +30,9 @@ use {
         blockhash_queue::BlockhashQueue,
         blocking_services::{BannedSigners, BlocklistUpdater, LeadersSelector},
         cluster_tpu_info::ClusterTpuInfo,
-        config::{load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream},
+        config::{
+            load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream, RpcErrorStrategy,
+        },
         feature_flags::FeatureSet,
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_jet::GrpcServer,
@@ -38,7 +42,8 @@ use {
         quic_solana::ConnectionCache,
         rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType},
         setup_tracing,
-        stake::StakeInfo,
+        solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
+        stake::{self, spawn_cache_stake_info_map, StakeInfoMap},
         task_group::TaskGroup,
         transactions::{GrpcRootedTxReceiver, SendTransactionsPool},
         util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
@@ -154,6 +159,7 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
 }
 
 async fn spawn_jet_gw_listener(
+    stake_info: StakeInfoMap,
     jet_gw_config: ConfigJetGatewayClient,
     mut identity_observer: ValueObserver<PubkeySigner>,
     tx_sender: RpcServerImpl,
@@ -167,6 +173,7 @@ async fn spawn_jet_gw_listener(
         let features = features.clone();
         let mut identity_observer2 = identity_observer.clone();
         let (stop_tx2, stop_rx2) = tokio::sync::oneshot::channel();
+        let stake_info2 = stake_info.clone();
         let fut = identity_observer.until_value_change(move |current_identity| {
             if let Some(expected_identity) = expected_identity {
                 if current_identity.pubkey() != expected_identity {
@@ -177,6 +184,7 @@ async fn spawn_jet_gw_listener(
                 } else {
                     GrpcServer::run_with(
                         Arc::new(current_identity),
+                        stake_info2,
                         jet_gw_config2.clone(),
                         tx_sender2.clone(),
                         features,
@@ -186,6 +194,7 @@ async fn spawn_jet_gw_listener(
             } else {
                 GrpcServer::run_with(
                     Arc::new(current_identity),
+                    stake_info2,
                     jet_gw_config2.clone(),
                     tx_sender2.clone(),
                     features,
@@ -253,11 +262,88 @@ fn spawn_lewis_metric_subscriber(
     })
 }
 
+///
+/// This task keeps the stake metrics up to date for the current identity.
+///
+async fn keep_stake_metrics_up_to_date_task(
+    mut stake_info_identity_observer: ValueObserver<Pubkey>,
+    stake_info_map: StakeInfoMap,
+) {
+    loop {
+        let current_identy = stake_info_identity_observer.get_current();
+
+        let (stake, total_stake) = stake_info_map
+            .get_stake_info_with_total_stake(current_identy)
+            .unwrap_or((0, 0));
+
+        let max_pps = stake::stake_to_per100ms_limit(stake, total_stake);
+        let max_streams = stake::stake_to_max_stream(stake, total_stake);
+
+        metrics::cluster_identity_stake_set(metrics::ClusterIdentityStakeKind::Jet, stake);
+        metrics::cluster_identity_stake_set(metrics::ClusterIdentityStakeKind::Total, total_stake);
+        metrics::cluster_identity_stake_set(
+            metrics::ClusterIdentityStakeKind::MaxPermitPer100ms,
+            max_pps,
+        );
+        metrics::cluster_identity_stake_set(
+            metrics::ClusterIdentityStakeKind::MaxStreams,
+            max_streams,
+        );
+
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+            _ = stake_info_identity_observer.observe() => {}
+        }
+    }
+}
+
 async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     metrics::init();
     if let Some(identity) = config.identity.expected {
         metrics::quic_set_identity_expected(identity);
     }
+
+    let retry_strategy = match config.upstream.rpc_on_error.clone() {
+        RpcErrorStrategy::Fixed { interval, retries } => Some(RetryRpcSenderStrategy::FixedDelay {
+            delay: interval,
+            max_retries: retries.get(),
+        }),
+        RpcErrorStrategy::Exponential {
+            base,
+            factor,
+            retries,
+        } => Some(RetryRpcSenderStrategy::ExponentialBackoff {
+            base,
+            exp: factor,
+            max_retries: retries.get(),
+        }),
+        RpcErrorStrategy::Fail => None,
+    };
+
+    // We are building a special HttpSender that automatically retry on transient network failure.
+    // This allow client not to worry about retry logic.
+    let rpc_sender = HttpSender::new(config.upstream.rpc.clone());
+    let rpc_client_config = RpcClientConfig::with_commitment(CommitmentConfig::finalized());
+    let rpc_client = match retry_strategy {
+        Some(strategy) => {
+            let rpc_sender = RetryRpcSender::new(rpc_sender, strategy);
+            solana_client::nonblocking::rpc_client::RpcClient::new_sender(
+                rpc_sender,
+                rpc_client_config,
+            )
+        }
+        None => solana_client::nonblocking::rpc_client::RpcClient::new_sender(
+            rpc_sender,
+            rpc_client_config,
+        ),
+    };
+
+    let (stake_info_map, stake_info_bg_fut) = spawn_cache_stake_info_map(
+        rpc_client,
+        config.upstream.stake_update_interval,
+        stake::SpawnMode::Detached,
+    )
+    .await;
 
     let leaders_selector = Arc::new(
         LeadersSelector::new_from_blockchain(
@@ -306,6 +392,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let (quic_session, quic_identity_man) = ConnectionCache::new(
         config.quic.clone(),
         initial_identity,
+        stake_info_map.clone(),
         identity_flusher_wg.clone(),
     );
 
@@ -332,16 +419,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .add_flusher(Box::new(send_transactions.clone()))
         .await;
 
-    let rpc = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
-        config.upstream.rpc.clone(),
-        CommitmentConfig::finalized(),
-    );
-    let stake = StakeInfo::new(
-        rpc,
-        config.upstream.stake_update_interval,
-        quic_identity_man.observe_identity_change(),
-    );
-
+    let stake_info_identity_observer = quic_identity_man.observe_identity_change();
     let quic_identity_observer = quic_identity_man.observe_signer_change();
     // Run RPC admin
     let rpc_admin = RpcServer::new(
@@ -388,8 +466,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             .expect("rpc server impl");
 
             info!("starting jet-gateway listener");
+            let stake_info = stake_info_map.clone();
             let h = tokio::spawn(async move {
                 spawn_jet_gw_listener(
+                    stake_info,
                     jet_gw_config,
                     quic_identity_observer,
                     tx_sender,
@@ -411,6 +491,13 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
 
     let mut tg = TaskGroup::default();
+
+    tg.spawn_cancelable("stake_cache_refresh_task", stake_info_bg_fut);
+
+    tg.spawn_cancelable(
+        "stake_info_metrics_update",
+        keep_stake_metrics_up_to_date_task(stake_info_identity_observer, stake_info_map.clone()),
+    );
 
     tg.spawn_cancelable("lewis", async move {
         lewis.await.expect("lewis");
@@ -450,17 +537,17 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     tg.spawn_cancelable("send_transactions_pool", send_tx_pool_fut);
 
-    tg.spawn_with_shutdown("stake", |mut stop| async move {
-        tokio::select! {
-            result = stake.clone().wait_shutdown() => {
-                result.expect("stake");
-            },
-            _ = &mut stop => {
-                stake.shutdown();
-                stake.wait_shutdown().await.expect("stake shutdown");
-            },
-        }
-    });
+    // tg.spawn_with_shutdown("stake", |mut stop| async move {
+    //     tokio::select! {
+    //         result = stake.clone().wait_shutdown() => {
+    //             result.expect("stake");
+    //         },
+    //         _ = &mut stop => {
+    //             stake.shutdown();
+    //             stake.wait_shutdown().await.expect("stake shutdown");
+    //         },
+    //     }
+    // });
 
     if let Some(mut jet_gw_listener) = jet_gw_listener {
         tg.spawn_with_shutdown("jet_gw_listener", |mut stop| async move {

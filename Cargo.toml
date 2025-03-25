@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "11.1.2"
+version = "11.2.0"
 authors = ["Triton One"]
 edition = "2021"
 description = "Yellowstone Jet"
@@ -54,6 +54,7 @@ solana-streamer = "~2.1.11"
 solana-tpu-client = "~2.1.11"
 solana-transaction-status = "~2.1.11"
 solana-version = "~2.1.11"
+solana-rpc-client = "~2.1.11"
 solana-yellowstone-blocklist = { git = "https://github.com/rpcpool/solana-yellowstone-blocklist.git", tag = "1.0.0" }
 thiserror = "1.0.58"
 tokio = { version = "1.36.0", features = ["rt-multi-thread", "macros"] }
@@ -70,6 +71,7 @@ tracing-subscriber = { version = "0.3.1", features = [
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 yellowstone-grpc-client = "4.1.1"
 yellowstone-grpc-proto = "4.1.1"
+retry = "2.0.0"
 
 [build-dependencies]
 anyhow = "1.0.69"

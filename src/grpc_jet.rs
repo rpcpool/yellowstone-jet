@@ -26,6 +26,7 @@ use {
         },
         pubkey_challenger::{append_nonce_and_sign, OneTimeAuthToken},
         rpc::rpc_solana_like::RpcServerImpl as RpcServerImplSolanaLike,
+        stake::StakeInfoMap,
         util::{ms_since_epoch, IncrementalBackoff},
     },
     anyhow::Context,
@@ -291,19 +292,21 @@ type ArcSigner = Arc<dyn Signer + Send + Sync + 'static>;
 impl GrpcServer {
     pub async fn run_with(
         signer: ArcSigner,
+        stake_info: StakeInfoMap,
         config: ConfigJetGatewayClient,
         tx_sender: RpcServerImplSolanaLike,
         features: FeatureSet,
         mut stop_rx: oneshot::Receiver<()>,
     ) {
         tokio::select! {
-            () = Self::grpc_subscribe(signer, config, tx_sender, features) => {},
+            () = Self::grpc_subscribe(signer, stake_info, config, tx_sender, features) => {},
             _ = &mut stop_rx => {},
         }
     }
 
     async fn grpc_subscribe(
         signer: ArcSigner,
+        stake_info: StakeInfoMap,
         config: ConfigJetGatewayClient,
         tx_sender: RpcServerImplSolanaLike,
         features: FeatureSet,
@@ -360,14 +363,15 @@ impl GrpcServer {
 
             let mut limit_interval = interval(LIMIT_UPDATE_INTERVAL);
 
+            let my_identity = signer.pubkey();
+
             let loop_result = async {
                 loop {
                     if let Err(error) = async {
                         tokio::select! {
                             _ = limit_interval.tick() => {
-                                let messages_per100ms = config
-                                    .max_streams
-                                    .unwrap_or_else(metrics::jet::cluster_identity_stake_get_max_streams);
+                                let limits = stake_info.get_stake_limits(my_identity);
+                                let messages_per100ms = limits.per100ms_limit;
                                 let message = SubscribeRequest {
                                     message: Some(SubscribeRequestMessage::UpdateLimit(SubscribeUpdateLimit { messages_per100ms }))
                                 };

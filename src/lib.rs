@@ -24,6 +24,7 @@ pub mod quic;
 pub mod quic_solana;
 pub mod rpc;
 pub mod solana;
+pub mod solana_rpc_utils;
 pub mod stake;
 pub mod task_group;
 pub mod transaction_handler;
