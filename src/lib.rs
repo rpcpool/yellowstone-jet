@@ -31,6 +31,7 @@ pub mod transactions;
 pub mod util;
 pub mod version;
 pub mod quic_gateway;
+pub mod collections;
 
 pub fn setup_tracing(json: bool) -> anyhow::Result<()> {
     let env_filter = EnvFilter::builder()
