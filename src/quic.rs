@@ -1,6 +1,7 @@
 use {
     crate::{
-        cluster_tpu_info::{BlockLeaders, ClusterTpuInfo, TpuInfo},
+        blocking_services::BlockLeaders,
+        cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
         config::{ConfigQuic, ConfigQuicTpuPort},
         metrics::jet as metrics,
         quic_solana::{ConnectionCache, ConnectionCacheSendPermit},
