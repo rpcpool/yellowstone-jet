@@ -8,7 +8,7 @@ use {
         system_instruction,
         transaction::VersionedTransaction,
     },
-    yellowstone_jet::blocking_services::BannedSigners,
+    yellowstone_jet::blocking_services::BannedAccounts,
 };
 
 #[tokio::test]
@@ -16,7 +16,7 @@ async fn test_block_transaction() {
     let signer = Keypair::new();
     let fake_wallet_keypair = Keypair::new();
 
-    let banned_signers = BannedSigners::new(hashset! {signer.pubkey()});
+    let banned_accounts = BannedAccounts::new(hashset! {signer.pubkey()});
     let tx_hash = Hash::new_unique();
 
     let instructions = vec![system_instruction::transfer(
@@ -34,7 +34,7 @@ async fn test_block_transaction() {
     )
     .expect("try new");
 
-    let contains_signer = banned_signers.contains_banned_signer(&tx);
+    let contains_signer = banned_accounts.contains_banned_accounts(&tx);
     assert!(contains_signer);
 }
 
@@ -43,7 +43,7 @@ async fn test_signer_missing_transaction_pass() {
     let signer = Keypair::new();
     let fake_wallet_keypair = Keypair::new();
 
-    let banned_signers = BannedSigners::new(hashset! {});
+    let banned_accounts = BannedAccounts::new(hashset! {});
     let tx_hash = Hash::new_unique();
 
     let instructions = vec![system_instruction::transfer(
@@ -61,6 +61,6 @@ async fn test_signer_missing_transaction_pass() {
     )
     .expect("try new");
 
-    let contains_signer = banned_signers.contains_banned_signer(&tx);
+    let contains_signer = banned_accounts.contains_banned_accounts(&tx);
     assert!(!contains_signer);
 }

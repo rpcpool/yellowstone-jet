@@ -28,7 +28,7 @@ use {
     tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
-        blocking_services::{BannedSigners, BlocklistUpdater, LeadersSelector},
+        blocking_services::{BannedAccounts, BlocklistUpdater, LeadersSelector},
         cluster_tpu_info::ClusterTpuInfo,
         config::{
             load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream, RpcErrorStrategy,
@@ -354,7 +354,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .await?,
     );
 
-    let banned_signers = BannedSigners::new(config.blocklist.banned_signers);
+    let banned_accounts = BannedAccounts::new(config.blocklist.banned_accounts);
 
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
@@ -439,7 +439,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             rpc: config.upstream.rpc.clone(),
             proxy_sanitize_check: config.listen_solana_like.proxy_sanitize_check,
             proxy_preflight_check: config.listen_solana_like.proxy_preflight_check,
-            banned_signers: banned_signers.clone(),
+            banned_accounts: banned_accounts.clone(),
         },
     )
     .await?;
@@ -460,7 +460,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                 config.upstream.rpc.clone(),
                 config.listen_solana_like.proxy_sanitize_check,
                 config.listen_solana_like.proxy_preflight_check,
-                banned_signers,
+                banned_accounts,
             )
             .await
             .expect("rpc server impl");

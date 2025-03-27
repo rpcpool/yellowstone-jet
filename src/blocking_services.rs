@@ -225,24 +225,20 @@ impl BlockLeaders for LeadersSelector {
 }
 
 #[derive(Clone, Default, Debug)]
-pub struct BannedSigners {
-    banned_signers: HashSet<Pubkey>,
+pub struct BannedAccounts {
+    banned_accounts: HashSet<Pubkey>,
 }
 
-impl BannedSigners {
-    pub const fn new(banned_signers: HashSet<Pubkey>) -> Self {
-        Self { banned_signers }
+impl BannedAccounts {
+    pub const fn new(banned_accounts: HashSet<Pubkey>) -> Self {
+        Self { banned_accounts }
     }
 
-    pub fn contains_banned_signer(&self, transaction: &VersionedTransaction) -> bool {
+    pub fn contains_banned_accounts(&self, transaction: &VersionedTransaction) -> bool {
         let transaction_message = &transaction.message;
-        let required_signatures = transaction_message.header().num_required_signatures as usize;
         let accounts = transaction_message.static_account_keys();
-        for (i, account) in accounts.iter().enumerate() {
-            if i >= required_signatures {
-                break;
-            }
-            if self.banned_signers.contains(account) {
+        for account in accounts {
+            if self.banned_accounts.contains(account) {
                 debug!("Transaction signer {account} banned");
                 metrics::increment_banned_transactions_total();
                 return true;

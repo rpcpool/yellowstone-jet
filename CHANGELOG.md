@@ -23,7 +23,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 - Created file `blocking_services.rs` to store all logic related to blocking
 
 ### Fixes
-- Added tests for `BannedSigners`
+- Added tests for `BannedAccounts`
 
 ## [11.1.2]
 

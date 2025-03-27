@@ -128,9 +128,9 @@ quic:
 
 # Allow users to specify validators to skip when forwarding transactons.
 # blocklist:
-#   banned_signers: 
+#   banned_accounts: 
 #     files: 
-#       - banned_signers.txt
+#       - banned_accounts.txt
 #     pubkeys: 
 #       - DwPgmDwM9EMu7izQ9DmMRX8qwn91uu4rZeq7dnXHHCTk
 
