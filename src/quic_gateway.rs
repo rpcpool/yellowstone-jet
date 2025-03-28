@@ -1,43 +1,61 @@
-use std::{collections::{HashMap, VecDeque}, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc, time::{Duration, Instant}};
+use {
+    crate::{crypto_provider::crypto_provider, stake::StakeInfoMap},
+    futures::channel::mpsc::SendError,
+    hyper::client,
+    quinn::{
+        crypto::rustls::QuicClientConfig, ClientConfig, Connection, ConnectionError, Endpoint,
+        IdleTimeout, TransportConfig, WriteError,
+    },
+    quinn_proto::TransportError,
+    solana_net_utils::PortRange,
+    solana_quic_client::nonblocking::quic_client::{QuicClientCertificate, SkipServerVerification},
+    solana_sdk::{pubkey::Pubkey, quic::QUIC_SEND_FAIRNESS},
+    solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
+    std::{
+        collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
+        time::{Duration, Instant},
+    },
+    tokio::{
+        sync::mpsc,
+        task::{self, JoinError, JoinSet},
+    },
+    tonic::ConnectError,
+    uuid::Uuid,
+};
 
-use futures::channel::mpsc::SendError;
-use hyper::client;
-use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, WriteError};
-use quinn_proto::TransportError;
-use solana_net_utils::PortRange;
-use solana_quic_client::nonblocking::quic_client::{QuicClientCertificate, SkipServerVerification};
-use solana_sdk::{pubkey::Pubkey, quic::QUIC_SEND_FAIRNESS};
-use solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID;
-use tokio::{sync::mpsc, task::{self, JoinError, JoinSet}};
-use tonic::ConnectError;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConnectionId([u8; 16]);
 
-use crate::{crypto_provider::crypto_provider, stake::StakeInfoMap};
-
-
-
-// struct QuicExcangeSM {
-//     connection_map: HashMap<SocketAddr, QuicConnection>,
-// }
-
-
-type ConnectionId = usize;
+impl ConnectionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4().into_bytes())
+    }
+}
 
 ///
 /// A monotonic increasing passage of time in [`QuicGatewaySM`].
 /// Each update to the state machine increase the time value.
-/// 
+///
 /// It serves as a way to order events in the state machine and discard stale events.
-/// 
+///
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StateMachineInstant(u64);
 
-
 impl StateMachineInstant {
+    pub const ZERO: Self = Self(0);
+
+    pub const ONE: Self = Self(1);
+
     fn inc(self) -> Self {
-        Self(self.0 + 1)
+        Self(self.0 + Self::ONE.0)
     }
 }
 
+///
+/// The state of a connection in inside the [`QuicGatewaySM`] state machine.
+///
 struct ConnectionState {
     connection_id: ConnectionId,
     registered_at: StateMachineInstant,
@@ -45,28 +63,91 @@ struct ConnectionState {
     permit_height: PermitHeight,
 }
 
-struct Schedule { 
-    schedule_linked_list: VecDeque<Pubkey>,
+///
+/// Schedule which peer transaction queue to process next.
+///
+#[derive(Default)]
+struct PeerScheduler {
+    schedule_linked_list: VecDeque<(StateMachineInstant, Pubkey)>,
+    deschedule_map: HashMap<Pubkey, StateMachineInstant>,
 }
 
+impl PeerScheduler {
+    ///
+    /// Register a remote peer to be schedule.
+    ///
+    pub fn schedule(&mut self, remote_peer: Pubkey, time: StateMachineInstant) {
+        self.schedule_linked_list.push_back((time, remote_peer));
+    }
+
+    ///
+    /// Deschedule a remote peer from the current schedule.
+    ///
+    pub fn deschedule(&mut self, remote_peer: Pubkey, time: StateMachineInstant) {
+        let old = self.deschedule_map.insert(remote_peer, time);
+        assert!(
+            old.is_none(),
+            "cannot register earlier cancel time after a later one"
+        );
+    }
+
+    ///
+    /// Get the next remote peer to process in the schedule if any.
+    ///
+    pub fn get_next_remote_peer_to_process(&mut self) -> Option<Pubkey> {
+        while let Some((time, remote_peer)) = self.schedule_linked_list.pop_front() {
+            if let Some(deschedule_boundary) = self.deschedule_map.get(&remote_peer) {
+                if time < *deschedule_boundary {
+                    continue;
+                } else {
+                    self.deschedule_map.remove(&remote_peer);
+                }
+            }
+            return Some(remote_peer);
+        }
+        None
+    }
+}
 
 pub struct QuicGatewaySM {
     current_max_stream_limit_per_conn: u64,
+    scheduler: PeerScheduler,
     unconnected_remote_peer_tx_queues: HashMap<Pubkey, VecDeque<GatewayTransaction>>,
     remote_peer_tx_queues: HashMap<Pubkey, VecDeque<GatewayTransaction>>,
     connection_map: HashMap<Pubkey, ConnectionState>,
     time_sequence: StateMachineInstant,
     deadletter_queue: VecDeque<GatewayTransaction>,
     deregistered_connections: VecDeque<ConnectionId>,
+    connection_request_queue: VecDeque<Pubkey>,
 }
 
+impl Default for QuicGatewaySM {
+    fn default() -> Self {
+        Self {
+            current_max_stream_limit_per_conn: 10,
+            scheduler: Default::default(),
+            unconnected_remote_peer_tx_queues: Default::default(),
+            remote_peer_tx_queues: Default::default(),
+            connection_map: Default::default(),
+            time_sequence: StateMachineInstant::ZERO,
+            deadletter_queue: Default::default(),
+            deregistered_connections: Default::default(),
+            connection_request_queue: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum AcquireConnectionErr {
+    #[error("No connection established to remote peer")]
     NoConnection,
+    #[error("Reached max stream limit for connection")]
     ReachedMaxStreamLimit,
 }
 
 pub type PermitHeight = u64;
 
+#[derive(Debug)]
 pub struct Permit {
     pub remote_peer_identity: Pubkey,
     pub connection_id: ConnectionId,
@@ -76,48 +157,90 @@ pub struct Permit {
 
 ///
 /// QuickGatewaySM is a state machine that manages the connection permits and schedule transactions.
-/// 
+///
 impl QuicGatewaySM {
-
     pub fn tick(&mut self) -> StateMachineInstant {
         let sequence = self.time_sequence;
         self.time_sequence = sequence.inc();
         sequence
     }
 
+    pub fn peer_stream_capacity_left(&self, remote_peer_identity: Pubkey) -> Option<u64> {
+        self.connection_map.get(&remote_peer_identity).map(|state| {
+            let limit = state
+                .custom_max_streams
+                .unwrap_or(self.current_max_stream_limit_per_conn);
+            limit.saturating_sub(state.permit_height)
+        })
+    }
+
+    pub fn total_peer_tx_pending_cnt(&self, peer: Pubkey) -> usize {
+        let unconnected = self.unconnected_remote_peer_tx_queues.get(&peer);
+        let connected = self.remote_peer_tx_queues.get(&peer);
+        match (unconnected, connected) {
+            (Some(unconnected), None) => unconnected.len(),
+            (None, Some(connected)) => connected.len(),
+            (None, None) => 0,
+            _ => unreachable!(),
+        }
+    }
+
     pub fn schedule_tx(&mut self, tx: GatewayTransaction) {
         let remote_peer_identity = tx.remote_peer;
         if self.connection_map.contains_key(&remote_peer_identity) {
-            let tx_queue = self.remote_peer_tx_queues.entry(remote_peer_identity).or_default();
-            tx_queue.push_back(tx);
-        } else {
-            let tx_queue = self.unconnected_remote_peer_tx_queues
+            let tx_queue = self
+                .remote_peer_tx_queues
                 .entry(remote_peer_identity)
                 .or_default();
+            tx_queue.push_back(tx);
+            let time = self.tick();
+            self.scheduler.schedule(remote_peer_identity, time);
+        } else {
+            let tx_queue = self
+                .unconnected_remote_peer_tx_queues
+                .entry(remote_peer_identity)
+                .or_insert_with(|| {
+                    // Mark the remote peer for connection.
+                    self.connection_request_queue
+                        .push_back(remote_peer_identity);
+                    Default::default()
+                });
             tx_queue.push_back(tx);
         }
     }
 
     pub fn register_connection(&mut self, conn: ConnectionId, remote_identity: Pubkey) {
         let now = self.tick();
-        let old = self.connection_map.insert(remote_identity, ConnectionState {
-            connection_id: conn,
-            registered_at: now,
-            custom_max_streams: None,
-            permit_height: 0,
-        });
+        let old = self.connection_map.insert(
+            remote_identity,
+            ConnectionState {
+                connection_id: conn,
+                registered_at: now,
+                custom_max_streams: None,
+                permit_height: 0,
+            },
+        );
         assert!(old.is_none());
 
-        if let Some(tx_queue) = self.unconnected_remote_peer_tx_queues.remove(&remote_identity) {
+        if let Some(tx_queue) = self
+            .unconnected_remote_peer_tx_queues
+            .remove(&remote_identity)
+        {
             let old = self.remote_peer_tx_queues.insert(remote_identity, tx_queue);
             assert!(old.is_none());
+            self.scheduler.schedule(remote_identity, now);
         }
     }
 
-    pub fn acquire_connection_permit(&mut self, remote_peer_identity: Pubkey) -> Result<Permit, AcquireConnectionErr> {
+    pub fn acquire_connection_permit(
+        &mut self,
+        remote_peer_identity: Pubkey,
+    ) -> Result<Permit, AcquireConnectionErr> {
         if let Some(state) = self.connection_map.get_mut(&remote_peer_identity) {
             let conn_id = state.connection_id;
-            let limit = state.custom_max_streams.unwrap_or(self.current_max_stream_limit_per_conn);
+            let limit = state
+                .custom_max_streams
+                .unwrap_or(self.current_max_stream_limit_per_conn);
             if state.permit_height >= limit {
                 Err(AcquireConnectionErr::ReachedMaxStreamLimit)
             } else {
@@ -140,11 +263,25 @@ impl QuicGatewaySM {
         }
     }
 
-    pub fn deregister_connection(&mut self, remote_identity: Pubkey){
-        if let Some(state)  = self.connection_map.remove(&remote_identity) {
+    ///
+    /// Deregister a connection from the state machine.
+    ///
+    /// Puts any queued tx back to the "pending connection state".
+    ///
+    pub fn deregister_connection(
+        &mut self,
+        remote_identity: Pubkey,
+        time: Option<StateMachineInstant>,
+    ) {
+        if let Some(state) = self.connection_map.remove(&remote_identity) {
             self.deregistered_connections.push_back(state.connection_id);
-             if let Some(dropped_tx) = self.remote_peer_tx_queues.remove(&remote_identity) {
-                self.deadletter_queue.extend(dropped_tx);
+            let time = time.unwrap_or_else(|| self.tick());
+            self.scheduler.deschedule(remote_identity, time);
+            if let Some(queue) = self.remote_peer_tx_queues.remove(&remote_identity) {
+                self.unconnected_remote_peer_tx_queues
+                    .entry(remote_identity)
+                    .or_default()
+                    .extend(queue);
             }
         }
     }
@@ -154,42 +291,78 @@ impl QuicGatewaySM {
     }
 
     pub fn process_next_tx(&mut self) -> Option<GatewayTransaction> {
+        while let Some(peer) = self.scheduler.get_next_remote_peer_to_process() {
+            let Some(queue) = self.remote_peer_tx_queues.get_mut(&peer) else {
+                continue;
+            };
+            let maybe_tx = queue.pop_front();
+            if maybe_tx.is_some() {
+                return maybe_tx;
+            }
+
+            self.remote_peer_tx_queues.remove(&peer);
+        }
         None
     }
 
-    pub fn abandon_tx_for_remote_peer(&mut self, remote_identity: Pubkey) {
-        todo!()
+    ///
+    /// Drop any connection info and tx for a remote peer that has been abandoned.
+    ///
+    pub fn abandon_tx_for_remote_peer(
+        &mut self,
+        remote_identity: Pubkey,
+        time: StateMachineInstant,
+    ) {
+        if let Some(state) = self.connection_map.get(&remote_identity) {
+            if state.registered_at < time {
+                self.deregister_connection(remote_identity, Some(time));
+                if let Some(dropped_tx) = self
+                    .unconnected_remote_peer_tx_queues
+                    .remove(&remote_identity)
+                {
+                    self.deadletter_queue.extend(dropped_tx);
+                }
+            }
+        }
     }
 
-    pub fn pop_next_remote_leader_to_connect(&mut self) -> Option<Pubkey> {
-        todo!()
+    pub fn get_next_peer_to_connect(&mut self) -> Option<Pubkey> {
+        self.connection_request_queue.pop_front()
     }
 
     ///
     /// Pop the next transaction in the dead letter queue.
-    /// 
+    ///
     pub fn pop_next_tx_in_dlq(&mut self) -> Option<GatewayTransaction> {
         self.deadletter_queue.pop_front()
     }
 
-    pub fn drain_dlq(&mut self) -> impl IntoIterator<Item=GatewayTransaction> + '_ {
+    pub fn drain_dlq(&mut self) -> impl IntoIterator<Item = GatewayTransaction> + '_ {
         self.deadletter_queue.drain(..)
     }
 
-    pub fn mark_connection_failure_at_time(&mut self, remote_identity: Pubkey, time: StateMachineInstant) {
+    pub fn mark_connection_failure_at_time(
+        &mut self,
+        remote_identity: Pubkey,
+        time: StateMachineInstant,
+    ) {
         if let Some(state) = self.connection_map.get(&remote_identity) {
             if state.registered_at < time {
-                self.deregister_connection(remote_identity);
+                self.deregister_connection(remote_identity, Some(time));
             }
         }
-
-        todo!()
     }
 
-    pub fn hit_rate_limit_for_remote_peer(&mut self, remote_identity: Pubkey, permit_height: PermitHeight, time: StateMachineInstant) {
+    pub fn hit_rate_limit_for_remote_peer(
+        &mut self,
+        remote_identity: Pubkey,
+        permit_height: PermitHeight,
+        time: StateMachineInstant,
+    ) {
         if let Some(state) = self.connection_map.get_mut(&remote_identity) {
             if state.registered_at < time {
-                let min_permit = state.custom_max_streams
+                let min_permit = state
+                    .custom_max_streams
                     .unwrap_or(permit_height)
                     .min(permit_height);
                 state.custom_max_streams.replace(min_permit);
@@ -197,23 +370,22 @@ impl QuicGatewaySM {
         }
     }
 
-    pub fn mark_connection_attempt_failure(&mut self, remote_identity: Pubkey, time: StateMachineInstant) {
+    pub fn mark_connection_failure(&mut self, remote_identity: Pubkey, time: StateMachineInstant) {
         if let Some(state) = self.connection_map.get(&remote_identity) {
             if state.registered_at < time {
-                self.deregister_connection(remote_identity);
+                self.deregister_connection(remote_identity, Some(time));
             }
         }
     }
-    
 
-    pub fn pop_next_derigistered_connection(&mut self) -> Option<ConnectionId> {
+    pub fn pop_next_deregistered_connection(&mut self) -> Option<ConnectionId> {
         self.deregistered_connections.pop_front()
     }
 }
 
 pub(crate) struct InflightMeta {
     tx_id: u64,
-    permit: Permit
+    permit: Permit,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -236,7 +408,7 @@ pub struct SentOk {
     pub e2e_time: Duration,
 }
 
-struct ConnectingMeta { 
+struct ConnectingMeta {
     remote_peer_identity: Pubkey,
     sm_instant: StateMachineInstant,
 }
@@ -256,7 +428,6 @@ pub(crate) struct TokioQuicGatewayDriver {
 
 #[async_trait::async_trait]
 pub trait LeaderTpuInfoService {
-
     async fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
 }
 
@@ -280,22 +451,12 @@ enum SendTxError {
 }
 
 pub enum GatewayResponse {
-    TxSent {
-        remote_peer: Pubkey,
-        tx_id: u64,
-    },
-    TxFailed {
-        remote_peer: Pubkey,
-        tx_id: u64,
-    },
-    TxDropped {
-        remote_peer: Pubkey,
-        tx_id: u64,
-    }
+    TxSent { remote_peer: Pubkey, tx_id: u64 },
+    TxFailed { remote_peer: Pubkey, tx_id: u64 },
+    TxDropped { remote_peer: Pubkey, tx_id: u64 },
 }
 
 impl TokioQuicGatewayDriver {
-
     fn spawn_connecting(&mut self, remote_peer_identity: Pubkey) {
         let service = Arc::clone(&self.leader_tpu_info_service);
         let port_range = self.config.port_range;
@@ -308,13 +469,10 @@ impl TokioQuicGatewayDriver {
                 .await
                 .ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
 
-
-            let client_socket = solana_net_utils::bind_in_range(
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                port_range,
-            )
-            .expect("create_endpoint bind_in_range")
-            .1;
+            let client_socket =
+                solana_net_utils::bind_in_range(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port_range)
+                    .expect("create_endpoint bind_in_range")
+                    .1;
 
             let mut endpoint = Endpoint::new(
                 quinn::EndpointConfig::default(),
@@ -324,16 +482,14 @@ impl TokioQuicGatewayDriver {
             )
             .expect("QuicNewConnection::create_endpoint quinn::Endpoint::new");
 
-            let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("Failed to set QUIC client protocol versions")
-                .dangerous()
-                .with_custom_certificate_verifier(SkipServerVerification::new())
-                .with_client_auth_cert(
-                    vec![cert.certificate.clone()],
-                    cert.key.clone_key(),
-                )
-                .expect("Failed to set QUIC client certificates");
+            let mut crypto =
+                rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
+                    .with_safe_default_protocol_versions()
+                    .expect("Failed to set QUIC client protocol versions")
+                    .dangerous()
+                    .with_custom_certificate_verifier(SkipServerVerification::new())
+                    .with_client_auth_cert(vec![cert.certificate.clone()], cert.key.clone_key())
+                    .expect("Failed to set QUIC client certificates");
             crypto.enable_early_data = true;
             crypto.alpn_protocols = vec![ALPN_TPU_PROTOCOL_ID.to_vec()];
 
@@ -350,17 +506,15 @@ impl TokioQuicGatewayDriver {
                 res
             };
 
-            let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
+            let mut config =
+                ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
             config.transport_config(Arc::new(transport_config));
 
             endpoint.set_default_client_config(config);
 
-
             let connecting = endpoint
                 .connect(remote_peer_addr, "connect")
-                .map_err(|e| {
-                    ConnectingError::ConnectError(e)
-                })?;
+                .map_err(|e| ConnectingError::ConnectError(e))?;
             let conn = connecting.await?;
             Ok(conn)
         };
@@ -372,50 +526,65 @@ impl TokioQuicGatewayDriver {
         self.connecting_meta.insert(abort_handle.id(), meta);
     }
 
-    fn handle_connecting_result(&mut self, result: Result<(task::Id, Result<Connection, ConnectingError>), JoinError>) {
+    fn handle_connecting_result(
+        &mut self,
+        result: Result<(task::Id, Result<Connection, ConnectingError>), JoinError>,
+    ) {
         match result {
             Ok((task_id, result)) => {
-                let ConnectingMeta { remote_peer_identity, sm_instant } = self.connecting_meta.remove(&task_id).unwrap();
+                let ConnectingMeta {
+                    remote_peer_identity,
+                    sm_instant,
+                } = self.connecting_meta.remove(&task_id).unwrap();
                 match result {
                     Ok(conn) => {
                         tracing::debug!("Connected to remote peer: {:?}", remote_peer_identity);
-                        let conn_id = conn.stable_id();
+                        let conn_id = ConnectionId::new();
                         self.sm.register_connection(conn_id, remote_peer_identity);
                         assert!(self.connection_map.insert(conn_id, conn).is_none());
                     }
-                    Err(connect_err) => {
-                        match connect_err {
-                            ConnectingError::ConnectError(connect_error) => {
-                                tracing::warn!("Connect error: {:?}", connect_error);
-                                self.sm.mark_connection_attempt_failure(remote_peer_identity, sm_instant);
-                            },
-                            ConnectingError::ConnectionError(connection_error) => {
-                                tracing::warn!("Connection error: {:?}", connection_error);
-                                self.sm.mark_connection_attempt_failure(remote_peer_identity, sm_instant);
-                            },
-                            ConnectingError::PeerNotInLeaderSchedule => {
-                                tracing::warn!("Connection to remote peer not in leader schedule");
-                                self.sm.abandon_tx_for_remote_peer(remote_peer_identity)
-                            },
+                    Err(connect_err) => match connect_err {
+                        ConnectingError::ConnectError(connect_error) => {
+                            tracing::warn!("Connect error: {:?}", connect_error);
+                            self.sm
+                                .mark_connection_failure(remote_peer_identity, sm_instant);
                         }
-                    }
+                        ConnectingError::ConnectionError(connection_error) => {
+                            tracing::warn!("Connection error: {:?}", connection_error);
+                            self.sm
+                                .mark_connection_failure(remote_peer_identity, sm_instant);
+                        }
+                        ConnectingError::PeerNotInLeaderSchedule => {
+                            tracing::warn!("Connection to remote peer not in leader schedule");
+                            self.sm
+                                .abandon_tx_for_remote_peer(remote_peer_identity, sm_instant);
+                        }
+                    },
                 }
             }
             Err(join_err) => {
-                let ConnectingMeta { remote_peer_identity, sm_instant: _ } = self.connecting_meta.remove(&join_err.id()).expect("connecting_meta");
-                panic!("Join error during connecting to {remote_peer_identity:?}: {:?}", join_err);
+                let ConnectingMeta {
+                    remote_peer_identity,
+                    sm_instant: _,
+                } = self
+                    .connecting_meta
+                    .remove(&join_err.id())
+                    .expect("connecting_meta");
+                panic!(
+                    "Join error during connecting to {remote_peer_identity:?}: {:?}",
+                    join_err
+                );
             }
         }
     }
 
-
-    fn handle_tx_sent_result(&mut self, result: Result<(task::Id, Result<SentOk, SendTxError>), JoinError>) {
+    fn handle_tx_sent_result(
+        &mut self,
+        result: Result<(task::Id, Result<SentOk, SendTxError>), JoinError>,
+    ) {
         match result {
             Ok((task_id, result)) => {
-                let InflightMeta {
-                    tx_id,
-                    permit,
-                } = self.inflight_meta.remove(&task_id).unwrap();
+                let InflightMeta { tx_id, permit } = self.inflight_meta.remove(&task_id).unwrap();
                 let Permit {
                     connection_id,
                     remote_peer_identity,
@@ -425,58 +594,85 @@ impl TokioQuicGatewayDriver {
                 self.sm.release_connection_permit(permit);
                 match result {
                     Ok(sent_ok) => {
-                        tracing::debug!("Tx sent to remote peer: {:?} at permit height: {} in {:?}", remote_peer_identity, permit_height, sent_ok.e2e_time);
-
+                        tracing::debug!(
+                            "Tx sent to remote peer: {:?} at permit height: {} in {:?}",
+                            remote_peer_identity,
+                            permit_height,
+                            sent_ok.e2e_time
+                        );
                     }
-                    Err(send_err) => {
-                        match send_err {
-                            SendTxError::ConnectionError(connection_error) => {
-                                if let ConnectionError::TransportError(TransportError { code, frame: _, reason: _ }) = connection_error {
-                                    if code == quinn_proto::TransportErrorCode::STREAM_LIMIT_ERROR {
-                                        self.sm.hit_rate_limit_for_remote_peer(remote_peer_identity, permit_height, time);
-                                    }
-                                    todo!()
-                                } else {
-                                    self.sm.mark_connection_failure_at_time(remote_peer_identity, time);
+                    Err(send_err) => match send_err {
+                        SendTxError::ConnectionError(connection_error) => {
+                            if let ConnectionError::TransportError(TransportError {
+                                code,
+                                frame: _,
+                                reason: _,
+                            }) = connection_error
+                            {
+                                if code == quinn_proto::TransportErrorCode::STREAM_LIMIT_ERROR {
+                                    self.sm.hit_rate_limit_for_remote_peer(
+                                        remote_peer_identity,
+                                        permit_height,
+                                        time,
+                                    );
                                 }
-                            },
-                            SendTxError::WriteError(write_error) => {
-                                match write_error {
-                                    WriteError::Stopped(_) | WriteError::ClosedStream => {
-                                        todo!()
-                                    },
-                                    WriteError::ConnectionLost(_) | WriteError::ZeroRttRejected => {
-                                        self.sm.mark_connection_failure_at_time(remote_peer_identity, time);
-                                    }
-                                }
-                            },
-                            SendTxError::StoppedError(stopped_error) => {
-                                tracing::warn!("Connection stopped: {:?}", stopped_error);
-                                self.sm.mark_connection_failure_at_time(remote_peer_identity, time);
-                            },
+                                todo!()
+                            } else {
+                                self.sm
+                                    .mark_connection_failure_at_time(remote_peer_identity, time);
+                            }
                         }
-                    }
+                        SendTxError::WriteError(write_error) => match write_error {
+                            WriteError::Stopped(_) | WriteError::ClosedStream => {
+                                todo!()
+                            }
+                            WriteError::ConnectionLost(_) | WriteError::ZeroRttRejected => {
+                                self.sm
+                                    .mark_connection_failure_at_time(remote_peer_identity, time);
+                            }
+                        },
+                        SendTxError::StoppedError(stopped_error) => {
+                            tracing::warn!("Connection stopped: {:?}", stopped_error);
+                            self.sm
+                                .mark_connection_failure_at_time(remote_peer_identity, time);
+                        }
+                    },
                 }
             }
             Err(join_err) => {
-                let inflight_meta = self.inflight_meta.remove(&join_err.id()).expect("inflight_meta");
-                let Permit { 
+                let inflight_meta = self
+                    .inflight_meta
+                    .remove(&join_err.id())
+                    .expect("inflight_meta");
+                let Permit {
                     remote_peer_identity,
                     connection_id,
                     permit_height,
                     time,
                 } = inflight_meta.permit;
                 self.sm.release_connection_permit(inflight_meta.permit);
-                panic!("Join error during sending tx to {:?}: {:?}", remote_peer_identity, join_err);
+                panic!(
+                    "Join error during sending tx to {:?}: {:?}",
+                    remote_peer_identity, join_err
+                );
             }
         }
     }
 
     fn spawn_tx(&mut self, permit: Permit, tx: GatewayTransaction) {
-        let Permit { connection_id, permit_height, time, remote_peer_identity } = permit;
+        let Permit {
+            connection_id,
+            permit_height,
+            time,
+            remote_peer_identity,
+        } = permit;
         let remote_peer_identity = tx.remote_peer;
         let tx_id = tx.tx_id;
-        let conn = self.connection_map.get(&connection_id).expect("connection_map").clone();
+        let conn = self
+            .connection_map
+            .get(&connection_id)
+            .expect("connection_map")
+            .clone();
         let fut = async move {
             let t = Instant::now();
             let mut uni = conn.open_uni().await?;
@@ -484,21 +680,23 @@ impl TokioQuicGatewayDriver {
             uni.finish().expect("finish uni");
             uni.stopped().await?;
             let elapsed = t.elapsed();
-            let ok = SentOk {
-                e2e_time: elapsed,
-            };
+            let ok = SentOk { e2e_time: elapsed };
             Ok(ok)
         };
 
         let abort_handle = self.inflight_tasks.spawn(fut);
-        tracing::debug!("Sent tx: {:?} to remote peer: {:?} at permit height: {}", tx.tx_id, remote_peer_identity, permit_height);
-        self.inflight_meta.insert(abort_handle.id(), InflightMeta {
-            tx_id,
-            permit,
-        });
+        tracing::debug!(
+            "Sent tx: {:?} to remote peer: {:?} at permit height: {}",
+            tx.tx_id,
+            remote_peer_identity,
+            permit_height
+        );
+        self.inflight_meta
+            .insert(abort_handle.id(), InflightMeta { tx_id, permit });
     }
 
-    pub async fn run(mut self, 
+    pub async fn run(
+        mut self,
         mut tx_queue: mpsc::Receiver<GatewayTransaction>,
         mut out: mpsc::Sender<GatewayResponse>,
     ) {
@@ -524,13 +722,13 @@ impl TokioQuicGatewayDriver {
                 }
             }
 
-            while let Some(remote_peer) = self.sm.pop_next_remote_leader_to_connect() {
+            while let Some(remote_peer) = self.sm.get_next_peer_to_connect() {
                 self.spawn_connecting(remote_peer);
             }
 
             while let Some(tx) = self.sm.process_next_tx() {
                 match self.sm.acquire_connection_permit(tx.remote_peer) {
-                    Ok((permit)) => {
+                    Ok(permit) => {
                         self.spawn_tx(permit, tx);
                     }
                     Err(AcquireConnectionErr::NoConnection) => {
@@ -542,5 +740,98 @@ impl TokioQuicGatewayDriver {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, std::time::Duration};
+
+    #[test]
+    fn test_sm() {
+        let mut sm = QuicGatewaySM::default();
+        let remote_peer = Pubkey::new_unique();
+        let tx = GatewayTransaction {
+            tx_id: 0,
+            wire: Arc::new([0u8; 0]),
+            remote_peer,
+        };
+
+        sm.schedule_tx(tx);
+
+        let actual = sm
+            .get_next_peer_to_connect()
+            .expect("should have a peer to connect");
+
+        assert_eq!(actual, remote_peer);
+
+        let conn_id = ConnectionId::new();
+        sm.register_connection(conn_id, remote_peer);
+
+        let actual = sm.get_next_peer_to_connect();
+        assert!(actual.is_none());
+
+        let tx = sm.process_next_tx().expect("next tx");
+
+        let permit = sm
+            .acquire_connection_permit(tx.remote_peer)
+            .expect("permit");
+
+        assert_eq!(permit.remote_peer_identity, remote_peer);
+        assert_eq!(permit.connection_id, conn_id);
+        assert_eq!(permit.permit_height, 1);
+
+        sm.release_connection_permit(permit);
+
+        // Make sure there is no more tx to process.
+        let actual = sm.process_next_tx();
+        assert!(actual.is_none());
+    }
+
+    #[test]
+    fn it_should_deschedule_tx_on_connection_failure() {
+        let mut sm = QuicGatewaySM::default();
+        let remote_peer = Pubkey::new_unique();
+        let tx1 = GatewayTransaction {
+            tx_id: 0,
+            wire: Arc::new([0u8; 0]),
+            remote_peer,
+        };
+
+        let tx2 = GatewayTransaction {
+            tx_id: 1,
+            wire: Arc::new([0u8; 0]),
+            remote_peer,
+        };
+
+        sm.schedule_tx(tx1);
+        sm.schedule_tx(tx2);
+
+        let actual = sm
+            .get_next_peer_to_connect()
+            .expect("should have a peer to connect");
+
+        assert_eq!(actual, remote_peer);
+
+        let conn_id = ConnectionId::new();
+        sm.register_connection(conn_id, remote_peer);
+
+        let actual = sm.get_next_peer_to_connect();
+        assert!(actual.is_none());
+
+        let tx = sm.process_next_tx().expect("next tx");
+
+        let permit = sm
+            .acquire_connection_permit(tx.remote_peer)
+            .expect("permit");
+        assert_eq!(permit.permit_height, 1);
+
+        sm.mark_connection_failure(remote_peer, permit.time);
+
+        let actual = sm.process_next_tx();
+        assert!(actual.is_none());
+
+        let actual = sm.pop_next_deregistered_connection();
+        assert_eq!(actual, Some(conn_id));
     }
 }
