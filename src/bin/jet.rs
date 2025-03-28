@@ -28,7 +28,7 @@ use {
     tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
-        cluster_tpu_info::{BlocklistUpdater, ClusterTpuInfo, LeadersSelector},
+        cluster_tpu_info::ClusterTpuInfo,
         config::{
             load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream, RpcErrorStrategy,
         },
@@ -47,6 +47,7 @@ use {
         transactions::{GrpcRootedTxReceiver, SendTransactionsPool},
         util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
     },
+    yellowstone_shield_store::{BuiltPolicyStore, PolicyStoreBuilder},
 };
 
 #[derive(Debug, Parser)]
@@ -319,8 +320,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         RpcErrorStrategy::Fail => None,
     };
 
-    // We are building a special HttpSender that automatically retry on transient network failure.
-    // This allow client not to worry about retry logic.
     let rpc_sender = HttpSender::new(config.upstream.rpc.clone());
     let rpc_client_config = RpcClientConfig::with_commitment(CommitmentConfig::finalized());
     let rpc_client = match retry_strategy {
@@ -344,14 +343,22 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await;
 
-    let leaders_selector = Arc::new(
-        LeadersSelector::new_from_blockchain(
-            config.upstream.rpc.clone(),
-            config.blocklist.leaders,
-            &config.yellowstone_blocklist.contract_pubkey,
-        )
-        .await?,
-    );
+    let policies_rpc_client =
+        solana_client::nonblocking::rpc_client::RpcClient::new(config.upstream.rpc.clone());
+    let BuiltPolicyStore {
+        policies,
+        subscription,
+    } = PolicyStoreBuilder::new()
+        .rpc(policies_rpc_client)
+        .vixen(config.shield.vixen)
+        .build()
+        .await?;
+
+    let local = tokio::task::LocalSet::new();
+
+    if let Some(sub) = subscription {
+        local.spawn_local(sub);
+    }
 
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
@@ -361,8 +368,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             .upstream
             .secondary_grpc
             .unwrap_or(config.upstream.primary_grpc),
-        config.yellowstone_blocklist.contract_pubkey,
-        Arc::clone(&leaders_selector) as Arc<dyn BlocklistUpdater + Send + Sync + 'static>,
     );
     let blockhash_queue = BlockhashQueue::new(&geyser);
 
@@ -397,7 +402,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(cluster_tpu_info.clone()),
         config.quic.clone(),
         Arc::new(quic_session),
-        leaders_selector,
+        Arc::new(policies),
     );
 
     let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
@@ -411,14 +416,13 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await;
 
-    // Add all flusher here
     identity_flusher_wg
         .add_flusher(Box::new(send_transactions.clone()))
         .await;
 
     let stake_info_identity_observer = quic_identity_man.observe_identity_change();
     let quic_identity_observer = quic_identity_man.observe_signer_change();
-    // Run RPC admin
+
     let rpc_admin = RpcServer::new(
         config.listen_admin.bind[0],
         RpcServerType::Admin {
@@ -428,7 +432,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await?;
 
-    // Run RPC solana-like
     let rpc_solana_like = RpcServer::new(
         config.listen_solana_like.bind[0],
         RpcServerType::SolanaLike {
@@ -440,7 +443,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await?;
 
-    // Run gRPC to jet-gateway
     let (stop_jet_gw_listener_tx, stop_jet_gw_listener_rx) = oneshot::channel();
     let jet_gw_listener = if let Some(config_jet_gateway) = config.jet_gateway {
         if config_jet_gateway.endpoints.is_empty() {
@@ -532,18 +534,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     tg.spawn_cancelable("send_transactions_pool", send_tx_pool_fut);
 
-    // tg.spawn_with_shutdown("stake", |mut stop| async move {
-    //     tokio::select! {
-    //         result = stake.clone().wait_shutdown() => {
-    //             result.expect("stake");
-    //         },
-    //         _ = &mut stop => {
-    //             stake.shutdown();
-    //             stake.wait_shutdown().await.expect("stake shutdown");
-    //         },
-    //     }
-    // });
-
     if let Some(mut jet_gw_listener) = jet_gw_listener {
         tg.spawn_with_shutdown("jet_gw_listener", |mut stop| async move {
             tokio::select! {
@@ -563,17 +553,21 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         info!("SIGINT received...");
     });
 
-    let (first, result, rest) = tg.wait_one().await.expect("task group empty");
-    rpc_admin.shutdown();
-    rpc_solana_like.shutdown();
+    local
+        .run_until(async {
+            let (first, result, rest) = tg.wait_one().await.expect("task group empty");
+            rpc_admin.shutdown();
+            rpc_solana_like.shutdown();
 
-    warn!("first task group finished {first} with  {result:?}");
+            warn!("first task group finished {first} with  {result:?}");
 
-    for (name, result) in rest {
-        if let Err(e) = result {
-            tracing::error!("task: {name} shutdown with: {e:?}");
-        }
-    }
+            for (name, result) in rest {
+                if let Err(e) = result {
+                    tracing::error!("task: {name} shutdown with: {e:?}");
+                }
+            }
 
-    Ok(())
+            Ok(())
+        })
+        .await
 }

@@ -9,6 +9,14 @@ identity:
   # Load specified keypair from file
   keypair: null
 
+# Yellowstone shield policy store configuration
+shield:
+  vixen:
+    yellowstone:
+      endpoint: http://127.0.0.1:10000
+      x_token: null
+      timeout: 60
+
 # RPC & gRPC for upstream validator
 upstream:
   # Primary gRPC service

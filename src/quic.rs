@@ -1,8 +1,8 @@
 use {
     crate::{
-        cluster_tpu_info::{BlockLeaders, ClusterTpuInfo, TpuInfo},
+        cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
         config::{ConfigQuic, ConfigQuicTpuPort},
-        metrics::jet as metrics,
+        metrics::jet::{self as metrics, shield_policies_not_found_inc, sts_tpu_denied_inc_by},
         quic_solana::{ConnectionCache, ConnectionCacheSendPermit},
         transactions::SendTransactionInfoId,
     },
@@ -14,6 +14,7 @@ use {
     std::{fmt, net::SocketAddr, sync::Arc, time::Duration},
     tokio::{sync::broadcast, time::timeout},
     tracing::{debug, instrument},
+    yellowstone_shield_store::PolicyStoreTrait,
 };
 
 #[derive(Clone)]
@@ -23,7 +24,7 @@ pub struct QuicClient {
     connection_cache: Arc<ConnectionCache>,
     extra_tpu_forward: Vec<TpuInfo>,
     tx_broadcast_metrics: broadcast::Sender<QuicClientMetric>,
-    leaders_selector: Arc<dyn BlockLeaders + Send + Sync + 'static>,
+    policies: Arc<dyn PolicyStoreTrait + Send + Sync + 'static>,
 }
 
 impl fmt::Debug for QuicClient {
@@ -177,7 +178,7 @@ impl QuicClient {
         upcoming_leader_schedule: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
         config: ConfigQuic,
         connection_cache: Arc<ConnectionCache>,
-        leaders_selector: Arc<dyn BlockLeaders + Send + Sync + 'static>,
+        policies: Arc<dyn PolicyStoreTrait + Send + Sync + 'static>,
     ) -> Self {
         let extra_tpu_forward = config
             .extra_tpu_forward
@@ -197,7 +198,7 @@ impl QuicClient {
             connection_cache,
             extra_tpu_forward,
             tx_broadcast_metrics: tx,
-            leaders_selector,
+            policies,
         }
     }
 
@@ -215,7 +216,7 @@ impl QuicClient {
     pub async fn reserve_send_permit(
         &self,
         leader_forward_count: usize,
-        blocklist_keys: Vec<Pubkey>,
+        policies: Vec<Pubkey>,
     ) -> Option<QuicSendTxPermit> {
         let mut tpus_info = self
             .upcoming_leader_schedule
@@ -228,9 +229,24 @@ impl QuicClient {
 
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
-        self.leaders_selector
-            .block_leaders(&mut tpus_info, &blocklist_keys)
-            .await;
+        let snapshot = self.policies.snapshot();
+
+        let before_policy_check_tpu_infos_count = tpus_info.len();
+        let tpus_info: Vec<TpuInfo> = tpus_info
+            .into_iter()
+            .filter(
+                |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
+                    Ok(allowed) => allowed,
+                    Err(_) => {
+                        shield_policies_not_found_inc();
+
+                        false
+                    }
+                },
+            )
+            .collect();
+
+        sts_tpu_denied_inc_by(before_policy_check_tpu_infos_count - tpus_info.len());
 
         debug!("After filtering, sending to {} leaders", tpus_info.len());
 
@@ -266,7 +282,7 @@ impl QuicClient {
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
         leader_forward_count: usize,
-        blocklist_keys: Vec<Pubkey>,
+        policies: Vec<Pubkey>,
     ) {
         let mut tpus_info = self
             .upcoming_leader_schedule
@@ -274,9 +290,24 @@ impl QuicClient {
             .await;
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
-        self.leaders_selector
-            .block_leaders(&mut tpus_info, &blocklist_keys)
-            .await;
+        let snapshot = self.policies.snapshot();
+
+        let before_policy_check_tpu_infos_count = tpus_info.len();
+        let tpus_info: Vec<TpuInfo> = tpus_info
+            .into_iter()
+            .filter(
+                |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
+                    Ok(allowed) => allowed,
+                    Err(_) => {
+                        shield_policies_not_found_inc();
+
+                        false
+                    }
+                },
+            )
+            .collect();
+
+        sts_tpu_denied_inc_by(before_policy_check_tpu_infos_count - tpus_info.len());
 
         let tpu_send_fut = tpus_info.into_iter().map(|tpu_info| {
             let send_retry_count = self.config.send_retry_count;
