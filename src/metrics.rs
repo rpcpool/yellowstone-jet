@@ -118,12 +118,10 @@ pub mod jet {
 
         static ref FORWADED_TRANSACTION_LATENCY: HistogramVec = HistogramVec::new(
              HistogramOpts::new("forward_latency", "Latency of transactions forwarded from jet-gateway to a jet instance")
-            .buckets(vec![ //0ms -> 10s
-                0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0,
-                400.0, 450.0, 500.0, 550.0, 600.0, 650.0, 700.0,750.0,
-                800.0, 850.0, 900.0, 950.0, 1000.0, 1500.0, 2000.0, 2500.0,
-                3000.0, 3500.0, 4000.0, 4500.0, 5000.0, 6000.0, 7000.0,
-                8000.0, 9000.0, 10000.0
+            .buckets(vec![
+                  0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0,
+                  7.5, 10.0, 12.5, 15.0, 17.5, 20.0, 25.0, 30.0, 35.0, 40.0,
+                  45.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0
             ]),
             &[]
         ).unwrap();
