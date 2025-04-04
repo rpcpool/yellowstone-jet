@@ -55,7 +55,7 @@ solana-tpu-client = "~2.1.11"
 solana-transaction-status = "~2.1.11"
 solana-version = "~2.1.11"
 solana-rpc-client = "~2.1.11"
-yellowstone-shield-store = "0.1.0"
+yellowstone-shield-store = "0.1.1"
 thiserror = "1.0.58"
 tokio = { version = "1.36.0", features = ["rt-multi-thread", "macros"] }
 tokio-stream = "0.1.15"
