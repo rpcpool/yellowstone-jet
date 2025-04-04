@@ -112,12 +112,7 @@ message SubscribeRequest {
     SubscribeUpdateLimit update_limit = 3;
     // first message to send
     InitialSubscribeRequest init = 4;
-    ValidatorMetrics metrics = 5;
   }
-}
-
-message ValidatorMetrics {
-  string metrics = 1;
 }
 
 message InitialSubscribeRequest {

@@ -74,6 +74,9 @@ pub struct ConfigJet {
     /// Features Flags
     #[serde(default)]
     pub features: FeatureSet,
+
+    /// Prometheus Push Gateway
+    pub push_gw: Option<PushGateway>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -604,5 +607,21 @@ pub enum RpcErrorStrategy {
 impl RpcErrorStrategy {
     const fn default_retries() -> NonZeroUsize {
         unsafe { NonZeroUsize::new_unchecked(3) }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct PushGateway {
+    pub url: String,
+    #[serde(
+        default = "PushGateway::default_push_interval",
+        with = "humantime_serde"
+    )]
+    pub push_interval: Duration,
+}
+
+impl PushGateway {
+    const fn default_push_interval() -> Duration {
+        Duration::from_secs(10)
     }
 }

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Note:** Version 0 of Semantic Versioning is handled differently from version 1 and above.
 The minor version will be incremented upon a breaking change and the patch version will be incremented for features.
 
+
 ## [Unreleased]
 
 ### Breaking Changes
@@ -16,16 +17,11 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-## [11.2.0]
-
-### Breaking Changes
+## [11.1.3]
 
 ### Features
-- Added new message in `jet.proto` to send metrics
-- Send Jet metrics every 20 seconds. 
-- Send Jet version throught subscription request metadata.
-
-### Fixes
+- Version added to metadata to jet-gateway using subscribe request.
+- Added support for Prometheus push-gateway.
 
 ## [11.1.2]
 

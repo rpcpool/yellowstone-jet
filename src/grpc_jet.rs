@@ -23,7 +23,6 @@ use {
             subscribe_transaction::Payload, AnswerChallengeRequest, AnswerChallengeResponse,
             AuthRequest, FeatureFlags, GetChallengeRequest, InitialSubscribeRequest, Ping, Pong,
             SubscribeRequest, SubscribeResponse, SubscribeTransaction, SubscribeUpdateLimit,
-            ValidatorMetrics,
         },
         pubkey_challenger::{append_nonce_and_sign, OneTimeAuthToken},
         rpc::rpc_solana_like::RpcServerImpl as RpcServerImplSolanaLike,
@@ -327,7 +326,6 @@ impl GrpcServer {
         const MAX_SEND_TRANSACTIONS: usize = 10;
         const LIMIT_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
         const MAX_QUICK_DISCONNECTS: usize = 3;
-        const SEND_METRICS_INTERVAL: Duration = Duration::from_secs(20);
 
         let mut backoff = IncrementalBackoff::default();
         let mut tasks = JoinSet::<anyhow::Result<()>>::new();
@@ -375,7 +373,6 @@ impl GrpcServer {
             };
 
             let mut limit_interval = interval(LIMIT_UPDATE_INTERVAL);
-            let mut metrics_interval = interval(SEND_METRICS_INTERVAL);
 
             let my_identity = signer.pubkey();
 
@@ -383,13 +380,6 @@ impl GrpcServer {
                 loop {
                     if let Err(error) = async {
                         tokio::select! {
-                            _ = metrics_interval.tick() => {
-                                let metrics = crate::metrics::collect_to_text();
-                                let message = SubscribeRequest {
-                                    message: Some(SubscribeRequestMessage::Metrics(ValidatorMetrics { metrics })),
-                                };
-                                sink.send(message).await.context("failed to send metrics")
-                            }
                             _ = limit_interval.tick() => {
                                 let limits = stake_info.get_stake_limits(my_identity);
                                 let messages_per100ms = limits.per100ms_limit;
