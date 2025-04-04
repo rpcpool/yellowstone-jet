@@ -16,6 +16,17 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [11.2.0]
+
+### Breaking Changes
+
+### Features
+- Added new message in `jet.proto` to send metrics
+- Send Jet metrics every 20 seconds. 
+- Send Jet version throught subscription request metadata.
+
+### Fixes
+
 ## [11.1.2]
 
 ### Fixes
