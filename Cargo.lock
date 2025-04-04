@@ -711,9 +711,9 @@ dependencies = [
 
 [[package]]
 name = "bytemuck"
-version = "1.21.0"
+version = "1.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef657dfab802224e671f5818e9a4935f9b1957ed18e58292690cc39e7a4092a3"
+checksum = "b6b1fc10dbac614ebc03540c9dbd60e83887fda27794998c6528f1782047d540"
 dependencies = [
  "bytemuck_derive",
 ]
@@ -7074,11 +7074,12 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-shield-client"
-version = "0.0.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e58d663039ae9114dc0a0dab756f8f7fe4bd2950ea20d4272b5e368698ec5919"
+checksum = "72a18e9d8c063598991ca3d6a8b74749370aa0de052411c48c43318523c748f9"
 dependencies = [
  "borsh 0.10.4",
+ "bytemuck",
  "num-derive 0.3.3",
  "num-traits",
  "solana-program",
@@ -7088,9 +7089,9 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-shield-parser"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f370520e57a18a4fb482cf5b66c4426474cbffdc04c7861f610c8e2239edb641"
+checksum = "5d1e32701cd8523b5eb53234157c9bcb4bedb04537e3de7ec832778aae1d1460"
 dependencies = [
  "borsh 0.10.4",
  "solana-program",
@@ -7100,9 +7101,9 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-shield-store"
-version = "0.1.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a57cc58c7f209f84d55aa87ec136843894fd2d23da20059c23ef9c1bae6e138f"
+checksum = "494ef2829dadd98d4db1f4026c531cf6c9746b342a8e2f2fe09fb87e74fdc66d"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7110,7 +7111,9 @@ dependencies = [
  "hashbrown 0.14.5",
  "log",
  "parking_lot 0.12.3",
+ "solana-account-decoder-client-types",
  "solana-client",
+ "solana-pubkey",
  "solana-sdk",
  "thiserror 1.0.69",
  "tokio",
@@ -7121,9 +7124,9 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-vixen"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18f82908255dabd519eb709fd9a1df393e45bcc8c5f8882c363efff9e49bed96"
+checksum = "47a92ab40c3c8e68bfc69af714c1d9b293d55636bc1bfb02e609fe85e2620ad1"
 dependencies = [
  "clap",
  "futures-channel",
@@ -7141,9 +7144,9 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-vixen-core"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa7173490754ac4ddedd9e40f5b257a2d67d999ac29486d3931ffe106c74bd88"
+checksum = "ddd5abc79c20872eb5d5d320b099549e4e782c04fb7e30528162e6f72c23960a"
 dependencies = [
  "bs58",
  "thiserror 1.0.69",
