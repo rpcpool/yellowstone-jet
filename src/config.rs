@@ -69,12 +69,11 @@ pub struct ConfigJet {
     #[serde(default)]
     pub features: FeatureSet,
 
-
     /// Prometheus Push Gateway
     pub push_gw: Option<PushGateway>,
 
+    /// Config Shield
     pub shield: ConfigShield,
-
 }
 
 #[derive(Debug, Deserialize)]
