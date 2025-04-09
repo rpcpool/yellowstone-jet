@@ -23,6 +23,7 @@ use {
         path::{Path, PathBuf},
     },
     tokio::{fs, time::Duration},
+    yellowstone_shield_store::{NullConfig, VixenConfig},
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -64,19 +65,16 @@ pub struct ConfigJet {
     /// Send metrics to lewis
     pub metrics_upstream: Option<ConfigMetricsUpstream>,
 
-    /// Validators blocklist
-    #[serde(default)]
-    pub blocklist: ConfigBlocklist,
-
-    /// Yellowstone-blocklist
-    #[serde(default)]
-    pub yellowstone_blocklist: YellowstoneBlocklist,
     /// Features Flags
     #[serde(default)]
     pub features: FeatureSet,
 
+
     /// Prometheus Push Gateway
     pub push_gw: Option<PushGateway>,
+
+    pub shield: ConfigShield,
+
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +120,14 @@ impl ConfigIdentity {
             None => Ok(None),
         }
     }
+}
+
+/// Yellowstone Shield policy store configuration
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigShield {
+    /// Vixen configuration for syncing the shield store
+    pub vixen: VixenConfig<NullConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -518,64 +524,6 @@ where
         Err(de::Error::custom(
             "only 1 listen address supported right now".to_owned(),
         ))
-    }
-}
-
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigBlocklist {
-    #[serde(default, deserialize_with = "ConfigBlocklist::deserialize_leaders")]
-    pub leaders: HashSet<Pubkey>,
-}
-
-impl ConfigBlocklist {
-    fn deserialize_leaders<'de, D>(deserializer: D) -> Result<HashSet<Pubkey>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Debug, Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Leaders {
-            #[serde(default)]
-            files: Vec<String>,
-            #[serde(default)]
-            pubkeys: Vec<String>,
-        }
-
-        let leaders = Leaders::deserialize(deserializer)?;
-
-        let mut pubkeys = leaders
-            .pubkeys
-            .iter()
-            .map(|s| s.parse().map_err(de::Error::custom))
-            .collect::<Result<HashSet<Pubkey>, _>>()?;
-
-        for path in leaders.files {
-            let content = std::fs::read_to_string(path).map_err(de::Error::custom)?;
-            for pubkey in content.lines() {
-                pubkeys.insert(pubkey.parse().map_err(de::Error::custom)?);
-            }
-        }
-
-        Ok(pubkeys)
-    }
-}
-
-#[derive(Debug, Default, Deserialize, Clone)]
-pub struct YellowstoneBlocklist {
-    #[serde(deserialize_with = "YellowstoneBlocklist::deserialize_pubkey")]
-    pub contract_pubkey: Option<Pubkey>,
-}
-
-impl YellowstoneBlocklist {
-    fn deserialize_pubkey<'de, D>(deserializer: D) -> Result<Option<Pubkey>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .parse::<Pubkey>()
-            .map(Some)
-            .map_err(de::Error::custom)
     }
 }
 

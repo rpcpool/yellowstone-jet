@@ -173,9 +173,15 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.95"
+version = "1.0.97"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34ac096ce696dc2fcabef30516bb13c0a68a11d30131d3df6f04711467681b04"
+checksum = "dcfed56ad506cb2c684a14971b8861fdc3baaaae314b9e5f9bb532cbe3ba7a4f"
+
+[[package]]
+name = "arc-swap"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69f7f8c3906b62b754cd5326047894316021dcfe5a194c8ea52bdd94934a3457"
 
 [[package]]
 name = "ark-bn254"
@@ -984,10 +990,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-channel"
-version = "0.5.14"
+name = "crossbeam"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06ba6d68e24814cb8de6bb986db8222d3a027d15872cabc0d18817bc3c0e4471"
+checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
+dependencies = [
+ "crossbeam-channel",
+ "crossbeam-deque",
+ "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -1007,6 +1026,15 @@ name = "crossbeam-epoch"
 version = "0.9.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f58bbc28f91df819d0aa2a2c00cd19754769c2fad90579b3592b1c9ba7a3115"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -1140,7 +1168,7 @@ dependencies = [
  "hashbrown 0.14.5",
  "lock_api",
  "once_cell",
- "parking_lot_core",
+ "parking_lot_core 0.9.10",
 ]
 
 [[package]]
@@ -1245,6 +1273,26 @@ name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.96",
+]
+
+[[package]]
+name = "dispose"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "425462ba555fb628fbb7d9750d52f01fc9132d855996f34f02b7164b1b62860f"
+dependencies = [
+ "dispose-derive",
+]
+
+[[package]]
+name = "dispose-derive"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c32e3e8ab1b6ee2e06418f40f94f315d82b35157eb1d2322a6e20a4b15106b84"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1692,7 +1740,7 @@ dependencies = [
  "futures-timer",
  "no-std-compat",
  "nonzero_ext",
- "parking_lot",
+ "parking_lot 0.12.3",
  "portable-atomic",
  "quanta",
  "rand 0.8.5",
@@ -1767,6 +1815,10 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+ "allocator-api2",
+]
 
 [[package]]
 name = "hashbrown"
@@ -2258,6 +2310,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "instant"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2384,7 +2445,7 @@ dependencies = [
  "http-body 1.0.1",
  "http-body-util",
  "jsonrpsee-types",
- "parking_lot",
+ "parking_lot 0.12.3",
  "rand 0.8.5",
  "rustc-hash",
  "serde",
@@ -2797,6 +2858,17 @@ checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
 
 [[package]]
 name = "num-derive"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876a53fff98e03a936a674b29568b0e605f06b29372c2489ff4de23f1949743d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "num-derive"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
@@ -2925,9 +2997,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openssl"
-version = "0.10.69"
+version = "0.10.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5e534d133a060a3c19daec1eb3e98ec6f4685978834f2dbadfe2ec215bab64e"
+checksum = "fedfea7d58a1f73118430a55da6a286e7b044961736ce96a16a17068ea25e5da"
 dependencies = [
  "bitflags 2.8.0",
  "cfg-if",
@@ -2966,9 +3038,9 @@ dependencies = [
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.104"
+version = "0.9.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45abf306cbf99debc8195b66b7346498d7b10c210de50418b5ccd7ceba08c741"
+checksum = "8288979acd84749c744a9014b4382d42b8f7b2592847b5afb2ed29e5d16ede07"
 dependencies = [
  "cc",
  "libc",
@@ -2991,12 +3063,37 @@ checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
 name = "parking_lot"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d17b78036a60663b797adeaee46f5c9dfebb86948d1255007a1d6be0271ff99"
+dependencies = [
+ "instant",
+ "lock_api",
+ "parking_lot_core 0.8.6",
+]
+
+[[package]]
+name = "parking_lot"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1bf18183cf54e8d6059647fc3063646a1801cf30896933ec2311622cc4b9a27"
 dependencies = [
  "lock_api",
- "parking_lot_core",
+ "parking_lot_core 0.9.10",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60a2cfe6f0ad2bfc16aefa463b497d5c7a5ecd44a23efa72aa342d90177356dc"
+dependencies = [
+ "cfg-if",
+ "instant",
+ "libc",
+ "redox_syscall 0.2.16",
+ "smallvec",
+ "winapi",
 ]
 
 [[package]]
@@ -3007,7 +3104,7 @@ checksum = "1e401f977ab385c9e4e3ab30627d6f26d00e2c73eef317493c4ec6d468726cf8"
 dependencies = [
  "cfg-if",
  "libc",
- "redox_syscall",
+ "redox_syscall 0.5.8",
  "smallvec",
  "windows-targets 0.52.6",
 ]
@@ -3179,7 +3276,7 @@ dependencies = [
  "fnv",
  "lazy_static",
  "memchr",
- "parking_lot",
+ "parking_lot 0.12.3",
  "protobuf",
  "thiserror 1.0.69",
 ]
@@ -3448,6 +3545,15 @@ checksum = "1465873a3dfdaa8ae7cb14b4383657caab0b3e8a0aa9ae8e04b044854c8dfce2"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "redox_syscall"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb5a58c1855b4b6819d59012155603f0b22ad30cad752600aadfcb695265519a"
+dependencies = [
+ "bitflags 1.3.2",
 ]
 
 [[package]]
@@ -4215,7 +4321,7 @@ name = "solana-atomic-u64"
 version = "2.1.11"
 source = "git+https://github.com/rpcpool/solana-public.git?tag=v2.1.11-triton-public#fe9c079bbc169104635972fb45574d3dabf55212"
 dependencies = [
- "parking_lot",
+ "parking_lot 0.12.3",
 ]
 
 [[package]]
@@ -4656,9 +4762,9 @@ dependencies = [
  "log",
  "memoffset",
  "num-bigint 0.4.6",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
- "parking_lot",
+ "parking_lot 0.12.3",
  "rand 0.8.5",
  "serde",
  "serde_bytes",
@@ -4763,7 +4869,7 @@ dependencies = [
  "itertools 0.12.1",
  "libc",
  "log",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "percentage",
  "rand 0.8.5",
@@ -4792,7 +4898,7 @@ dependencies = [
  "itertools 0.12.1",
  "libc",
  "log",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "percentage",
  "rand 0.8.5",
@@ -5003,7 +5109,7 @@ dependencies = [
  "libsecp256k1",
  "log",
  "memmap2",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "num_enum",
  "pbkdf2",
@@ -5454,7 +5560,7 @@ checksum = "573944c767e4908d6ba12151029cb9ac33b49e7082991c6d978d3ab83ac68d6b"
 dependencies = [
  "bincode",
  "log",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "serde",
  "serde_derive",
@@ -5473,7 +5579,7 @@ source = "git+https://github.com/rpcpool/solana-public.git?tag=v2.1.11-triton-pu
 dependencies = [
  "bincode",
  "log",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "serde",
  "serde_derive",
@@ -5482,21 +5588,6 @@ dependencies = [
  "solana-program",
  "solana-program-runtime 2.1.11 (git+https://github.com/rpcpool/solana-public.git?tag=v2.1.11-triton-public)",
  "solana-sdk",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "solana-yellowstone-blocklist"
-version = "0.1.0"
-source = "git+https://github.com/rpcpool/solana-yellowstone-blocklist.git?tag=1.0.0#0329bc965aa1ae667d5fe03bee295f12deb82413"
-dependencies = [
- "bincode",
- "borsh 1.5.5",
- "bytemuck",
- "getrandom 0.1.16",
- "serde",
- "serde_derive",
- "solana-program",
  "thiserror 1.0.69",
 ]
 
@@ -5516,7 +5607,7 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "merlin",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "rand 0.8.5",
  "serde",
@@ -5573,7 +5664,7 @@ checksum = "68034596cf4804880d265f834af1ff2f821ad5293e41fa0f8f59086c181fc38e"
 dependencies = [
  "assert_matches",
  "borsh 1.5.5",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "solana-program",
  "spl-token",
@@ -5645,7 +5736,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7b28bed65356558133751cc32b48a7a5ddfc59ac4e941314630bbed1ac10532"
 dependencies = [
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "solana-program",
  "spl-program-error-derive",
@@ -5686,7 +5777,7 @@ checksum = "70a0f06ac7f23dc0984931b1fe309468f14ea58e32660439c1cef19456f5d0e3"
 dependencies = [
  "arrayref",
  "bytemuck",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "num_enum",
  "solana-program",
@@ -5701,7 +5792,7 @@ checksum = "d9c10f3483e48679619c76598d4e4aebb955bc49b0a5cc63323afbf44135c9bf"
 dependencies = [
  "arrayref",
  "bytemuck",
- "num-derive",
+ "num-derive 0.4.2",
  "num-traits",
  "num_enum",
  "solana-program",
@@ -6034,7 +6125,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
+ "parking_lot 0.12.3",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -6227,6 +6318,23 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+]
+
+[[package]]
+name = "topograph"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe4ea92bd6b8d73d7987848398691db79e81e6f77f1f56e959ebcee077adebf3"
+dependencies = [
+ "crossbeam",
+ "dispose",
+ "futures-util",
+ "log",
+ "num_cpus",
+ "parking_lot 0.11.2",
+ "pin-project",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -7064,6 +7172,20 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-grpc-client"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c73838262cb899d64e2c94ac6ca2fb5bc5d565aa4f04a68b969645a40a06c2c"
+dependencies = [
+ "bytes",
+ "futures",
+ "thiserror 1.0.69",
+ "tonic",
+ "tonic-health",
+ "yellowstone-grpc-proto 2.0.0",
+]
+
+[[package]]
+name = "yellowstone-grpc-client"
 version = "4.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf14543cd0f2413194bf020ae486d211be41aa88b033c26b8edf2d455db3dc43"
@@ -7073,7 +7195,21 @@ dependencies = [
  "thiserror 1.0.69",
  "tonic",
  "tonic-health",
- "yellowstone-grpc-proto",
+ "yellowstone-grpc-proto 4.1.1",
+]
+
+[[package]]
+name = "yellowstone-grpc-proto"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b740e0601335c649640732e4cb4061a4ef4bb27017e8e76e4caa3c03566dd0e"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "prost",
+ "protobuf-src",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]
@@ -7146,7 +7282,6 @@ dependencies = [
  "solana-tpu-client",
  "solana-transaction-status",
  "solana-version 2.1.11 (registry+https://github.com/rust-lang/crates.io-index)",
- "solana-yellowstone-blocklist",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
@@ -7158,8 +7293,87 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vergen",
- "yellowstone-grpc-client",
- "yellowstone-grpc-proto",
+ "yellowstone-grpc-client 4.1.1",
+ "yellowstone-grpc-proto 4.1.1",
+ "yellowstone-shield-store",
+]
+
+[[package]]
+name = "yellowstone-shield-client"
+version = "0.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e58d663039ae9114dc0a0dab756f8f7fe4bd2950ea20d4272b5e368698ec5919"
+dependencies = [
+ "borsh 0.10.4",
+ "num-derive 0.3.3",
+ "num-traits",
+ "solana-program",
+ "solana-sdk",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "yellowstone-shield-parser"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f370520e57a18a4fb482cf5b66c4426474cbffdc04c7861f610c8e2239edb641"
+dependencies = [
+ "borsh 0.10.4",
+ "solana-program",
+ "yellowstone-shield-client",
+ "yellowstone-vixen-core",
+]
+
+[[package]]
+name = "yellowstone-shield-store"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a57cc58c7f209f84d55aa87ec136843894fd2d23da20059c23ef9c1bae6e138f"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "borsh 0.10.4",
+ "hashbrown 0.14.5",
+ "log",
+ "parking_lot 0.12.3",
+ "solana-client",
+ "solana-sdk",
+ "thiserror 1.0.69",
+ "tokio",
+ "yellowstone-shield-client",
+ "yellowstone-shield-parser",
+ "yellowstone-vixen",
+]
+
+[[package]]
+name = "yellowstone-vixen"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18f82908255dabd519eb709fd9a1df393e45bcc8c5f8882c363efff9e49bed96"
+dependencies = [
+ "clap",
+ "futures-channel",
+ "futures-util",
+ "serde",
+ "smallvec",
+ "thiserror 1.0.69",
+ "tokio",
+ "topograph",
+ "tracing",
+ "yellowstone-grpc-client 2.0.0",
+ "yellowstone-grpc-proto 2.0.0",
+ "yellowstone-vixen-core",
+]
+
+[[package]]
+name = "yellowstone-vixen-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa7173490754ac4ddedd9e40f5b257a2d67d999ac29486d3931ffe106c74bd88"
+dependencies = [
+ "bs58",
+ "thiserror 1.0.69",
+ "yellowstone-grpc-proto 2.0.0",
 ]
 
 [[package]]

@@ -56,7 +56,7 @@ use {
 pub const DEFAULT_LOCK_KEY: &str = "jet-gateway";
 
 const X_ONE_TIME_AUTH_TOKEN: &str = "x-one-time-auth-token";
-const SUBCRIBER_VERSION: &str = "subscriber-version";
+const X_JET_VERSION: &str = "x-jet-version";
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransactionHandlerError {
@@ -223,7 +223,7 @@ pub async fn grpc_subscribe_jet_gw(
     let version = serde_json::to_string(&VERSION)?;
 
     subscribe_req.metadata_mut().insert(
-        SUBCRIBER_VERSION,
+        X_JET_VERSION,
         version
             .try_into()
             .expect("failed to convert to AsciiMetadataValue"),
