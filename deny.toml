@@ -6,10 +6,14 @@ ignore = [
     # curve25519-dalek vulnerability
     "RUSTSEC-2024-0344",
 
+    # web-time not maintained
+    "RUSTSEC-2024-0384",
+
     # derivative unmaintained warning
     "RUSTSEC-2024-0388",
 
-    "RUSTSEC-2022-0093", # ed25519-dalek 1.0.1
+    # ed25519-dalek 1.0.1
+    "RUSTSEC-2022-0093",
 
     # ring vulnerability - coming from Solana dependencies
     "RUSTSEC-2025-0009",
@@ -19,20 +23,4 @@ ignore = [
 
     # paste
     "RUSTSEC-2024-0436",
-
-    # humantime -- unmaintened
-    # "RUSTSEC-2025-0014",
-
-    # instant 0.1.13 registry+https://github.com/rust-lang/crates.io-index
-    # https://rustsec.org/advisories/RUSTSEC-2024-0384
-    "RUSTSEC-2024-0384",
-
-    # openssl 0.10.69 registry+https://github.com/rust-lang/crates.io-index
-    # https://rustsec.org/advisories/RUSTSEC-2025-0022
-    # "RUSTSEC-2025-0022",
-
-    # tokio 1.43.0 registry+https://github.com/rust-lang/crates.io-index
-    # https://rustsec.org/advisories/RUSTSEC-2025-0023
-    "RUSTSEC-2025-0023"
-
 ]
