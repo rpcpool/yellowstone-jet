@@ -21,7 +21,6 @@ use {
     solana_transaction_status::{TransactionDetails, UiTransactionEncoding},
     std::{
         path::{Path, PathBuf},
-        str::FromStr,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -199,7 +198,7 @@ impl TransactionSender {
                 let signature = transaction.signatures[0];
                 let payload =
                     TransactionPayload::create(&transaction, config, should_use_legacy_txn)?;
-                let proto_tx = payload.to_proto::<PublishTransaction>();
+                let proto_tx = payload.to_proto::<PublishTransaction>()?;
                 tx.lock()
                     .await
                     .send(PublishRequest {
@@ -325,10 +324,7 @@ async fn main() -> anyhow::Result<()> {
                     max_retries: config.max_retries,
                     min_context_slot: None,
                 }),
-                blocklist_pdas: config.blocklist_pdas
-                    .iter()
-                    .filter_map(|addr| Pubkey::from_str(addr).ok())
-                    .collect(),
+                  blocklist_pdas: Some(config.blocklist_pdas),
             };
             match sender.send(transaction, config, should_use_legacy_txn).await {
                 Ok(send_signature) => {
