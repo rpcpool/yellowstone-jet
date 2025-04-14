@@ -16,6 +16,16 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [11.2.0]
+
+### Features
+- Added support to block transactions signed by a banned identity. 
+- Created file `blocking_services.rs` to store all logic related to blocking
+
+### Fixes
+- Refactor blocking leaders.
+- Added tests for `IdentitiesBlocker`
+
 ## [11.1.2]
 
 ### Fixes

@@ -69,7 +69,11 @@ pub struct ConfigJet {
     #[serde(default)]
     pub features: FeatureSet,
 
+    /// Shield configuration
     pub shield: ConfigShield,
+
+    /// Denied identities
+    pub denied_identities: ConfigDeniedIdentities,
 }
 
 #[derive(Debug, Deserialize)]
@@ -550,5 +554,48 @@ pub enum RpcErrorStrategy {
 impl RpcErrorStrategy {
     const fn default_retries() -> NonZeroUsize {
         unsafe { NonZeroUsize::new_unchecked(3) }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigDeniedIdentities {
+    #[serde(
+        default,
+        deserialize_with = "ConfigDeniedIdentities::deserialize_identities"
+    )]
+    pub identities: HashSet<Pubkey>,
+}
+
+impl ConfigDeniedIdentities {
+    fn deserialize_identities<'de, D>(deserializer: D) -> Result<HashSet<Pubkey>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Identities {
+            #[serde(default)]
+            files: Vec<String>,
+            #[serde(default)]
+            pubkeys: Vec<String>,
+        }
+
+        let identities = Identities::deserialize(deserializer)?;
+
+        let mut pubkeys = identities
+            .pubkeys
+            .iter()
+            .map(|s| s.parse().map_err(de::Error::custom))
+            .collect::<Result<HashSet<Pubkey>, _>>()?;
+
+        for path in identities.files {
+            let content = std::fs::read_to_string(path).map_err(de::Error::custom)?;
+            for pubkey in content.lines() {
+                pubkeys.insert(pubkey.parse().map_err(de::Error::custom)?);
+            }
+        }
+
+        Ok(pubkeys)
     }
 }

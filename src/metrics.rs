@@ -95,6 +95,8 @@ pub mod jet {
         ).unwrap();
         static ref STS_TPU_DENIED_TOTAL: IntCounter = IntCounter::new("sts_tpu_denied_total", "Total number of denied TPUs by Shield policy").unwrap();
 
+        static ref BANNED_TRANSACTIONS_TOTAL: IntCounter = IntCounter::new("banned_transactions_total", "Total number of banned transactions").unwrap();
+
         static ref QUIC_IDENTITY: IntGaugeVec = IntGaugeVec::new(Opts::new("quic_identity", "Current QUIC identity"), &["identity"]).unwrap();
         static ref QUIC_IDENTITY_EXPECTED: IntGaugeVec = IntGaugeVec::new(Opts::new("quic_identity_expected", "Expected QUIC identity"), &["identity"]).unwrap();
         static ref QUIC_SEND_ATTEMPTS: IntCounterVec = IntCounterVec::new(
@@ -198,6 +200,9 @@ pub mod jet {
         static REGISTER: Once = Once::new();
         REGISTER.call_once(|| {
             register!(BLOCKHASH_QUEUE_LATEST);
+            register!(BANNED_TRANSACTIONS_TOTAL);
+            register!(CLUSTER_NODES_TOTAL);
+            register!(CLUSTER_LEADERS_SCHEDULE_SIZE);
             register!(BLOCKHASH_QUEUE_SIZE);
             register!(CLUSTER_IDENTITY_STAKE);
             register!(CLUSTER_LEADERS_SCHEDULE_SIZE);
@@ -259,6 +264,10 @@ pub mod jet {
         TRANSACTION_DESERIALIZE_ERRORS
             .with_label_values(&[error_type])
             .inc();
+    }
+
+    pub fn increment_banned_transactions_total() {
+        BANNED_TRANSACTIONS_TOTAL.inc();
     }
 
     pub fn get_health_status() -> anyhow::Result<()> {
