@@ -69,7 +69,11 @@ pub struct ConfigJet {
     #[serde(default)]
     pub features: FeatureSet,
 
+    /// Shield configuration
     pub shield: ConfigShield,
+
+    /// Denied identities
+    pub denied_identities: ConfigDeniedIdentities,
 }
 
 #[derive(Debug, Deserialize)]
@@ -522,69 +526,6 @@ where
     }
 }
 
-<<<<<<< HEAD
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigBlocklist {
-    #[serde(default, deserialize_with = "ConfigBlocklist::deserialize_leaders")]
-    pub leaders: HashSet<Pubkey>,
-    #[serde(default, deserialize_with = "ConfigBlocklist::deserialize_leaders")]
-    pub banned_accounts: HashSet<Pubkey>,
-}
-
-impl ConfigBlocklist {
-    fn deserialize_leaders<'de, D>(deserializer: D) -> Result<HashSet<Pubkey>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Debug, Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Leaders {
-            #[serde(default)]
-            files: Vec<String>,
-            #[serde(default)]
-            pubkeys: Vec<String>,
-        }
-
-        let leaders = Leaders::deserialize(deserializer)?;
-
-        let mut pubkeys = leaders
-            .pubkeys
-            .iter()
-            .map(|s| s.parse().map_err(de::Error::custom))
-            .collect::<Result<HashSet<Pubkey>, _>>()?;
-
-        for path in leaders.files {
-            let content = std::fs::read_to_string(path).map_err(de::Error::custom)?;
-            for pubkey in content.lines() {
-                pubkeys.insert(pubkey.parse().map_err(de::Error::custom)?);
-            }
-        }
-
-        Ok(pubkeys)
-    }
-}
-
-#[derive(Debug, Default, Deserialize, Clone)]
-pub struct YellowstoneBlocklist {
-    #[serde(deserialize_with = "YellowstoneBlocklist::deserialize_pubkey")]
-    pub contract_pubkey: Option<Pubkey>,
-}
-
-impl YellowstoneBlocklist {
-    fn deserialize_pubkey<'de, D>(deserializer: D) -> Result<Option<Pubkey>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .parse::<Pubkey>()
-            .map(Some)
-            .map_err(de::Error::custom)
-    }
-}
-
-=======
->>>>>>> origin/main
 ///
 /// THIS CODE HAS BEEN COPY-PASTED FROM THE `jet-gateway` repo
 /// TODO: Refactor this code to be shared common lib.
@@ -613,5 +554,48 @@ pub enum RpcErrorStrategy {
 impl RpcErrorStrategy {
     const fn default_retries() -> NonZeroUsize {
         unsafe { NonZeroUsize::new_unchecked(3) }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigDeniedIdentities {
+    #[serde(
+        default,
+        deserialize_with = "ConfigDeniedIdentities::deserialize_identities"
+    )]
+    pub identities: HashSet<Pubkey>,
+}
+
+impl ConfigDeniedIdentities {
+    fn deserialize_identities<'de, D>(deserializer: D) -> Result<HashSet<Pubkey>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Identities {
+            #[serde(default)]
+            files: Vec<String>,
+            #[serde(default)]
+            pubkeys: Vec<String>,
+        }
+
+        let identities = Identities::deserialize(deserializer)?;
+
+        let mut pubkeys = identities
+            .pubkeys
+            .iter()
+            .map(|s| s.parse().map_err(de::Error::custom))
+            .collect::<Result<HashSet<Pubkey>, _>>()?;
+
+        for path in identities.files {
+            let content = std::fs::read_to_string(path).map_err(de::Error::custom)?;
+            for pubkey in content.lines() {
+                pubkeys.insert(pubkey.parse().map_err(de::Error::custom)?);
+            }
+        }
+
+        Ok(pubkeys)
     }
 }

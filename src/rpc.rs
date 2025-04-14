@@ -1,6 +1,6 @@
 use {
     crate::{
-        blocking_services::BannedAccounts, quic_solana::ConnectionCacheIdentity,
+        blocking_services::AllowTxSigner, quic_solana::ConnectionCacheIdentity,
         solana::sanitize_transaction_support_check, transactions::SendTransactionsPool,
     },
     anyhow::Context as _,
@@ -40,7 +40,7 @@ pub enum RpcServerType {
         rpc: String,
         proxy_sanitize_check: bool,
         proxy_preflight_check: bool,
-        banned_accounts: BannedAccounts,
+        policies: Arc<dyn AllowTxSigner + Send + Sync + 'static>,
     },
 }
 
@@ -107,7 +107,7 @@ impl RpcServer {
                 rpc,
                 proxy_sanitize_check,
                 proxy_preflight_check,
-                banned_accounts,
+                policies,
             } => {
                 use rpc_solana_like::RpcServer;
 
@@ -116,7 +116,7 @@ impl RpcServer {
                     rpc,
                     proxy_sanitize_check,
                     proxy_preflight_check,
-                    banned_accounts,
+                    policies,
                 )
                 .await?;
 
@@ -140,7 +140,7 @@ impl RpcServer {
         rpc: String,
         proxy_sanitize_check: bool,
         proxy_preflight_check: bool,
-        banned_accounts: BannedAccounts,
+        policies: Arc<dyn AllowTxSigner + Send + Sync + 'static>,
     ) -> anyhow::Result<rpc_solana_like::RpcServerImpl> {
         let rpc = Arc::new(SolanaRpcClient::new(rpc));
         let sanitize_supported = sanitize_transaction_support_check(&rpc).await?;
@@ -150,7 +150,7 @@ impl RpcServer {
             rpc,
             proxy_sanitize_check: proxy_sanitize_check && sanitize_supported,
             proxy_preflight_check,
-            banned_accounts,
+            policies,
         })
     }
 
@@ -269,9 +269,10 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            blocking_services::BannedAccounts, payload::RpcSendTransactionConfigWithBlockList,
-            rpc::invalid_params, solana::decode_and_deserialize,
-            transaction_handler::TransactionHandler, transactions::SendTransactionsPool,
+            blocking_services::AllowTxSigner, metrics,
+            payload::RpcSendTransactionConfigWithBlockList, rpc::invalid_params,
+            solana::decode_and_deserialize, transaction_handler::TransactionHandler,
+            transactions::SendTransactionsPool,
         },
         jsonrpsee::{
             core::{async_trait, RpcResult},
@@ -305,7 +306,7 @@ pub mod rpc_solana_like {
         pub rpc: Arc<SolanaRpcClient>,
         pub proxy_sanitize_check: bool,
         pub proxy_preflight_check: bool,
-        pub banned_accounts: BannedAccounts,
+        pub policies: Arc<dyn AllowTxSigner + Send + Sync + 'static>,
     }
 
     impl RpcServerImpl {
@@ -356,7 +357,12 @@ pub mod rpc_solana_like {
                     .ok_or_else(|| invalid_params("unsupported encoding"))?,
             )?;
 
-            if self.banned_accounts.contains_banned_accounts(&transaction) {
+            if self
+                .policies
+                .allow_tx_signer(&config_with_blocklist.blocklist_pdas, &transaction)
+            {
+                metrics::jet::increment_banned_transactions_total();
+
                 return Err(ErrorObject::owned::<()>(
                     INVALID_REQUEST_CODE,
                     "Transaction signer is banned",

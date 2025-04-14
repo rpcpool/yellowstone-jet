@@ -28,10 +28,7 @@ use {
     tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
-<<<<<<< HEAD
-        blocking_services::{BannedAccounts, BlocklistUpdater, LeadersSelector},
-=======
->>>>>>> origin/main
+        blocking_services::{AllowLeader, AllowTxSigner, IdentitiesBlocker},
         cluster_tpu_info::ClusterTpuInfo,
         config::{
             load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream, RpcErrorStrategy,
@@ -358,13 +355,18 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .build()
         .await?;
 
+    let policies = Arc::new(policies);
+
     let local = tokio::task::LocalSet::new();
 
     if let Some(sub) = subscription {
         local.spawn_local(sub);
     }
 
-    let banned_accounts = BannedAccounts::new(config.blocklist.banned_accounts);
+    let identities_blocker = Arc::new(IdentitiesBlocker::new(
+        config.denied_identities.identities,
+        policies,
+    ));
 
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
@@ -408,7 +410,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(cluster_tpu_info.clone()),
         config.quic.clone(),
         Arc::new(quic_session),
-        Arc::new(policies),
+        Arc::clone(&identities_blocker) as Arc<dyn AllowLeader + Send + Sync + 'static>,
     );
 
     let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
@@ -445,7 +447,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             rpc: config.upstream.rpc.clone(),
             proxy_sanitize_check: config.listen_solana_like.proxy_sanitize_check,
             proxy_preflight_check: config.listen_solana_like.proxy_preflight_check,
-            banned_accounts: banned_accounts.clone(),
+            policies: Arc::clone(&identities_blocker)
+                as Arc<dyn AllowTxSigner + Send + Sync + 'static>,
         },
     )
     .await?;
@@ -465,7 +468,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                 config.upstream.rpc.clone(),
                 config.listen_solana_like.proxy_sanitize_check,
                 config.listen_solana_like.proxy_preflight_check,
-                banned_accounts,
+                identities_blocker,
             )
             .await
             .expect("rpc server impl");

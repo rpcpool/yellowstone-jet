@@ -200,13 +200,10 @@ pub mod jet {
         static REGISTER: Once = Once::new();
         REGISTER.call_once(|| {
             register!(BLOCKHASH_QUEUE_LATEST);
-<<<<<<< HEAD
             register!(BANNED_TRANSACTIONS_TOTAL);
             register!(CLUSTER_NODES_TOTAL);
             register!(CLUSTER_LEADERS_SCHEDULE_SIZE);
-=======
             register!(BLOCKHASH_QUEUE_SIZE);
->>>>>>> origin/main
             register!(CLUSTER_IDENTITY_STAKE);
             register!(CLUSTER_LEADERS_SCHEDULE_SIZE);
             register!(CLUSTER_NODES_TOTAL);

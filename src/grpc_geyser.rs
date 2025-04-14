@@ -1,9 +1,5 @@
 use {
     crate::{
-<<<<<<< HEAD
-        blocking_services::BlocklistUpdater,
-=======
->>>>>>> origin/main
         config::ConfigUpstreamGrpc,
         metrics::jet as metrics,
         util::{fork_oneshot, BlockHeight, CommitmentLevel, IncrementalBackoff},
@@ -189,36 +185,6 @@ impl GeyserSubscriber {
                     _ = &mut shutdown_rx => return Ok(()),
                     message = stream.next() => match message {
                         Some(Ok(msg)) => match msg.update_oneof {
-<<<<<<< HEAD
-                            Some(UpdateOneof::Account(SubscribeUpdateAccount{account, ..})) => {
-                                if let Some(acc) = account {
-                                    let pubkey_bytes  = acc.pubkey;
-                                    let owner_bytes = acc.owner;
-
-                                    if owner_bytes.len() == 32 {
-                                        let owner_array: [u8; 32] = owner_bytes.try_into().expect("slice with incorrect length");
-                                        let owner = Pubkey::new_from_array(owner_array);
-                                        if let Some(program_account) = blocklist_program_key{
-                                            if program_account != &owner {
-                                                continue;
-                                            }
-                                        } else {
-                                            continue;
-                                        }
-                                    }
-
-                                    if pubkey_bytes.len() == 32 {
-                                        let pubkey_array: [u8; 32] = pubkey_bytes.try_into().expect("slice with incorrect length");
-                                        let pubkey = Pubkey::new_from_array(pubkey_array);
-                                        leaders_selector.update_list(&acc.data, pubkey).await;
-                                    } else {
-                                        warn!("gRPC: invalid pubkey from contract");
-                                    }
-                                }
-                                continue;
-                            }
-=======
->>>>>>> origin/main
                             Some(UpdateOneof::Slot(SubscribeUpdateSlot { slot, status, .. })) => {
                                 let entry = slot_updates.entry(slot).or_default();
                                 entry.slot = true;

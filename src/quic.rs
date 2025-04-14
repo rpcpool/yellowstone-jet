@@ -1,12 +1,9 @@
 use {
     crate::{
-<<<<<<< HEAD
-        blocking_services::BlockLeaders,
-=======
->>>>>>> origin/main
+        blocking_services::AllowLeader,
         cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
         config::{ConfigQuic, ConfigQuicTpuPort},
-        metrics::jet::{self as metrics, shield_policies_not_found_inc, sts_tpu_denied_inc_by},
+        metrics::jet::{self as metrics, sts_tpu_denied_inc_by},
         quic_solana::{ConnectionCache, ConnectionCacheSendPermit},
         transactions::SendTransactionInfoId,
     },
@@ -18,7 +15,6 @@ use {
     std::{fmt, net::SocketAddr, sync::Arc, time::Duration},
     tokio::{sync::broadcast, time::timeout},
     tracing::{debug, instrument},
-    yellowstone_shield_store::PolicyStoreTrait,
 };
 
 #[derive(Clone)]
@@ -28,7 +24,7 @@ pub struct QuicClient {
     connection_cache: Arc<ConnectionCache>,
     extra_tpu_forward: Vec<TpuInfo>,
     tx_broadcast_metrics: broadcast::Sender<QuicClientMetric>,
-    policies: Arc<dyn PolicyStoreTrait + Send + Sync + 'static>,
+    policies: Arc<dyn AllowLeader + Send + Sync + 'static>,
 }
 
 impl fmt::Debug for QuicClient {
@@ -182,7 +178,7 @@ impl QuicClient {
         upcoming_leader_schedule: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
         config: ConfigQuic,
         connection_cache: Arc<ConnectionCache>,
-        policies: Arc<dyn PolicyStoreTrait + Send + Sync + 'static>,
+        policies: Arc<dyn AllowLeader + Send + Sync + 'static>,
     ) -> Self {
         let extra_tpu_forward = config
             .extra_tpu_forward
@@ -233,21 +229,10 @@ impl QuicClient {
 
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
-        let snapshot = self.policies.snapshot();
-
         let before_policy_check_tpu_infos_count = tpus_info.len();
         let tpus_info: Vec<TpuInfo> = tpus_info
             .into_iter()
-            .filter(
-                |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
-                    Ok(allowed) => allowed,
-                    Err(_) => {
-                        shield_policies_not_found_inc();
-
-                        false
-                    }
-                },
-            )
+            .filter(|tpu_info| self.policies.allow_leader(&policies, &tpu_info.leader))
             .collect();
 
         sts_tpu_denied_inc_by(before_policy_check_tpu_infos_count - tpus_info.len());
@@ -294,21 +279,10 @@ impl QuicClient {
             .await;
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
-        let snapshot = self.policies.snapshot();
-
         let before_policy_check_tpu_infos_count = tpus_info.len();
         let tpus_info: Vec<TpuInfo> = tpus_info
             .into_iter()
-            .filter(
-                |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
-                    Ok(allowed) => allowed,
-                    Err(_) => {
-                        shield_policies_not_found_inc();
-
-                        false
-                    }
-                },
-            )
+            .filter(|tpu_info| self.policies.allow_leader(&policies, &tpu_info.leader))
             .collect();
 
         sts_tpu_denied_inc_by(before_policy_check_tpu_infos_count - tpus_info.len());
