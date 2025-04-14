@@ -93,7 +93,7 @@ pub mod jet {
             Opts::new("sts_tpu_send_total", "Number of transactions sent to TPU"),
             &["leaders"]
         ).unwrap();
-        static ref STS_TPU_BLOCKLISTED_TOTAL: IntCounter = IntCounter::new("sts_tpu_blocklisted_total", "Total number of blocklisted TPUs").unwrap();
+        static ref STS_TPU_DENIED_TOTAL: IntCounter = IntCounter::new("sts_tpu_denied_total", "Total number of denied TPUs by Shield policy").unwrap();
 
         static ref BANNED_TRANSACTIONS_TOTAL: IntCounter = IntCounter::new("banned_transactions_total", "Total number of banned transactions").unwrap();
 
@@ -120,15 +120,16 @@ pub mod jet {
 
         static ref FORWADED_TRANSACTION_LATENCY: HistogramVec = HistogramVec::new(
              HistogramOpts::new("forward_latency", "Latency of transactions forwarded from jet-gateway to a jet instance")
-            .buckets(vec![ //0ms -> 10s
-                0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0,
-                400.0, 450.0, 500.0, 550.0, 600.0, 650.0, 700.0,750.0,
-                800.0, 850.0, 900.0, 950.0, 1000.0, 1500.0, 2000.0, 2500.0,
-                3000.0, 3500.0, 4000.0, 4500.0, 5000.0, 6000.0, 7000.0,
-                8000.0, 9000.0, 10000.0
+            .buckets(vec![
+                  0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0, 5.0,
+                  7.5, 10.0, 12.5, 15.0, 17.5, 20.0, 25.0, 30.0, 35.0, 40.0,
+                  45.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0
             ]),
             &[]
         ).unwrap();
+
+        static ref SHIELD_POLICIES_NOT_FOUND_TOTAL: IntCounter =
+            IntCounter::new("shield_policies_not_found_total", "Number of shield policies not found").unwrap();
 
         static ref TRANSACTION_DECODE_ERRORS: IntCounterVec = IntCounterVec::new(
             Opts::new("transaction_decode_errors_total", "Number of transaction decoding errors (base58/base64)"),
@@ -198,35 +199,41 @@ pub mod jet {
 
         static REGISTER: Once = Once::new();
         REGISTER.call_once(|| {
-            register!(GRPC_SLOT_RECEIVED);
-            register!(BLOCKHASH_QUEUE_SIZE);
             register!(BLOCKHASH_QUEUE_LATEST);
+<<<<<<< HEAD
             register!(BANNED_TRANSACTIONS_TOTAL);
             register!(CLUSTER_NODES_TOTAL);
             register!(CLUSTER_LEADERS_SCHEDULE_SIZE);
+=======
+            register!(BLOCKHASH_QUEUE_SIZE);
+>>>>>>> origin/main
             register!(CLUSTER_IDENTITY_STAKE);
-            register!(ROOTED_TRANSACTIONS_POOL_SIZE);
-            register!(STS_POOL_SIZE);
-            register!(STS_INFLIGHT_SIZE);
-            register!(STS_RECEIVED_TOTAL);
-            register!(STS_LANDED_TOTAL);
-            register!(STS_TPU_SEND);
-            register!(STS_TPU_BLOCKLISTED_TOTAL);
+            register!(CLUSTER_LEADERS_SCHEDULE_SIZE);
+            register!(CLUSTER_NODES_TOTAL);
+            register!(FORWADED_TRANSACTION_LATENCY);
+            register!(GATEWAY_CONNECTED);
+            register!(GRPC_SLOT_RECEIVED);
+            register!(LEADER_MTU);
+            register!(LEADER_RTT);
+            register!(METRICS_UPSTREAM_FEED);
+            register!(METRICS_UPSTREAM_PUSH);
             register!(QUIC_IDENTITY);
             register!(QUIC_IDENTITY_EXPECTED);
             register!(QUIC_SEND_ATTEMPTS);
-            register!(METRICS_UPSTREAM_PUSH);
-            register!(METRICS_UPSTREAM_FEED);
-            register!(GATEWAY_CONNECTED);
-            register!(FORWADED_TRANSACTION_LATENCY);
-            register!(TRANSACTION_DECODE_ERRORS);
-            register!(TRANSACTION_DESERIALIZE_ERRORS);
+            register!(ROOTED_TRANSACTIONS_POOL_SIZE);
+            register!(SEND_TRANSACTION_ATTEMPT);
+            register!(SEND_TRANSACTION_E2E_LATENCY);
             register!(SEND_TRANSACTION_ERROR);
             register!(SEND_TRANSACTION_SUCCESS);
-            register!(LEADER_MTU);
-            register!(LEADER_RTT);
-            register!(SEND_TRANSACTION_E2E_LATENCY);
-            register!(SEND_TRANSACTION_ATTEMPT)
+            register!(SHIELD_POLICIES_NOT_FOUND_TOTAL);
+            register!(STS_INFLIGHT_SIZE);
+            register!(STS_LANDED_TOTAL);
+            register!(STS_POOL_SIZE);
+            register!(STS_RECEIVED_TOTAL);
+            register!(STS_TPU_DENIED_TOTAL);
+            register!(STS_TPU_SEND);
+            register!(TRANSACTION_DECODE_ERRORS);
+            register!(TRANSACTION_DESERIALIZE_ERRORS);
         });
     }
 
@@ -390,8 +397,12 @@ pub mod jet {
             .inc();
     }
 
-    pub fn sts_tpu_blocklisted_inc(blocklisted: usize) {
-        STS_TPU_BLOCKLISTED_TOTAL.inc_by(blocklisted as u64)
+    pub fn sts_tpu_denied_inc_by(denied: usize) {
+        STS_TPU_DENIED_TOTAL.inc_by(denied as u64);
+    }
+
+    pub fn shield_policies_not_found_inc() {
+        SHIELD_POLICIES_NOT_FOUND_TOTAL.inc();
     }
 
     pub fn quic_set_identity(identity: Pubkey) {

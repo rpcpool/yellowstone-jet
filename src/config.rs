@@ -23,6 +23,7 @@ use {
         path::{Path, PathBuf},
     },
     tokio::{fs, time::Duration},
+    yellowstone_shield_store::{NullConfig, VixenConfig},
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -64,16 +65,11 @@ pub struct ConfigJet {
     /// Send metrics to lewis
     pub metrics_upstream: Option<ConfigMetricsUpstream>,
 
-    /// Validators blocklist
-    #[serde(default)]
-    pub blocklist: ConfigBlocklist,
-
-    /// Yellowstone-blocklist
-    #[serde(default)]
-    pub yellowstone_blocklist: YellowstoneBlocklist,
     /// Features Flags
     #[serde(default)]
     pub features: FeatureSet,
+
+    pub shield: ConfigShield,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +115,14 @@ impl ConfigIdentity {
             None => Ok(None),
         }
     }
+}
+
+/// Yellowstone Shield policy store configuration
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigShield {
+    /// Vixen configuration for syncing the shield store
+    pub vixen: VixenConfig<NullConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -518,6 +522,7 @@ where
     }
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigBlocklist {
@@ -578,6 +583,8 @@ impl YellowstoneBlocklist {
     }
 }
 
+=======
+>>>>>>> origin/main
 ///
 /// THIS CODE HAS BEEN COPY-PASTED FROM THE `jet-gateway` repo
 /// TODO: Refactor this code to be shared common lib.
