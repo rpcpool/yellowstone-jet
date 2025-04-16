@@ -16,6 +16,12 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [11.1.3]
+
+### Fixes
+
+- Changed the `blocklistPdas` on the RpcSendTransactionConfigWithBlockList from `Vec<Pubkey>` to  `Option<Vec<String>>`, now supporting base58 encoded pubkeys.
+
 ## [11.1.2]
 
 ### Fixes

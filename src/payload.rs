@@ -60,10 +60,7 @@ impl RpcSendTransactionConfigWithBlockList {
 
     /// Get a safe reference to config or a default config if None
     pub fn get_config(&self) -> RpcSendTransactionConfig {
-        match &self.config {
-            Some(config) => *config,
-            None => RpcSendTransactionConfig::default(),
-        }
+        self.config.unwrap_or(RpcSendTransactionConfig::default())
     }
 }
 
@@ -145,14 +142,11 @@ impl TransactionPayload {
         transaction: &VersionedTransaction,
         config_with_blocklist: &RpcSendTransactionConfigWithBlockList,
     ) -> Result<Self, PayloadError> {
-        let encoding = match config_with_blocklist
+        let encoding = config_with_blocklist
             .config
             .as_ref()
             .and_then(|c| c.encoding)
-        {
-            Some(encoding) => encoding,
-            None => UiTransactionEncoding::Base58,
-        };
+            .unwrap_or(UiTransactionEncoding::Base58);
 
         match encoding {
             UiTransactionEncoding::Base64 | UiTransactionEncoding::Base58 => (),
@@ -160,11 +154,9 @@ impl TransactionPayload {
         }
 
         let tx_str = Self::encode_transaction(transaction, encoding)?;
-
-        let config = match &config_with_blocklist.config {
-            Some(cfg) => *cfg,
-            None => RpcSendTransactionConfig::default(),
-        };
+        let config = config_with_blocklist
+            .config
+            .unwrap_or(RpcSendTransactionConfig::default());
 
         Ok(Self::Legacy(LegacyPayload {
             transaction: tx_str,
@@ -216,17 +208,6 @@ impl TryFrom<SubscribeTransaction> for TransactionPayload {
             }
             Some(Payload::NewPayload(wrapper)) => Ok(Self::New(wrapper)),
             None => Err(PayloadError::EmptyPayload),
-        }
-    }
-}
-
-impl TryFrom<Result<SubscribeTransaction, PayloadError>> for TransactionPayload {
-    type Error = PayloadError;
-
-    fn try_from(result: Result<SubscribeTransaction, PayloadError>) -> Result<Self, Self::Error> {
-        match result {
-            Ok(tx) => tx.try_into(),
-            Err(err) => Err(err),
         }
     }
 }
@@ -293,10 +274,7 @@ impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfigWithBlockList)>
             .unwrap_or(false);
 
         // Get blocklist_pdas safely
-        let blocklist_pdas = match &config_with_blocklist.blocklist_pdas {
-            Some(pdas) => pdas.clone(),
-            None => Vec::new(),
-        };
+        let blocklist_pdas = config_with_blocklist.blocklist_pdas.unwrap_or_default();
 
         // Create new payload format with blocklist_pdas supported
         Ok(Self::New(TransactionWrapper {
@@ -326,11 +304,10 @@ impl TransactionDecoder {
     > {
         match payload {
             TransactionPayload::Legacy(legacy) => {
-                let encoding = match legacy.config.encoding {
-                    Some(enc) => enc,
-                    None => UiTransactionEncoding::Base58,
-                };
-
+                let encoding = legacy
+                    .config
+                    .encoding
+                    .unwrap_or(UiTransactionEncoding::Base58);
                 let tx_bytes =
                     TransactionPayload::decode_transaction(&legacy.transaction, encoding)?;
                 let tx = bincode::deserialize(&tx_bytes)?;
@@ -345,14 +322,7 @@ impl TransactionDecoder {
             }
             TransactionPayload::New(wrapper) => {
                 let tx = bincode::deserialize(&wrapper.transaction)?;
-                let config = if let Some(proto_config) = &wrapper.config {
-                    match proto_config.try_into() {
-                        Ok(config) => Some(config),
-                        Err(err) => return Err(err),
-                    }
-                } else {
-                    None
-                };
+                let config = wrapper.config.as_ref().map(TryInto::try_into).transpose()?;
                 Ok((tx, config))
             }
         }
@@ -363,12 +333,8 @@ impl TryFrom<&TransactionConfig> for RpcSendTransactionConfigWithBlockList {
     type Error = PayloadError;
 
     fn try_from(proto_config: &TransactionConfig) -> Result<Self, Self::Error> {
-        // Convert string pubkeys to actual Pubkey objects, ignoring invalid ones
-        let blocklist_pdas = if proto_config.blocklist_pdas.is_empty() {
-            None
-        } else {
-            Some(proto_config.blocklist_pdas.clone())
-        };
+        let blocklist_pdas = (!proto_config.blocklist_pdas.is_empty())
+            .then_some(proto_config.blocklist_pdas.clone());
 
         Ok(Self {
             config: Some(RpcSendTransactionConfig {
@@ -405,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_format() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_legacy_format() {
         let tx = VersionedTransaction::default();
         let config = RpcSendTransactionConfigWithBlockList {
             config: Some(RpcSendTransactionConfig {
@@ -417,12 +383,16 @@ mod tests {
             blocklist_pdas: None,
         };
 
-        let payload = TransactionPayload::try_from((&tx, config.clone()))?;
+        let payload =
+            TransactionPayload::try_from((&tx, config.clone())).expect("Failed to create payload");
 
-        let proto_tx = payload.to_proto::<SubscribeTransaction>()?;
-        let decoded = TransactionPayload::try_from(proto_tx)?;
+        let proto_tx = payload
+            .to_proto::<SubscribeTransaction>()
+            .expect("Failed to convert to proto");
+        let decoded = TransactionPayload::try_from(proto_tx).expect("Failed to convert from proto");
 
-        let (decoded_tx, decoded_config) = TransactionDecoder::decode(&decoded)?;
+        let (decoded_tx, decoded_config) =
+            TransactionDecoder::decode(&decoded).expect("Failed to decode");
         assert!(decoded_config.is_some());
         let config_with_blocklist = decoded_config.unwrap();
 
@@ -437,13 +407,12 @@ mod tests {
                 .map(|c| c.skip_preflight)
                 .unwrap_or_default()
         );
-        Ok(())
     }
 
     #[test]
-    fn test_new_format_features() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_new_format_features() {
         let tx = VersionedTransaction::default();
-        let tx_bytes = bincode::serialize(&tx)?;
+        let tx_bytes = bincode::serialize(&tx).expect("Failed to serialize transaction");
 
         let wrapper = TransactionWrapper {
             transaction: tx_bytes,
@@ -457,26 +426,27 @@ mod tests {
         };
 
         let payload = TransactionPayload::New(wrapper);
-        let (_, config) = TransactionDecoder::decode(&payload)?;
+        let (_, config) = TransactionDecoder::decode(&payload).expect("Failed to decode");
 
         assert!(config.is_some());
         let config_with_blocklist = config.unwrap();
         assert!(config_with_blocklist.config.is_some());
         let config = config_with_blocklist.config.unwrap();
         assert_eq!(config.max_retries, Some(5));
-        Ok(())
     }
 
     #[test]
-    fn test_new_format() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_new_format() {
         let tx = VersionedTransaction::default();
-        let wrapper = create_test_wrapper(&tx)?;
+        let wrapper = create_test_wrapper(&tx).expect("Failed to create test wrapper");
 
         let payload = TransactionPayload::New(wrapper);
-        let proto_tx = payload.to_proto::<SubscribeTransaction>()?;
-        let decoded = TransactionPayload::try_from(proto_tx)?;
+        let proto_tx = payload
+            .to_proto::<SubscribeTransaction>()
+            .expect("Failed to convert to proto");
+        let decoded = TransactionPayload::try_from(proto_tx).expect("Failed to convert from proto");
 
-        let (decoded_tx, config) = TransactionDecoder::decode(&decoded)?;
+        let (decoded_tx, config) = TransactionDecoder::decode(&decoded).expect("Failed to decode");
         assert!(config.is_some());
         let config_with_blocklist = config.unwrap();
         assert!(config_with_blocklist.config.is_some());
@@ -485,11 +455,10 @@ mod tests {
         assert_eq!(config.max_retries, Some(5));
         assert!(config.skip_preflight);
         assert_eq!(decoded_tx.signatures, tx.signatures);
-        Ok(())
     }
 
     #[test]
-    fn test_config_conversion() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_config_conversion() {
         let proto_config = TransactionConfig {
             max_retries: Some(3),
             blocklist_pdas: vec!["11111111111111111111111111111111".to_string()],
@@ -497,9 +466,9 @@ mod tests {
             skip_sanitize: true,
         };
 
-        let rpc_config_result: Result<RpcSendTransactionConfigWithBlockList, _> =
-            (&proto_config).try_into();
-        let rpc_config = rpc_config_result?;
+        let rpc_config: RpcSendTransactionConfigWithBlockList = (&proto_config)
+            .try_into()
+            .expect("Failed to convert config");
 
         assert!(rpc_config.config.is_some());
         let config = rpc_config.config.unwrap();
@@ -510,11 +479,10 @@ mod tests {
         assert_eq!(config.min_context_slot, None);
         assert!(rpc_config.blocklist_pdas.is_some());
         assert_eq!(rpc_config.blocklist_pdas.as_ref().map(|v| v.len()), Some(1));
-        Ok(())
     }
 
     #[test]
-    fn test_config_invalid_pubkey_conversion() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_config_invalid_pubkey_conversion() {
         let proto_config = TransactionConfig {
             max_retries: Some(3),
             blocklist_pdas: vec![
@@ -525,19 +493,17 @@ mod tests {
             skip_sanitize: true,
         };
 
-        let rpc_config_result: Result<RpcSendTransactionConfigWithBlockList, _> =
-            (&proto_config).try_into();
-        // Now we expect success (we no longer validate pubkeys at this stage)
-        assert!(rpc_config_result.is_ok());
+        let rpc_config: RpcSendTransactionConfigWithBlockList = (&proto_config)
+            .try_into()
+            .expect("Failed to convert config");
 
-        let rpc_config = rpc_config_result?;
         assert!(rpc_config.blocklist_pdas.is_some());
-        assert_eq!(rpc_config.blocklist_pdas.as_ref().map(|v| v.len()), Some(2)); // Both pubkeys are kept
-        Ok(())
+        assert_eq!(rpc_config.blocklist_pdas.as_ref().map(|v| v.len()), Some(2));
+        // Both pubkeys are kept
     }
 
     #[test]
-    fn test_transaction_config_sanitize_flags() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_transaction_config_sanitize_flags() {
         let tx = VersionedTransaction::default();
         let config = RpcSendTransactionConfigWithBlockList {
             config: Some(RpcSendTransactionConfig {
@@ -549,11 +515,14 @@ mod tests {
             blocklist_pdas: None,
         };
 
-        let payload = TransactionPayload::try_from((&tx, config))?;
-        let proto_tx = payload.to_proto::<SubscribeTransaction>()?;
+        let payload =
+            TransactionPayload::try_from((&tx, config)).expect("Failed to create payload");
+        let proto_tx = payload
+            .to_proto::<SubscribeTransaction>()
+            .expect("Failed to convert to proto");
 
-        let decoded = TransactionPayload::try_from(proto_tx)?;
-        let (_, decoded_config) = TransactionDecoder::decode(&decoded)?;
+        let decoded = TransactionPayload::try_from(proto_tx).expect("Failed to convert from proto");
+        let (_, decoded_config) = TransactionDecoder::decode(&decoded).expect("Failed to decode");
 
         assert!(decoded_config.is_some());
         let config_with_blocklist = decoded_config.unwrap();
@@ -561,11 +530,10 @@ mod tests {
         let decoded_config = config_with_blocklist.config.unwrap();
         assert!(decoded_config.skip_preflight);
         assert!(decoded_config.skip_sanitize);
-        Ok(())
     }
 
     #[test]
-    fn test_config_preservation_through_conversion() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_config_preservation_through_conversion() {
         let tx = VersionedTransaction::default();
         let original_config = RpcSendTransactionConfigWithBlockList {
             config: Some(RpcSendTransactionConfig {
@@ -579,8 +547,9 @@ mod tests {
             blocklist_pdas: None,
         };
 
-        let payload = TransactionPayload::try_from((&tx, original_config.clone()))?;
-        let (_, decoded_config) = TransactionDecoder::decode(&payload)?;
+        let payload = TransactionPayload::try_from((&tx, original_config.clone()))
+            .expect("Failed to create payload");
+        let (_, decoded_config) = TransactionDecoder::decode(&payload).expect("Failed to decode");
 
         assert!(decoded_config.is_some());
         let config_with_blocklist = decoded_config.unwrap();
@@ -606,7 +575,6 @@ mod tests {
                 .map(|c| c.skip_sanitize)
                 .unwrap_or_default()
         );
-        Ok(())
     }
 
     #[test]
@@ -624,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_config_conversion() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_empty_config_conversion() {
         let proto_config = TransactionConfig {
             max_retries: None,
             blocklist_pdas: vec![],
@@ -632,9 +600,9 @@ mod tests {
             skip_sanitize: false,
         };
 
-        let rpc_config_result: Result<RpcSendTransactionConfigWithBlockList, _> =
-            (&proto_config).try_into();
-        let rpc_config = rpc_config_result?;
+        let rpc_config: RpcSendTransactionConfigWithBlockList = (&proto_config)
+            .try_into()
+            .expect("Failed to convert config");
 
         assert!(rpc_config.config.is_some());
         let config = rpc_config.config.unwrap();
@@ -642,11 +610,10 @@ mod tests {
         assert!(!config.skip_preflight);
         assert!(!config.skip_sanitize);
         assert!(rpc_config.blocklist_pdas.is_none());
-        Ok(())
     }
 
     #[test]
-    fn test_blocklist_pdas_conversion() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_blocklist_pdas_conversion() {
         let tx = VersionedTransaction::default();
         let config = RpcSendTransactionConfigWithBlockList {
             config: Some(RpcSendTransactionConfig::default()),
@@ -656,8 +623,9 @@ mod tests {
             ]),
         };
 
-        let payload = TransactionPayload::try_from((&tx, config.clone()))?;
-        let (_, decoded_config) = TransactionDecoder::decode(&payload)?;
+        let payload =
+            TransactionPayload::try_from((&tx, config.clone())).expect("Failed to create payload");
+        let (_, decoded_config) = TransactionDecoder::decode(&payload).expect("Failed to decode");
 
         assert!(decoded_config.is_some());
         let decoded_blocklist = decoded_config.unwrap().blocklist_pdas;
@@ -666,11 +634,10 @@ mod tests {
         assert_eq!(blocklist.len(), 2);
         assert_eq!(blocklist[0], "11111111111111111111111111111111");
         assert_eq!(blocklist[1], "22222222222222222222222222222222");
-        Ok(())
     }
 
     #[test]
-    fn test_blocklist_pubkeys_conversion() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_blocklist_pubkeys_conversion() {
         let config = RpcSendTransactionConfigWithBlockList {
             config: None,
             blocklist_pdas: Some(vec![
@@ -681,7 +648,5 @@ mod tests {
 
         let pubkeys = config.blocklist_pubkeys();
         assert_eq!(pubkeys.len(), 1); // Only the valid pubkey should be included
-
-        Ok(())
     }
 }
