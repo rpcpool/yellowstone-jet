@@ -57,11 +57,6 @@ impl RpcSendTransactionConfigWithBlockList {
             None => Vec::new(),
         }
     }
-
-    /// Get a safe reference to config or a default config if None
-    pub fn get_config(&self) -> RpcSendTransactionConfig {
-        self.config.unwrap_or(RpcSendTransactionConfig::default())
-    }
 }
 
 #[derive(Debug, Error)]
@@ -154,9 +149,7 @@ impl TransactionPayload {
         }
 
         let tx_str = Self::encode_transaction(transaction, encoding)?;
-        let config = config_with_blocklist
-            .config
-            .unwrap_or(RpcSendTransactionConfig::default());
+        let config = config_with_blocklist.config.unwrap_or_default();
 
         Ok(Self::Legacy(LegacyPayload {
             transaction: tx_str,
