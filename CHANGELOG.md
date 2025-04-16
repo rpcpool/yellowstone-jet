@@ -15,6 +15,8 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Features
 
+- Added support for Yellowstone Shield transaction filtering. When enabled via `shield.enabled`, applies access control policies to determine which transactions can be forwarded to leader nodes.
+
 ### Fixes
 
 ## [11.1.3]
@@ -27,8 +29,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-- Added stake-based max_streams formula when creating QUIC connection in `QuicPool` so max stream per connection is
-derived from current stake weight.
+- Added stake-based max_streams formula when creating QUIC connection in `QuicPool` so max stream per connection is derived from current stake weight.
 - Remove custom max_stream from configuration options, it should stay dynamic and computed based off validator stake.
 
 ## [11.1.1]

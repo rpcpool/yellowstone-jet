@@ -24,7 +24,7 @@ pub struct QuicClient {
     connection_cache: Arc<ConnectionCache>,
     extra_tpu_forward: Vec<TpuInfo>,
     tx_broadcast_metrics: broadcast::Sender<QuicClientMetric>,
-    shield_policy_store: Arc<dyn PolicyStoreTrait + Send + Sync + 'static>,
+    shield_policy_store: Option<Arc<dyn PolicyStoreTrait + Send + Sync + 'static>>,
 }
 
 impl fmt::Debug for QuicClient {
@@ -178,7 +178,7 @@ impl QuicClient {
         upcoming_leader_schedule: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
         config: ConfigQuic,
         connection_cache: Arc<ConnectionCache>,
-        shield_policy_store: Arc<dyn PolicyStoreTrait + Send + Sync + 'static>,
+        shield_policy_store: Option<Arc<dyn PolicyStoreTrait + Send + Sync + 'static>>,
     ) -> Self {
         let extra_tpu_forward = config
             .extra_tpu_forward
@@ -229,22 +229,27 @@ impl QuicClient {
 
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
-        let snapshot = self.shield_policy_store.snapshot();
+        let tpus_info = if let Some(store) = self.shield_policy_store.as_ref() {
+            let snapshot = store.snapshot();
+
+            tpus_info
+                .into_iter()
+                .filter(
+                    |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
+                        Ok(allowed) => allowed,
+                        Err(_) => {
+                            shield_policies_not_found_inc();
+
+                            false
+                        }
+                    },
+                )
+                .collect()
+        } else {
+            tpus_info
+        };
 
         let before_policy_check_tpu_infos_count = tpus_info.len();
-        let tpus_info: Vec<TpuInfo> = tpus_info
-            .into_iter()
-            .filter(
-                |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
-                    Ok(allowed) => allowed,
-                    Err(_) => {
-                        shield_policies_not_found_inc();
-
-                        false
-                    }
-                },
-            )
-            .collect();
 
         sts_tpu_denied_inc_by(before_policy_check_tpu_infos_count - tpus_info.len());
 
@@ -290,22 +295,26 @@ impl QuicClient {
             .await;
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
-        let snapshot = self.shield_policy_store.snapshot();
-
         let before_policy_check_tpu_infos_count = tpus_info.len();
-        let tpus_info: Vec<TpuInfo> = tpus_info
-            .into_iter()
-            .filter(
-                |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
-                    Ok(allowed) => allowed,
-                    Err(_) => {
-                        shield_policies_not_found_inc();
+        let tpus_info = if let Some(store) = self.shield_policy_store.as_ref() {
+            let snapshot = store.snapshot();
 
-                        false
-                    }
-                },
-            )
-            .collect();
+            tpus_info
+                .into_iter()
+                .filter(
+                    |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
+                        Ok(allowed) => allowed,
+                        Err(_) => {
+                            shield_policies_not_found_inc();
+
+                            false
+                        }
+                    },
+                )
+                .collect()
+        } else {
+            tpus_info
+        };
 
         sts_tpu_denied_inc_by(before_policy_check_tpu_infos_count - tpus_info.len());
 
