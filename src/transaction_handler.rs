@@ -117,7 +117,7 @@ impl TransactionHandler {
             transaction,
             wire_transaction,
             max_retries: config.max_retries,
-            blocklist_pdas: config_with_blocklist.blocklist_pdas,
+            blocklist_pdas: config_with_blocklist.blocklist_pubkeys(),
         }) {
             return Err(TransactionHandlerError::SendFailed(error.to_string()));
         }
@@ -143,7 +143,7 @@ impl TransactionHandler {
             transaction,
             wire_transaction,
             max_retries: config.max_retries,
-            blocklist_pdas: config_with_blocklist.blocklist_pdas,
+            blocklist_pdas: config_with_blocklist.blocklist_pubkeys(),
         }) {
             return Err(TransactionHandlerError::SendFailed(error.to_string()));
         }
