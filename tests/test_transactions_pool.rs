@@ -51,7 +51,7 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
         signature: tx.signatures[0],
         wire_transaction,
         transaction: tx,
-        blocklist_pdas: vec![],
+        policies: vec![],
     }
 }
 
@@ -140,7 +140,7 @@ impl TxChannel for SpyTxChannel {
     async fn reserve(
         &self,
         _leader_forward_count: usize,
-        _blocklist_keys: Vec<Pubkey>,
+        _policies: Vec<Pubkey>,
     ) -> Option<BoxedTxChannelPermit> {
         let mode = Arc::clone(&self.mode);
         let curr_mode = { mode.lock().unwrap().clone() };
@@ -190,7 +190,7 @@ async fn test_transaction_send_successful_lifecycle() {
         async fn reserve(
             &self,
             _leader_forward_count: usize,
-            _blocklist_keys: Vec<Pubkey>,
+            _policies: Vec<Pubkey>,
         ) -> Option<BoxedTxChannelPermit> {
             let permit = MockTxChannelPermit {
                 tx: self.tx.clone(),
@@ -306,7 +306,7 @@ async fn it_should_flush_pending_tx() {
         async fn reserve(
             &self,
             _leader_forward_count: usize,
-            _blocklist_keys: Vec<Pubkey>,
+            _policies: Vec<Pubkey>,
         ) -> Option<BoxedTxChannelPermit> {
             let calls = Arc::clone(&self.calls);
             let wait = Arc::clone(&self.wait);
@@ -559,7 +559,7 @@ async fn it_should_not_retry_tx_that_become_finalized() {
         async fn reserve(
             &self,
             _leader_forward_count: usize,
-            _blocklist_keys: Vec<Pubkey>,
+            _policies: Vec<Pubkey>,
         ) -> Option<BoxedTxChannelPermit> {
             let permit = MockTxChannelPermit {
                 send_calls: Arc::clone(&self.send_calls),

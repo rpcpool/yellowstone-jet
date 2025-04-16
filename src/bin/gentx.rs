@@ -37,7 +37,7 @@ use {
     },
     tracing::{error, info},
     yellowstone_jet::{
-        payload::{RpcSendTransactionConfigWithBlockList, TransactionPayload},
+        payload::{RpcSendTransactionConfigWithForwardingPolicies, TransactionPayload},
         proto::jet::{
             jet_gateway_client::JetGatewayClient, publish_request::Message as PublishMessage,
             PublishRequest, PublishResponse, PublishTransaction,
@@ -97,9 +97,9 @@ struct Config {
     #[serde(default)]
     pub max_retries: Option<usize>,
 
-    /// List of program derived addresses to blocklistS
+    /// List of
     #[serde(default)]
-    pub blocklist_pdas: Vec<String>,
+    pub forwarding_policies: Vec<String>,
 }
 
 impl Config {
@@ -186,12 +186,12 @@ impl TransactionSender {
     async fn send(
         &self,
         transaction: VersionedTransaction,
-        config: RpcSendTransactionConfigWithBlockList,
+        config: RpcSendTransactionConfigWithForwardingPolicies,
         should_use_legacy_txn: bool,
     ) -> anyhow::Result<Signature> {
         match self {
             Self::Jet { rpc } => rpc
-                .send_transaction_with_config(&transaction, config.config.unwrap_or_default())
+                .send_transaction_with_config(&transaction, config.config)
                 .await
                 .map_err(Into::into),
             Self::JetGateway { tx } => {
@@ -315,8 +315,8 @@ async fn main() -> anyhow::Result<()> {
             let signature = transaction.signatures[0];
             info!("generate transaction {signature} with send lamports {lamports}");
 
-           let config = RpcSendTransactionConfigWithBlockList {
-                config: Some(RpcSendTransactionConfig {
+           let config = RpcSendTransactionConfigWithForwardingPolicies::new(
+                Some(RpcSendTransactionConfig {
                     skip_preflight: true,
                     skip_sanitize: false,
                     preflight_commitment: Some(CommitmentLevel::Finalized),
@@ -324,8 +324,8 @@ async fn main() -> anyhow::Result<()> {
                     max_retries: config.max_retries,
                     min_context_slot: None,
                 }),
-                  blocklist_pdas: Some(config.blocklist_pdas),
-            };
+                  Some(config.forwarding_policies),
+           );
             match sender.send(transaction, config, should_use_legacy_txn).await {
                 Ok(send_signature) => {
                     anyhow::ensure!(signature == send_signature, "received invalid signature from sender");
