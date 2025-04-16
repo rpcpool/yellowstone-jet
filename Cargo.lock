@@ -3282,19 +3282,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prometheus_push"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10dabce303b010b9e0d80cf75a3fbfba934f544c1245cb282aaf15e24d99bfb6"
-dependencies = [
- "log",
- "prometheus",
- "reqwest 0.12.15",
- "thiserror 1.0.69",
- "url",
-]
-
-[[package]]
 name = "prost"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7256,7 +7243,6 @@ dependencies = [
  "maplit",
  "pin-project",
  "prometheus",
- "prometheus_push",
  "prost",
  "prost-types",
  "protobuf-src",

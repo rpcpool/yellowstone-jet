@@ -33,7 +33,6 @@ lru = "0.12.3"
 maplit = "1.0.2"
 pin-project = "1.1.5"
 prometheus = "0.13.3"
-prometheus_push = {version = "0.4.5", features = ["prometheus_crate", "non_blocking", "with_reqwest"]}
 prost = "0.13.3"
 prost-types = "0.13.3"
 quinn = "0.11.6"

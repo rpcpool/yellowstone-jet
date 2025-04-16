@@ -21,7 +21,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Features
 - Version added to metadata to jet-gateway using subscribe request.
-- Added support for Prometheus push-gateway.
+- Added support for pushing metrics to vmAgent.
 
 ## [11.1.2]
 

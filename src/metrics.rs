@@ -40,6 +40,29 @@ fn init2() {
     });
 }
 
+pub fn inject_job_label(metrics: &str, job: &str, instance: &str) -> String {
+    metrics
+        .lines()
+        .map(|line| {
+            if line.starts_with("#") {
+                line.to_string()
+            } else if let Some(pos) = line.find('{') {
+                let (metric_name, rest) = line.split_at(pos + 1);
+                format!(
+                    r#"{}job="{}", instance="{}", {rest}"#,
+                    metric_name, job, instance
+                )
+            } else if let Some(pos) = line.find(' ') {
+                let (metric_name, value) = line.split_at(pos);
+                format!(r#"{metric_name}{{job="{job}", instance="{instance}"}}{value}"#)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn collect_to_text() -> String {
     TextEncoder::new()
         .encode_to_string(&REGISTRY.gather())

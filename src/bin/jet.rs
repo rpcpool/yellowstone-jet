@@ -3,8 +3,6 @@ use {
     clap::{Parser, Subcommand},
     futures::future::{self, Either, FutureExt},
     jsonrpsee::http_client::HttpClientBuilder,
-    prometheus::labels,
-    prometheus_push::prometheus_crate::PrometheusMetricsPusher,
     reqwest::{Client, Url},
     solana_client::rpc_client::RpcClientConfig,
     solana_rpc_client::http_sender::HttpSender,
@@ -33,14 +31,14 @@ use {
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{
-            load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream, PushGateway,
-            RpcErrorStrategy,
+            load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream,
+            RpcErrorStrategy, VmAgentConfig,
         },
         feature_flags::FeatureSet,
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_jet::GrpcServer,
         grpc_metrics::GrpcClient as GrpcMetricsClient,
-        metrics::{jet as metrics, REGISTRY},
+        metrics::{collect_to_text, inject_job_label, jet as metrics},
         quic::{QuicClient, QuicClientMetric},
         quic_solana::ConnectionCache,
         rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType},
@@ -552,8 +550,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         });
     }
 
-    if let Some(config_push_gw) = config.push_gw {
-        let push_gw_task = spawn_push_gateway(quic_identity_observer, config_push_gw).await?;
+    if let Some(config_vm_agent) = config.vm_agent {
+        let push_gw_task = spawn_push_vmagent(quic_identity_observer, config_vm_agent).await?;
         tg.spawn_cancelable("prometheus_push_gw", async move {
             push_gw_task.await.expect("prometheus_push_gw");
         })
@@ -583,14 +581,13 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .await
 }
 
-async fn spawn_push_gateway(
+async fn spawn_push_vmagent(
     identity_observer: ValueObserver<PubkeySigner>,
-    config: PushGateway,
+    config: VmAgentConfig,
 ) -> anyhow::Result<JoinHandle<()>> {
-    let push_gateway = Url::parse(&config.url).expect("");
+    let vm_agent_url = Url::parse(&config.url).expect("");
     let mut interval = tokio::time::interval(config.push_interval);
     let client = Client::new();
-    let metrics_pusher = PrometheusMetricsPusher::from(client, &push_gateway)?;
 
     Ok(tokio::spawn(async move {
         loop {
@@ -598,8 +595,11 @@ async fn spawn_push_gateway(
             _ = interval.tick() => {
                 let current_identity = identity_observer.get_current().pubkey();
 
-                if let Err(error) = metrics_pusher
-                    .push_all(&current_identity.to_string(), &labels! { "jet" => "metrics" }, REGISTRY.gather())
+                if let Err(error) = client
+                    .post(vm_agent_url.clone())
+                    .header("Content-Type", "text/plain")
+                    .body(inject_job_label(&collect_to_text(), "jet", &current_identity.to_string()))
+                    .send()
                     .await {
                         warn!(?error, "Error pushing metrics");
                     }
