@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Note:** Version 0 of Semantic Versioning is handled differently from version 1 and above.
 The minor version will be incremented upon a breaking change and the patch version will be incremented for features.
 
+
 ## [Unreleased]
 
 ### Breaking Changes
@@ -15,6 +16,12 @@ The minor version will be incremented upon a breaking change and the patch versi
 ### Features
 
 ### Fixes
+
+## [11.1.3]
+
+### Features
+- Version added to metadata to jet-gateway using subscribe request.
+- Added support for pushing metrics to vmAgent.
 
 ## [11.1.2]
 
