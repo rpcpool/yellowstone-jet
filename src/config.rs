@@ -70,7 +70,7 @@ pub struct ConfigJet {
     pub features: FeatureSet,
 
     /// Prometheus Push Gateway
-    pub vm_agent: Option<VmAgentConfig>,
+    pub prometheus: Option<PrometheusConfig>,
 
     /// Config Shield
     pub shield: ConfigShield,
@@ -558,16 +558,16 @@ impl RpcErrorStrategy {
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
-pub struct VmAgentConfig {
+pub struct PrometheusConfig {
     pub url: String,
     #[serde(
-        default = "VmAgentConfig::default_push_interval",
+        default = "PrometheusConfig::default_push_interval",
         with = "humantime_serde"
     )]
     pub push_interval: Duration,
 }
 
-impl VmAgentConfig {
+impl PrometheusConfig {
     const fn default_push_interval() -> Duration {
         Duration::from_secs(10)
     }

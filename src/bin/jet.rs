@@ -32,7 +32,7 @@ use {
         cluster_tpu_info::ClusterTpuInfo,
         config::{
             load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream,
-            RpcErrorStrategy, VmAgentConfig,
+            PrometheusConfig, RpcErrorStrategy,
         },
         feature_flags::FeatureSet,
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
@@ -550,8 +550,9 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         });
     }
 
-    if let Some(config_vm_agent) = config.vm_agent {
-        let push_gw_task = spawn_push_vmagent(quic_identity_observer, config_vm_agent).await?;
+    if let Some(config_prometheus) = config.prometheus {
+        let push_gw_task =
+            spawn_push_prometheus_metrics(quic_identity_observer, config_prometheus).await?;
         tg.spawn_cancelable("prometheus_push_gw", async move {
             push_gw_task.await.expect("prometheus_push_gw");
         })
@@ -581,11 +582,11 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .await
 }
 
-async fn spawn_push_vmagent(
+async fn spawn_push_prometheus_metrics(
     identity_observer: ValueObserver<PubkeySigner>,
-    config: VmAgentConfig,
+    config: PrometheusConfig,
 ) -> anyhow::Result<JoinHandle<()>> {
-    let vm_agent_url = Url::parse(&config.url).expect("");
+    let prometheus_url = Url::parse(&config.url).expect("");
     let mut interval = tokio::time::interval(config.push_interval);
     let client = Client::new();
 
@@ -596,7 +597,7 @@ async fn spawn_push_vmagent(
                 let current_identity = identity_observer.get_current().pubkey();
 
                 if let Err(error) = client
-                    .post(vm_agent_url.clone())
+                    .post(prometheus_url.clone())
                     .header("Content-Type", "text/plain")
                     .body(inject_job_label(&collect_to_text(), "jet", &current_identity.to_string()))
                     .send()
