@@ -28,6 +28,7 @@ use {
         rpc::rpc_solana_like::RpcServerImpl as RpcServerImplSolanaLike,
         stake::StakeInfoMap,
         util::{ms_since_epoch, IncrementalBackoff},
+        version::VERSION,
     },
     anyhow::Context,
     futures::{
@@ -55,6 +56,7 @@ use {
 pub const DEFAULT_LOCK_KEY: &str = "jet-gateway";
 
 const X_ONE_TIME_AUTH_TOKEN: &str = "x-one-time-auth-token";
+const X_JET_VERSION: &str = "x-jet-version";
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransactionHandlerError {
@@ -214,6 +216,15 @@ pub async fn grpc_subscribe_jet_gw(
     subscribe_req.metadata_mut().insert(
         X_ONE_TIME_AUTH_TOKEN,
         bs58_otak
+            .try_into()
+            .expect("failed to convert to AsciiMetadataValue"),
+    );
+
+    let version = serde_json::to_string(&VERSION)?;
+
+    subscribe_req.metadata_mut().insert(
+        X_JET_VERSION,
+        version
             .try_into()
             .expect("failed to convert to AsciiMetadataValue"),
     );

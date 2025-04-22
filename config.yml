@@ -140,3 +140,7 @@ quic:
 features:
   enabled_features:
     - transaction_payload_v2
+
+
+prometheus: 
+  url: http://127.0.0.1:8429/api/v1/import/prometheus

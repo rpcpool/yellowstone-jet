@@ -3,6 +3,7 @@ use {
     clap::{Parser, Subcommand},
     futures::future::{self, Either, FutureExt},
     jsonrpsee::http_client::HttpClientBuilder,
+    reqwest::{Client, Url},
     solana_client::rpc_client::RpcClientConfig,
     solana_rpc_client::http_sender::HttpSender,
     solana_sdk::{
@@ -30,13 +31,14 @@ use {
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{
-            load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream, RpcErrorStrategy,
+            load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream,
+            PrometheusConfig, RpcErrorStrategy,
         },
         feature_flags::FeatureSet,
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_jet::GrpcServer,
         grpc_metrics::GrpcClient as GrpcMetricsClient,
-        metrics::jet as metrics,
+        metrics::{collect_to_text, inject_job_label, jet as metrics},
         quic::{QuicClient, QuicClientMetric},
         quic_solana::ConnectionCache,
         rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType},
@@ -450,7 +452,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             None
         } else {
             let jet_gw_config = config_jet_gateway.clone();
-            let quic_identity_observer = quic_identity_observer;
+            let quic_identity_observer = quic_identity_observer.clone();
             let expected_identity = config.identity.expected;
 
             let tx_sender = RpcServer::create_solana_like_rpc_server_impl(
@@ -548,6 +550,14 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         });
     }
 
+    if let Some(config_prometheus) = config.prometheus {
+        let push_gw_task =
+            spawn_push_prometheus_metrics(quic_identity_observer, config_prometheus).await?;
+        tg.spawn_cancelable("prometheus_push_gw", async move {
+            push_gw_task.await.expect("prometheus_push_gw");
+        })
+    }
+
     tg.spawn_cancelable("SIGINT", async move {
         sigint.recv().await;
         info!("SIGINT received...");
@@ -570,4 +580,32 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             Ok(())
         })
         .await
+}
+
+async fn spawn_push_prometheus_metrics(
+    identity_observer: ValueObserver<PubkeySigner>,
+    config: PrometheusConfig,
+) -> anyhow::Result<JoinHandle<()>> {
+    let prometheus_url = Url::parse(&config.url).expect("");
+    let mut interval = tokio::time::interval(config.push_interval);
+    let client = Client::new();
+
+    Ok(tokio::spawn(async move {
+        loop {
+            tokio::select! {
+            _ = interval.tick() => {
+                let current_identity = identity_observer.get_current().pubkey();
+
+                if let Err(error) = client
+                    .post(prometheus_url.clone())
+                    .header("Content-Type", "text/plain")
+                    .body(inject_job_label(&collect_to_text(), "jet", &current_identity.to_string()))
+                    .send()
+                    .await {
+                        warn!(?error, "Error pushing metrics");
+                    }
+                }
+            }
+        }
+    }))
 }
