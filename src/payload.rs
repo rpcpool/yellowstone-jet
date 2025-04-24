@@ -36,7 +36,21 @@ use {
 pub struct RpcSendTransactionConfigWithForwardingPolicies {
     #[serde(flatten)]
     pub config: RpcSendTransactionConfig,
+    #[serde(default, deserialize_with = "deserialize_forwarding_policies")]
     pub forwarding_policies: Vec<Pubkey>,
+}
+
+fn deserialize_forwarding_policies<'de, D>(deserializer: D) -> Result<Vec<Pubkey>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let vec: Vec<String> = Vec::deserialize(deserializer)?;
+    let result = vec
+        .into_iter()
+        .filter_map(|s| Pubkey::from_str(&s).ok())
+        .collect();
+
+    Ok(result)
 }
 
 impl RpcSendTransactionConfigWithForwardingPolicies {
