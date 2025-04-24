@@ -49,7 +49,7 @@ use {
         transactions::{GrpcRootedTxReceiver, SendTransactionsPool},
         util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
     },
-    yellowstone_shield_store::{BuiltPolicyStore, PolicyStoreBuilder},
+    yellowstone_shield_store::{BuiltPolicyStore, PolicyStoreBuilder, PolicyStoreTrait},
 };
 
 #[derive(Debug, Parser)]
@@ -345,22 +345,28 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await;
 
-    let policies_rpc_client =
-        solana_client::nonblocking::rpc_client::RpcClient::new(config.upstream.rpc.clone());
-    let BuiltPolicyStore {
-        policies,
-        subscription,
-    } = PolicyStoreBuilder::new()
-        .rpc(policies_rpc_client)
-        .vixen(config.shield.vixen)
-        .build()
-        .await?;
-
     let local = tokio::task::LocalSet::new();
 
-    if let Some(sub) = subscription {
-        local.spawn_local(sub);
-    }
+    let shield_policy_store = if config.shield.enabled {
+        let rpc =
+            solana_client::nonblocking::rpc_client::RpcClient::new(config.upstream.rpc.clone());
+        let BuiltPolicyStore {
+            subscription,
+            policies,
+        } = PolicyStoreBuilder::new()
+            .rpc(rpc)
+            .vixen(config.upstream.primary_grpc.clone().into())
+            .build()
+            .await?;
+
+        if let Some(sub) = subscription {
+            local.spawn_local(sub);
+        }
+
+        Some(Arc::new(policies) as Arc<dyn PolicyStoreTrait + Send + Sync>)
+    } else {
+        None
+    };
 
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
@@ -404,7 +410,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(cluster_tpu_info.clone()),
         config.quic.clone(),
         Arc::new(quic_session),
-        Arc::new(policies),
+        shield_policy_store,
     );
 
     let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();

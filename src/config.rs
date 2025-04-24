@@ -23,7 +23,7 @@ use {
         path::{Path, PathBuf},
     },
     tokio::{fs, time::Duration},
-    yellowstone_shield_store::{NullConfig, VixenConfig},
+    yellowstone_shield_store::{BufferConfig, NullConfig, OptConfig, VixenConfig},
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -73,6 +73,7 @@ pub struct ConfigJet {
     pub prometheus: Option<PrometheusConfig>,
 
     /// Config Shield
+    #[serde(default)]
     pub shield: ConfigShield,
 }
 
@@ -122,11 +123,10 @@ impl ConfigIdentity {
 }
 
 /// Yellowstone Shield policy store configuration
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigShield {
-    /// Vixen configuration for syncing the shield store
-    pub vixen: VixenConfig<NullConfig>,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +199,20 @@ pub struct ConfigUpstreamGrpc {
 impl ConfigUpstreamGrpc {
     fn default_endpoint() -> String {
         "http://127.0.0.1:10000".to_owned()
+    }
+}
+
+impl From<ConfigUpstreamGrpc> for VixenConfig<NullConfig> {
+    fn from(ConfigUpstreamGrpc { endpoint, x_token }: ConfigUpstreamGrpc) -> Self {
+        Self {
+            yellowstone: yellowstone_shield_store::YellowstoneConfig {
+                endpoint,
+                x_token,
+                timeout: 60,
+            },
+            buffer: BufferConfig::default(),
+            metrics: OptConfig::default(),
+        }
     }
 }
 
