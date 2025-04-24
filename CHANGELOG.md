@@ -15,9 +15,16 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Features
 
-- Added support for Yellowstone Shield transaction filtering. When enabled via `shield.enabled`, applies access control policies to determine which transactions can be forwarded to leader nodes.
-
 ### Fixes
+
+## [11.2.0]
+
+### Features
+- Added support for Yellowstone Shield transaction filtering. When enabled via `shield.enabled`, applies access control policies to determine which transactions can be forwarded to leader nodes.
+- Changed `RpcSendTransactionConfigWithBlocklist` to `RpcSendTransactionConfigWithForwardingPolicies` and renamed all related fields from `blocklist` to `forwarding_policies` 
+- Updated protocol buffer definition field from `repeated string blocklist_pdas = 4` to `repeated string forwarding_policies = 4` for consistency
+- Added support for base58-encoded public keys in `forwarding_policies` field with automatic validation and filtering of invalid keys
+- Made `forwarding_policies` optional with a default empty vector when not specified in JSON RPC requests
 
 ## [11.1.3]
 
