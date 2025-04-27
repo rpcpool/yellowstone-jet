@@ -37,7 +37,7 @@ use {
     },
     tracing::{error, info},
     yellowstone_jet::{
-        payload::{RpcSendTransactionConfigWithForwardingPolicies, TransactionPayload},
+        payload::{JetRpcSendTransactionConfig, TransactionPayload},
         proto::jet::{
             jet_gateway_client::JetGatewayClient, publish_request::Message as PublishMessage,
             PublishRequest, PublishResponse, PublishTransaction,
@@ -186,7 +186,7 @@ impl TransactionSender {
     async fn send(
         &self,
         transaction: VersionedTransaction,
-        config: RpcSendTransactionConfigWithForwardingPolicies,
+        config: JetRpcSendTransactionConfig,
         should_use_legacy_txn: bool,
     ) -> anyhow::Result<Signature> {
         match self {
@@ -315,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
             let signature = transaction.signatures[0];
             info!("generate transaction {signature} with send lamports {lamports}");
 
-           let config = RpcSendTransactionConfigWithForwardingPolicies::new(
+           let config = JetRpcSendTransactionConfig::new(
                 Some(RpcSendTransactionConfig {
                     skip_preflight: true,
                     skip_sanitize: false,

@@ -33,7 +33,7 @@ use {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RpcSendTransactionConfigWithForwardingPolicies {
+pub struct JetRpcSendTransactionConfig {
     #[serde(flatten)]
     pub config: RpcSendTransactionConfig,
     #[serde(default, deserialize_with = "deserialize_forwarding_policies")]
@@ -53,7 +53,7 @@ where
     Ok(result)
 }
 
-impl RpcSendTransactionConfigWithForwardingPolicies {
+impl JetRpcSendTransactionConfig {
     pub fn new(
         config: Option<RpcSendTransactionConfig>,
         forwarding_policies: Option<Vec<String>>,
@@ -110,7 +110,7 @@ impl TransactionPayload {
     /// Creates a payload in either legacy or new format based on use_legacy flag
     pub fn create(
         transaction: &VersionedTransaction,
-        config: RpcSendTransactionConfigWithForwardingPolicies,
+        config: JetRpcSendTransactionConfig,
         use_legacy: bool,
     ) -> Result<Self, PayloadError> {
         if use_legacy {
@@ -148,7 +148,7 @@ impl TransactionPayload {
     /// Creates a legacy payload from a transaction and configuration
     pub fn to_legacy(
         transaction: &VersionedTransaction,
-        config_with_forwarding_policies: &RpcSendTransactionConfigWithForwardingPolicies,
+        config_with_forwarding_policies: &JetRpcSendTransactionConfig,
     ) -> Result<Self, PayloadError> {
         let encoding = config_with_forwarding_policies
             .config
@@ -243,18 +243,13 @@ impl From<Vec<u8>> for SubscribeTransaction {
     }
 }
 
-impl
-    TryFrom<(
-        &VersionedTransaction,
-        RpcSendTransactionConfigWithForwardingPolicies,
-    )> for TransactionPayload
-{
+impl TryFrom<(&VersionedTransaction, JetRpcSendTransactionConfig)> for TransactionPayload {
     type Error = PayloadError;
 
     fn try_from(
         (transaction, config_with_forwarding_policies): (
             &VersionedTransaction,
-            RpcSendTransactionConfigWithForwardingPolicies,
+            JetRpcSendTransactionConfig,
         ),
     ) -> Result<Self, Self::Error> {
         // Check encoding first to fail early if it's invalid
@@ -293,13 +288,7 @@ pub struct TransactionDecoder;
 impl TransactionDecoder {
     pub fn decode(
         payload: &TransactionPayload,
-    ) -> Result<
-        (
-            VersionedTransaction,
-            Option<RpcSendTransactionConfigWithForwardingPolicies>,
-        ),
-        PayloadError,
-    > {
+    ) -> Result<(VersionedTransaction, Option<JetRpcSendTransactionConfig>), PayloadError> {
         match payload {
             TransactionPayload::Legacy(legacy) => {
                 let encoding = legacy
@@ -313,10 +302,7 @@ impl TransactionDecoder {
 
                 Ok((
                     tx,
-                    Some(RpcSendTransactionConfigWithForwardingPolicies::new(
-                        Some(legacy.config),
-                        None,
-                    )),
+                    Some(JetRpcSendTransactionConfig::new(Some(legacy.config), None)),
                 ))
             }
             TransactionPayload::New(wrapper) => {
@@ -335,11 +321,11 @@ impl TransactionDecoder {
     }
 }
 
-impl TryFrom<&TransactionConfig> for RpcSendTransactionConfigWithForwardingPolicies {
+impl TryFrom<&TransactionConfig> for JetRpcSendTransactionConfig {
     type Error = PayloadError;
 
     fn try_from(proto_config: &TransactionConfig) -> Result<Self, Self::Error> {
-        Ok(RpcSendTransactionConfigWithForwardingPolicies::new(
+        Ok(JetRpcSendTransactionConfig::new(
             Some(RpcSendTransactionConfig {
                 max_retries: proto_config.max_retries.map(|r| r as usize),
                 skip_preflight: proto_config.skip_preflight,
@@ -376,7 +362,7 @@ mod tests {
     #[test]
     fn test_legacy_format() -> Result<(), Box<dyn std::error::Error>> {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfigWithForwardingPolicies::new(
+        let config = JetRpcSendTransactionConfig::new(
             Some(RpcSendTransactionConfig {
                 encoding: Some(UiTransactionEncoding::Base58),
                 skip_preflight: true,
@@ -456,8 +442,7 @@ mod tests {
             skip_sanitize: true,
         };
 
-        let rpc_config_result: Result<RpcSendTransactionConfigWithForwardingPolicies, _> =
-            (&proto_config).try_into();
+        let rpc_config_result: Result<JetRpcSendTransactionConfig, _> = (&proto_config).try_into();
         let rpc_config = rpc_config_result?;
 
         assert_eq!(rpc_config.config.max_retries, Some(3));
@@ -481,8 +466,7 @@ mod tests {
             skip_sanitize: true,
         };
 
-        let rpc_config_result: Result<RpcSendTransactionConfigWithForwardingPolicies, _> =
-            (&proto_config).try_into();
+        let rpc_config_result: Result<JetRpcSendTransactionConfig, _> = (&proto_config).try_into();
         assert!(rpc_config_result.is_ok());
 
         let rpc_config = rpc_config_result?;
@@ -493,7 +477,7 @@ mod tests {
     #[test]
     fn test_transaction_config_sanitize_flags() -> Result<(), Box<dyn std::error::Error>> {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfigWithForwardingPolicies::new(
+        let config = JetRpcSendTransactionConfig::new(
             Some(RpcSendTransactionConfig {
                 skip_preflight: true,
                 skip_sanitize: true,
@@ -519,7 +503,7 @@ mod tests {
     #[test]
     fn test_config_preservation_through_conversion() -> Result<(), Box<dyn std::error::Error>> {
         let tx = VersionedTransaction::default();
-        let original_config = RpcSendTransactionConfigWithForwardingPolicies::new(
+        let original_config = JetRpcSendTransactionConfig::new(
             Some(RpcSendTransactionConfig {
                 skip_preflight: true,
                 skip_sanitize: false,
@@ -554,7 +538,7 @@ mod tests {
     #[test]
     fn test_invalid_encoding() {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfigWithForwardingPolicies::new(
+        let config = JetRpcSendTransactionConfig::new(
             Some(RpcSendTransactionConfig {
                 encoding: Some(UiTransactionEncoding::JsonParsed),
                 ..Default::default()
@@ -574,8 +558,7 @@ mod tests {
             skip_sanitize: false,
         };
 
-        let rpc_config_result: Result<RpcSendTransactionConfigWithForwardingPolicies, _> =
-            (&proto_config).try_into();
+        let rpc_config_result: Result<JetRpcSendTransactionConfig, _> = (&proto_config).try_into();
         let rpc_config = rpc_config_result?;
 
         assert_eq!(rpc_config.config.max_retries, None);
@@ -588,7 +571,7 @@ mod tests {
     #[test]
     fn test_forwarding_policies_conversion() -> Result<(), Box<dyn std::error::Error>> {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfigWithForwardingPolicies::new(
+        let config = JetRpcSendTransactionConfig::new(
             Some(RpcSendTransactionConfig::default()),
             Some(vec![
                 "11111111111111111111111111111111".to_string(),
@@ -607,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_forwarding_policies_pubkeys_conversion() -> Result<(), Box<dyn std::error::Error>> {
-        let config = RpcSendTransactionConfigWithForwardingPolicies::new(
+        let config = JetRpcSendTransactionConfig::new(
             None,
             Some(vec![
                 "11111111111111111111111111111111".to_string(), // Valid pubkey

@@ -264,7 +264,7 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            payload::RpcSendTransactionConfigWithForwardingPolicies, rpc::invalid_params,
+            payload::JetRpcSendTransactionConfig, rpc::invalid_params,
             solana::decode_and_deserialize, transaction_handler::TransactionHandler,
             transactions::SendTransactionsPool,
         },
@@ -289,7 +289,7 @@ pub mod rpc_solana_like {
         async fn send_transaction(
             &self,
             data: String,
-            config: Option<RpcSendTransactionConfigWithForwardingPolicies>,
+            config: Option<JetRpcSendTransactionConfig>,
         ) -> RpcResult<String>;
     }
 
@@ -306,7 +306,7 @@ pub mod rpc_solana_like {
         pub async fn handle_internal_transaction(
             &self,
             transaction: VersionedTransaction,
-            config: RpcSendTransactionConfigWithForwardingPolicies,
+            config: JetRpcSendTransactionConfig,
         ) -> RpcResult<String /* Signature */> {
             debug!("handling internal versioned transaction");
 
@@ -334,7 +334,7 @@ pub mod rpc_solana_like {
         async fn send_transaction(
             &self,
             data: String,
-            config_with_forwarding_policies: Option<RpcSendTransactionConfigWithForwardingPolicies>,
+            config_with_forwarding_policies: Option<JetRpcSendTransactionConfig>,
         ) -> RpcResult<String /* Signature */> {
             debug!("send_transaction rpc request received");
             let config_with_policies = config_with_forwarding_policies.unwrap_or_default();
