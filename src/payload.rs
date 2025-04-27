@@ -29,6 +29,7 @@ use {
     solana_transaction_status::UiTransactionEncoding,
     std::str::FromStr,
     thiserror::Error,
+    tracing::debug,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,8 +63,9 @@ impl JetRpcSendTransactionConfig {
         let forwarding_policies = forwarding_policies
             .unwrap_or_default()
             .iter()
-            .filter_map(|key| solana_sdk::pubkey::Pubkey::from_str(key).ok())
+            .filter_map(|key| Pubkey::from_str(key).ok())
             .collect::<Vec<Pubkey>>();
+        debug!("Forwarding policies: {:?}", forwarding_policies);
 
         Self {
             config,
@@ -148,9 +150,9 @@ impl TransactionPayload {
     /// Creates a legacy payload from a transaction and configuration
     pub fn to_legacy(
         transaction: &VersionedTransaction,
-        config_with_forwarding_policies: &JetRpcSendTransactionConfig,
+        config_with_forwarding: &JetRpcSendTransactionConfig,
     ) -> Result<Self, PayloadError> {
-        let encoding = config_with_forwarding_policies
+        let encoding = config_with_forwarding
             .config
             .encoding
             .unwrap_or(UiTransactionEncoding::Base58);
@@ -162,9 +164,10 @@ impl TransactionPayload {
 
         let tx_str = Self::encode_transaction(transaction, encoding)?;
 
+        // Legacy format doesn't support forwarding policies, but we can preserve the rest of the config
         Ok(Self::Legacy(LegacyPayload {
             transaction: tx_str,
-            config: config_with_forwarding_policies.config,
+            config: config_with_forwarding.config,
             timestamp: Some(ms_since_epoch()),
         }))
     }
@@ -300,9 +303,13 @@ impl TransactionDecoder {
                     TransactionPayload::decode_transaction(&legacy.transaction, encoding)?;
                 let tx = bincode::deserialize(&tx_bytes)?;
 
+                // Legacy format doesn't have forwarding policies, so we pass None
                 Ok((
                     tx,
-                    Some(JetRpcSendTransactionConfig::new(Some(legacy.config), None)),
+                    Some(JetRpcSendTransactionConfig::new(
+                        Some(legacy.config.clone()),
+                        None,
+                    )),
                 ))
             }
             TransactionPayload::New(wrapper) => {
@@ -450,7 +457,7 @@ mod tests {
         assert_eq!(rpc_config.config.preflight_commitment, None);
         assert_eq!(rpc_config.config.encoding, None);
         assert_eq!(rpc_config.config.min_context_slot, None);
-        assert_eq!(rpc_config.forwarding_policies.len(), 1); // Forwarding policies are not validated at this stage
+        assert_eq!(rpc_config.forwarding_policies.len(), 1);
         Ok(())
     }
 
@@ -470,7 +477,7 @@ mod tests {
         assert!(rpc_config_result.is_ok());
 
         let rpc_config = rpc_config_result?;
-        assert_eq!(rpc_config.forwarding_policies.len(), 1);
+        assert_eq!(rpc_config.forwarding_policies.len(), 1); // Only valid pubkey is included
         Ok(())
     }
 
@@ -584,7 +591,7 @@ mod tests {
 
         assert!(decoded_config.is_some());
         let decoded_forwarding_policies = decoded_config.unwrap().forwarding_policies;
-        assert_eq!(decoded_forwarding_policies.len(), 1); // Forwarding policies are not preserved through decode
+        assert!(decoded_forwarding_policies.len() == config.forwarding_policies.len());
         Ok(())
     }
 
@@ -599,6 +606,44 @@ mod tests {
         );
 
         assert_eq!(config.forwarding_policies.len(), 1); // Only valid pubkey is included
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_legacy_to_new_conversion() -> Result<(), Box<dyn std::error::Error>> {
+        let tx = VersionedTransaction::default();
+        let config = JetRpcSendTransactionConfig::new(
+            Some(RpcSendTransactionConfig {
+                encoding: Some(UiTransactionEncoding::Base58),
+                skip_preflight: true,
+                skip_sanitize: true,
+                ..Default::default()
+            }),
+            Some(vec!["11111111111111111111111111111111".to_string()]),
+        );
+
+        // Create legacy payload
+        let legacy_payload = TransactionPayload::to_legacy(&tx, &config)?;
+
+        // Convert to proto and back to test round-trip conversion
+        let proto_tx = legacy_payload.to_proto::<SubscribeTransaction>()?;
+        let decoded = TransactionPayload::try_from(proto_tx)?;
+
+        // Decode and check transaction and config
+        let (decoded_tx, decoded_config) = TransactionDecoder::decode(&decoded)?;
+
+        // Verify transaction is preserved
+        assert_eq!(decoded_tx.signatures, tx.signatures);
+
+        // Legacy format doesn't preserve forwarding policies
+        if let Some(config) = decoded_config {
+            assert_eq!(config.forwarding_policies.len(), 0);
+            assert_eq!(config.config.skip_preflight, true);
+            assert_eq!(config.config.skip_sanitize, true);
+        } else {
+            panic!("Decoded config is None");
+        }
 
         Ok(())
     }

@@ -1,7 +1,9 @@
 use {
     anyhow::Context,
+    base64::{prelude::BASE64_STANDARD, Engine},
     clap::Parser,
     futures::{channel::mpsc, future::TryFutureExt, sink::SinkExt},
+    reqwest::Client,
     serde::{de, Deserialize, Deserializer},
     solana_client::{
         nonblocking::rpc_client::RpcClient,
@@ -21,6 +23,7 @@ use {
     solana_transaction_status::{TransactionDetails, UiTransactionEncoding},
     std::{
         path::{Path, PathBuf},
+        str::FromStr,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -190,10 +193,58 @@ impl TransactionSender {
         should_use_legacy_txn: bool,
     ) -> anyhow::Result<Signature> {
         match self {
-            Self::Jet { rpc } => rpc
-                .send_transaction_with_config(&transaction, config.config)
-                .await
-                .map_err(Into::into),
+            Self::Jet { rpc } => {
+                // If we have forwarding policies and aren't using legacy format, use custom HTTP request
+                if !config.forwarding_policies.is_empty() && !should_use_legacy_txn {
+                    let client = Client::new();
+
+                    let tx_bytes = bincode::serialize(&transaction)?;
+                    let encoded_tx = BASE64_STANDARD.encode(tx_bytes);
+
+                    let payload = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "sendTransaction",
+                        "params": [
+                            encoded_tx,
+                            {
+                                "skipPreflight": config.config.skip_preflight,
+                                "preflightCommitment": config.config.preflight_commitment.map(|c| format!("{:?}", c).to_lowercase()),
+                                "encoding": "base64",
+                                "maxRetries": config.config.max_retries,
+                                "minContextSlot": config.config.min_context_slot,
+                                "forwardingPolicies": config.forwarding_policies.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                            }
+                        ]
+                    });
+
+                    let url = rpc.url();
+                    let response = client
+                        .post(url)
+                        .json(&payload)
+                        .send()
+                        .await?
+                        .json::<serde_json::Value>()
+                        .await?;
+
+                    if let Some(err) = response.get("error") {
+                        return Err(anyhow::anyhow!("RPC error: {:?}", err));
+                    }
+
+                    if let Some(result) = response.get("result") {
+                        if let Some(sig_str) = result.as_str() {
+                            return Ok(Signature::from_str(sig_str)?);
+                        }
+                    }
+
+                    Err(anyhow::anyhow!("Failed to parse RPC response"))
+                } else {
+                    // Use standard client for legacy transactions
+                    rpc.send_transaction_with_config(&transaction, config.config)
+                        .await
+                        .map_err(Into::into)
+                }
+            }
             Self::JetGateway { tx } => {
                 let signature = transaction.signatures[0];
                 let payload =
