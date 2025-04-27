@@ -1,6 +1,6 @@
 use {
     crate::{
-        payload::RpcSendTransactionConfigWithBlockList,
+        payload::JetRpcSendTransactionConfig,
         solana::decode_and_deserialize,
         transactions::{SendTransactionRequest, SendTransactionsPool},
     },
@@ -93,9 +93,9 @@ impl TransactionHandler {
     pub async fn handle_versioned_transaction(
         &self,
         transaction: VersionedTransaction,
-        config_with_blocklist: RpcSendTransactionConfigWithBlockList,
+        config_with_forwarding_policies: JetRpcSendTransactionConfig,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
-        let config = config_with_blocklist.config.unwrap_or_default();
+        let config = config_with_forwarding_policies.config;
 
         // Basic sanitize check first
         transaction
@@ -117,7 +117,7 @@ impl TransactionHandler {
             transaction,
             wire_transaction,
             max_retries: config.max_retries,
-            blocklist_pdas: config_with_blocklist.blocklist_pubkeys(),
+            policies: config_with_forwarding_policies.forwarding_policies,
         }) {
             return Err(TransactionHandlerError::SendFailed(error.to_string()));
         }
@@ -128,14 +128,12 @@ impl TransactionHandler {
     pub async fn handle_transaction(
         &self,
         data: String,
-        config_with_blocklist: Option<RpcSendTransactionConfigWithBlockList>,
+        config_with_forwarding_policies: Option<JetRpcSendTransactionConfig>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
-        let config_with_blocklist = config_with_blocklist.unwrap_or_default();
-        let config = config_with_blocklist.config.unwrap_or_default();
+        let config_with_forwarding_policies = config_with_forwarding_policies.unwrap_or_default();
+        let config = config_with_forwarding_policies.config;
 
-        let (wire_transaction, transaction) = self
-            .prepare_transaction(data, config_with_blocklist.config)
-            .await?;
+        let (wire_transaction, transaction) = self.prepare_transaction(data, config).await?;
         let signature = transaction.signatures[0];
 
         if let Err(error) = self.stp.send_transaction(SendTransactionRequest {
@@ -143,7 +141,7 @@ impl TransactionHandler {
             transaction,
             wire_transaction,
             max_retries: config.max_retries,
-            blocklist_pdas: config_with_blocklist.blocklist_pubkeys(),
+            policies: config_with_forwarding_policies.forwarding_policies,
         }) {
             return Err(TransactionHandlerError::SendFailed(error.to_string()));
         }
@@ -154,9 +152,8 @@ impl TransactionHandler {
     async fn prepare_transaction(
         &self,
         data: String,
-        config: Option<RpcSendTransactionConfig>,
+        config: RpcSendTransactionConfig,
     ) -> Result<(Vec<u8>, VersionedTransaction), TransactionHandlerError> {
-        let config = config.unwrap_or_default();
         let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
 
         let (wire_transaction, transaction) = decode_and_deserialize(

@@ -224,7 +224,7 @@ pub struct SendTransactionRequest {
     pub transaction: VersionedTransaction,
     pub wire_transaction: Vec<u8>,
     pub max_retries: Option<usize>,
-    pub blocklist_pdas: Vec<Pubkey>,
+    pub policies: Vec<Pubkey>,
 }
 
 #[derive(Debug, Clone)]
@@ -277,8 +277,8 @@ impl SendTransactionsPool {
 
     pub fn send_transaction(&self, request: SendTransactionRequest) -> anyhow::Result<()> {
         debug!(
-            "Sending transaction with signature {} and blocklist: {:?}",
-            request.signature, request.blocklist_pdas
+            "Sending transaction with signature {} and policies: {:?}",
+            request.signature, request.policies
         );
         anyhow::ensure!(
             self.new_transactions_tx.send(request).is_ok(),
@@ -323,7 +323,7 @@ struct SendTransactionInfo {
     max_retries: usize,
     last_valid_block_height: BlockHeight,
     landed: bool,
-    blocklist_keys: Vec<Pubkey>,
+    policies: Vec<Pubkey>,
 }
 
 impl SendTransactionInfo {
@@ -396,7 +396,7 @@ pub trait TxChannel {
     async fn reserve(
         &self,
         leader_foward_count: usize,
-        blocklist_keys: Vec<Pubkey>,
+        policies: Vec<Pubkey>,
     ) -> Option<BoxedTxChannelPermit>;
 }
 
@@ -417,13 +417,13 @@ impl TxChannel for QuicClient {
     async fn reserve(
         &self,
         leader_foward_count: usize,
-        blocklist_keys: Vec<Pubkey>,
+        policies: Vec<Pubkey>,
     ) -> Option<BoxedTxChannelPermit> {
         debug!(
-            "QuicClient::reserve called with blocklist: {:?}",
-            blocklist_keys
+            "QuicClient::reserve called with forwarding policies: {:?}",
+            policies
         );
-        QuicClient::reserve_send_permit(self, leader_foward_count, blocklist_keys)
+        QuicClient::reserve_send_permit(self, leader_foward_count, policies)
             .await
             .map(BoxedTxChannelPermit::new)
     }
@@ -433,7 +433,7 @@ pub struct TransactionInfo {
     pub id: SendTransactionInfoId,
     pub signature: Signature,
     pub wire_transaction: Arc<Vec<u8>>,
-    pub blocklist_keys: Vec<Pubkey>,
+    pub policies: Vec<Pubkey>,
 }
 
 pub struct SendTransactionsPoolTask {
@@ -636,7 +636,7 @@ impl SendTransactionsPoolTask {
                 tx_info.id,
                 tx_info.signature,
                 tx_info.wire_transaction,
-                tx_info.blocklist_keys,
+                tx_info.policies,
             );
         }
 
@@ -653,7 +653,7 @@ impl SendTransactionsPoolTask {
             transaction,
             wire_transaction,
             max_retries,
-            blocklist_pdas,
+            policies,
         }: SendTransactionRequest,
     ) {
         if self.transactions.contains_key(&signature) {
@@ -715,7 +715,7 @@ impl SendTransactionsPoolTask {
             max_retries,
             last_valid_block_height,
             landed,
-            blocklist_keys: blocklist_pdas.clone(),
+            policies: policies.clone(),
         };
         let update_existed = self.transactions.insert(signature, info).is_some();
         if !update_existed {
@@ -740,7 +740,7 @@ impl SendTransactionsPoolTask {
             self.schedule_transaction_retry(signature, retry_timestamp)
                 .await;
         } else {
-            self.spawn_connect(id, signature, wire_transaction, blocklist_pdas);
+            self.spawn_connect(id, signature, wire_transaction, policies);
         }
     }
 
@@ -762,22 +762,22 @@ impl SendTransactionsPoolTask {
         id: SendTransactionInfoId,
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
-        blocklist_keys: Vec<Pubkey>,
+        policies: Vec<Pubkey>,
     ) {
         debug!(
-            "Spawning connect for tx {}, id {}, with blocklist: {:?}",
-            signature, id, blocklist_keys
+            "Spawning connect for tx {}, id {}, with policies: {:?}",
+            signature, id, &policies
         );
         let leader_forward_count = self.config.leader_forward_count;
         let tx_channel = Arc::clone(&self.tx_channel);
-        let blocklist_keys_clone = blocklist_keys.clone();
+        let policies_connecting = policies.clone();
         let abort_handle = self.connecting_tasks.spawn(async move {
             debug!(
-                "Reserving tx {} with blocklist: {:?}",
-                signature, blocklist_keys_clone
+                "Reserving tx {} with policies: {:?}",
+                signature, &policies_connecting
             );
             tx_channel
-                .reserve(leader_forward_count, blocklist_keys_clone)
+                .reserve(leader_forward_count, policies_connecting)
                 .await
         });
         self.connecting_map.insert(
@@ -786,7 +786,7 @@ impl SendTransactionsPoolTask {
                 id,
                 signature,
                 wire_transaction,
-                blocklist_keys,
+                policies,
             },
         );
     }
@@ -848,7 +848,7 @@ impl SendTransactionsPoolTask {
                             info.id,
                             info.signature,
                             Arc::clone(&info.wire_transaction),
-                            info.blocklist_keys.clone(),
+                            info.policies.clone(),
                         );
                     } else {
                         let retry_timestamp = Instant::now() + self.config.retry_rate;

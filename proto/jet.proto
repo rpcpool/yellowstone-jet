@@ -11,7 +11,6 @@ service JetGateway {
   rpc Subscribe(stream SubscribeRequest) returns (stream SubscribeResponse);
 }
 
-
 message AuthRequest {
   oneof auth_step {
     GetChallengeRequest begin_auth = 1;
@@ -26,9 +25,7 @@ message AuthResponse {
   }
 }
 
-message GetChallengeRequest {
-  bytes pubkey_to_verify = 1;
-}
+message GetChallengeRequest { bytes pubkey_to_verify = 1; }
 
 message GetChallengeResponse {
   // Challenge to sign
@@ -47,7 +44,6 @@ message AnswerChallengeRequest {
   bytes signature = 3;
 
   bytes nonce = 4;
-
 }
 
 message AnswerChallengeResponse {
@@ -58,17 +54,11 @@ message AnswerChallengeResponse {
 
 message VersionRequest {}
 
-message VersionResponse {
-  string version = 1;
-}
+message VersionResponse { string version = 1; }
 
-message Ping {
-  uint32 id = 1;
-}
+message Ping { uint32 id = 1; }
 
-message Pong {
-  uint32 id = 1;
-}
+message Pong { uint32 id = 1; }
 
 message PublishRequest {
   oneof message {
@@ -80,8 +70,8 @@ message PublishRequest {
 
 message PublishTransaction {
   oneof payload {
-    bytes legacy_payload = 1;  // For backwards compatibility
-    TransactionWrapper new_payload = 2;  // New structured format
+    bytes legacy_payload = 1;           // For backwards compatibility
+    TransactionWrapper new_payload = 2; // New structured format
   }
 }
 
@@ -95,7 +85,7 @@ message TransactionConfig {
   bool skip_preflight = 1;
   bool skip_sanitize = 2;
   optional uint32 max_retries = 3;
-  repeated string blocklist_pdas = 4;
+  repeated string forwarding_policies = 4;
 }
 
 message PublishResponse {
@@ -115,9 +105,7 @@ message SubscribeRequest {
   }
 }
 
-message InitialSubscribeRequest {
-  FeatureFlags features = 1;
-}
+message InitialSubscribeRequest { FeatureFlags features = 1; }
 
 // Feature flags to negotiate capabilities between client and server
 enum Feature {
@@ -131,14 +119,9 @@ enum Feature {
   // Future features flags
 }
 
-message FeatureFlags {
-  repeated Feature supported_features = 1;
-}
+message FeatureFlags { repeated Feature supported_features = 1; }
 
-
-message SubscribeUpdateLimit {
-  uint64 messages_per100ms = 1;
-}
+message SubscribeUpdateLimit { uint64 messages_per100ms = 1; }
 
 message SubscribeResponse {
   oneof message {
@@ -150,7 +133,7 @@ message SubscribeResponse {
 
 message SubscribeTransaction {
   oneof payload {
-    bytes legacy_payload = 1;  // For backwards compatibility
-    TransactionWrapper new_payload = 2;  // New structured format
+    bytes legacy_payload = 1;           // For backwards compatibility
+    TransactionWrapper new_payload = 2; // New structured format
   }
 }

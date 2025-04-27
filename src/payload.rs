@@ -25,44 +25,51 @@ use {
     base64::prelude::{Engine, BASE64_STANDARD},
     serde::{Deserialize, Serialize},
     solana_client::rpc_config::RpcSendTransactionConfig,
-    solana_sdk::transaction::VersionedTransaction,
+    solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction},
     solana_transaction_status::UiTransactionEncoding,
     std::str::FromStr,
     thiserror::Error,
+    tracing::debug,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RpcSendTransactionConfigWithBlockList {
+pub struct JetRpcSendTransactionConfig {
     #[serde(flatten)]
-    pub config: Option<RpcSendTransactionConfig>,
-    /// base58-encoded pubkeys
-    pub blocklist_pdas: Option<Vec<String>>,
+    pub config: RpcSendTransactionConfig,
+    #[serde(default, deserialize_with = "deserialize_forwarding_policies")]
+    pub forwarding_policies: Vec<Pubkey>,
 }
 
-impl RpcSendTransactionConfigWithBlockList {
-    /// Converts the optional string-based blocklist_pdas into a Vec<Pubkey>
-    /// Invalid pubkeys are filtered out
-    pub fn blocklist_pubkeys(&self) -> Vec<solana_sdk::pubkey::Pubkey> {
-        match &self.blocklist_pdas {
-            Some(keys) => keys
-                .iter()
-                .filter_map(
-                    |key_str| match solana_sdk::pubkey::Pubkey::from_str(key_str) {
-                        Ok(pubkey) => Some(pubkey),
-                        Err(_) => None,
-                    },
-                )
-                .collect(),
-            None => Vec::new(),
-        }
-    }
+fn deserialize_forwarding_policies<'de, D>(deserializer: D) -> Result<Vec<Pubkey>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let vec: Vec<String> = Vec::deserialize(deserializer)?;
+    let result = vec
+        .into_iter()
+        .filter_map(|s| Pubkey::from_str(&s).ok())
+        .collect();
 
-    /// Get a safe reference to config or a default config if None
-    pub fn get_config(&self) -> RpcSendTransactionConfig {
-        match &self.config {
-            Some(config) => *config,
-            None => RpcSendTransactionConfig::default(),
+    Ok(result)
+}
+
+impl JetRpcSendTransactionConfig {
+    pub fn new(
+        config: Option<RpcSendTransactionConfig>,
+        forwarding_policies: Option<Vec<String>>,
+    ) -> Self {
+        let config = config.unwrap_or_default();
+        let forwarding_policies = forwarding_policies
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|key| Pubkey::from_str(key).ok())
+            .collect::<Vec<Pubkey>>();
+        debug!("Forwarding policies: {:?}", forwarding_policies);
+
+        Self {
+            config,
+            forwarding_policies,
         }
     }
 }
@@ -105,7 +112,7 @@ impl TransactionPayload {
     /// Creates a payload in either legacy or new format based on use_legacy flag
     pub fn create(
         transaction: &VersionedTransaction,
-        config: RpcSendTransactionConfigWithBlockList,
+        config: JetRpcSendTransactionConfig,
         use_legacy: bool,
     ) -> Result<Self, PayloadError> {
         if use_legacy {
@@ -143,16 +150,12 @@ impl TransactionPayload {
     /// Creates a legacy payload from a transaction and configuration
     pub fn to_legacy(
         transaction: &VersionedTransaction,
-        config_with_blocklist: &RpcSendTransactionConfigWithBlockList,
+        config_with_forwarding: &JetRpcSendTransactionConfig,
     ) -> Result<Self, PayloadError> {
-        let encoding = match config_with_blocklist
+        let encoding = config_with_forwarding
             .config
-            .as_ref()
-            .and_then(|c| c.encoding)
-        {
-            Some(encoding) => encoding,
-            None => UiTransactionEncoding::Base58,
-        };
+            .encoding
+            .unwrap_or(UiTransactionEncoding::Base58);
 
         match encoding {
             UiTransactionEncoding::Base64 | UiTransactionEncoding::Base58 => (),
@@ -161,14 +164,10 @@ impl TransactionPayload {
 
         let tx_str = Self::encode_transaction(transaction, encoding)?;
 
-        let config = match &config_with_blocklist.config {
-            Some(cfg) => *cfg,
-            None => RpcSendTransactionConfig::default(),
-        };
-
+        // Legacy format doesn't support forwarding policies, but we can preserve the rest of the config
         Ok(Self::Legacy(LegacyPayload {
             transaction: tx_str,
-            config,
+            config: config_with_forwarding.config,
             timestamp: Some(ms_since_epoch()),
         }))
     }
@@ -247,23 +246,17 @@ impl From<Vec<u8>> for SubscribeTransaction {
     }
 }
 
-impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfigWithBlockList)>
-    for TransactionPayload
-{
+impl TryFrom<(&VersionedTransaction, JetRpcSendTransactionConfig)> for TransactionPayload {
     type Error = PayloadError;
 
     fn try_from(
-        (transaction, config_with_blocklist): (
+        (transaction, config_with_forwarding_policies): (
             &VersionedTransaction,
-            RpcSendTransactionConfigWithBlockList,
+            JetRpcSendTransactionConfig,
         ),
     ) -> Result<Self, Self::Error> {
         // Check encoding first to fail early if it's invalid
-        if let Some(encoding) = config_with_blocklist
-            .config
-            .as_ref()
-            .and_then(|c| c.encoding)
-        {
+        if let Some(encoding) = config_with_forwarding_policies.config.encoding {
             match encoding {
                 UiTransactionEncoding::Base58 | UiTransactionEncoding::Base64 => {}
                 _ => return Err(PayloadError::UnsupportedEncoding),
@@ -272,40 +265,21 @@ impl TryFrom<(&VersionedTransaction, RpcSendTransactionConfigWithBlockList)>
 
         let tx_bytes = bincode::serialize(transaction)?;
 
-        // Get max_retries safely
-        let max_retries = config_with_blocklist
-            .config
-            .as_ref()
-            .and_then(|c| c.max_retries.map(|r| r as u32));
-
-        // Get skip_preflight safely
-        let skip_preflight = config_with_blocklist
-            .config
-            .as_ref()
-            .map(|c| c.skip_preflight)
-            .unwrap_or(false);
-
-        // Get skip_sanitize safely
-        let skip_sanitize = config_with_blocklist
-            .config
-            .as_ref()
-            .map(|c| c.skip_sanitize)
-            .unwrap_or(false);
-
-        // Get blocklist_pdas safely
-        let blocklist_pdas = match &config_with_blocklist.blocklist_pdas {
-            Some(pdas) => pdas.clone(),
-            None => Vec::new(),
-        };
-
-        // Create new payload format with blocklist_pdas supported
+        // Create new payload format with forwarding policies supported
         Ok(Self::New(TransactionWrapper {
             transaction: tx_bytes,
             config: Some(TransactionConfig {
-                max_retries,
-                blocklist_pdas,
-                skip_preflight,
-                skip_sanitize,
+                max_retries: config_with_forwarding_policies
+                    .config
+                    .max_retries
+                    .map(|r| r as u32),
+                forwarding_policies: config_with_forwarding_policies
+                    .forwarding_policies
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect(),
+                skip_preflight: config_with_forwarding_policies.config.skip_preflight,
+                skip_sanitize: config_with_forwarding_policies.config.skip_sanitize,
             }),
             timestamp: Some(ms_since_epoch()),
         }))
@@ -317,30 +291,22 @@ pub struct TransactionDecoder;
 impl TransactionDecoder {
     pub fn decode(
         payload: &TransactionPayload,
-    ) -> Result<
-        (
-            VersionedTransaction,
-            Option<RpcSendTransactionConfigWithBlockList>,
-        ),
-        PayloadError,
-    > {
+    ) -> Result<(VersionedTransaction, Option<JetRpcSendTransactionConfig>), PayloadError> {
         match payload {
             TransactionPayload::Legacy(legacy) => {
-                let encoding = match legacy.config.encoding {
-                    Some(enc) => enc,
-                    None => UiTransactionEncoding::Base58,
-                };
+                let encoding = legacy
+                    .config
+                    .encoding
+                    .unwrap_or(UiTransactionEncoding::Base58);
 
                 let tx_bytes =
                     TransactionPayload::decode_transaction(&legacy.transaction, encoding)?;
                 let tx = bincode::deserialize(&tx_bytes)?;
 
+                // Legacy format doesn't have forwarding policies, so we pass None
                 Ok((
                     tx,
-                    Some(RpcSendTransactionConfigWithBlockList {
-                        config: Some(legacy.config),
-                        blocklist_pdas: None, // Legacy format doesn't have blocklist
-                    }),
+                    Some(JetRpcSendTransactionConfig::new(Some(legacy.config), None)),
                 ))
             }
             TransactionPayload::New(wrapper) => {
@@ -359,19 +325,12 @@ impl TransactionDecoder {
     }
 }
 
-impl TryFrom<&TransactionConfig> for RpcSendTransactionConfigWithBlockList {
+impl TryFrom<&TransactionConfig> for JetRpcSendTransactionConfig {
     type Error = PayloadError;
 
     fn try_from(proto_config: &TransactionConfig) -> Result<Self, Self::Error> {
-        // Convert string pubkeys to actual Pubkey objects, ignoring invalid ones
-        let blocklist_pdas = if proto_config.blocklist_pdas.is_empty() {
-            None
-        } else {
-            Some(proto_config.blocklist_pdas.clone())
-        };
-
-        Ok(Self {
-            config: Some(RpcSendTransactionConfig {
+        Ok(JetRpcSendTransactionConfig::new(
+            Some(RpcSendTransactionConfig {
                 max_retries: proto_config.max_retries.map(|r| r as usize),
                 skip_preflight: proto_config.skip_preflight,
                 skip_sanitize: proto_config.skip_sanitize,
@@ -379,8 +338,8 @@ impl TryFrom<&TransactionConfig> for RpcSendTransactionConfigWithBlockList {
                 encoding: None,
                 min_context_slot: None,
             }),
-            blocklist_pdas,
-        })
+            Some(proto_config.forwarding_policies.clone()),
+        ))
     }
 }
 
@@ -396,7 +355,7 @@ mod tests {
             transaction: tx_bytes,
             config: Some(TransactionConfig {
                 max_retries: Some(5),
-                blocklist_pdas: vec![],
+                forwarding_policies: vec![],
                 skip_preflight: true,
                 skip_sanitize: true,
             }),
@@ -407,15 +366,15 @@ mod tests {
     #[test]
     fn test_legacy_format() -> Result<(), Box<dyn std::error::Error>> {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfigWithBlockList {
-            config: Some(RpcSendTransactionConfig {
+        let config = JetRpcSendTransactionConfig::new(
+            Some(RpcSendTransactionConfig {
                 encoding: Some(UiTransactionEncoding::Base58),
                 skip_preflight: true,
                 skip_sanitize: true,
                 ..Default::default()
             }),
-            blocklist_pdas: None,
-        };
+            None,
+        );
 
         let payload = TransactionPayload::try_from((&tx, config.clone()))?;
 
@@ -424,18 +383,12 @@ mod tests {
 
         let (decoded_tx, decoded_config) = TransactionDecoder::decode(&decoded)?;
         assert!(decoded_config.is_some());
-        let config_with_blocklist = decoded_config.unwrap();
+        let config_with_forwarding_policies = decoded_config.unwrap();
 
         assert_eq!(decoded_tx.signatures, tx.signatures);
-        assert!(config_with_blocklist.config.is_some());
-        let decoded_config = config_with_blocklist.config.unwrap();
         assert_eq!(
-            decoded_config.skip_preflight,
-            config
-                .config
-                .as_ref()
-                .map(|c| c.skip_preflight)
-                .unwrap_or_default()
+            config_with_forwarding_policies.config.skip_preflight,
+            config.config.skip_preflight
         );
         Ok(())
     }
@@ -449,7 +402,7 @@ mod tests {
             transaction: tx_bytes,
             config: Some(TransactionConfig {
                 max_retries: Some(5),
-                blocklist_pdas: vec!["test1".to_string()],
+                forwarding_policies: vec!["test1".to_string()],
                 skip_preflight: true,
                 skip_sanitize: true,
             }),
@@ -460,10 +413,8 @@ mod tests {
         let (_, config) = TransactionDecoder::decode(&payload)?;
 
         assert!(config.is_some());
-        let config_with_blocklist = config.unwrap();
-        assert!(config_with_blocklist.config.is_some());
-        let config = config_with_blocklist.config.unwrap();
-        assert_eq!(config.max_retries, Some(5));
+        let config_with_forwarding_policies = config.unwrap();
+        assert_eq!(config_with_forwarding_policies.config.max_retries, Some(5));
         Ok(())
     }
 
@@ -478,12 +429,10 @@ mod tests {
 
         let (decoded_tx, config) = TransactionDecoder::decode(&decoded)?;
         assert!(config.is_some());
-        let config_with_blocklist = config.unwrap();
-        assert!(config_with_blocklist.config.is_some());
-        let config = config_with_blocklist.config.unwrap();
+        let config_with_forwarding_policies = config.unwrap();
 
-        assert_eq!(config.max_retries, Some(5));
-        assert!(config.skip_preflight);
+        assert_eq!(config_with_forwarding_policies.config.max_retries, Some(5));
+        assert!(config_with_forwarding_policies.config.skip_preflight);
         assert_eq!(decoded_tx.signatures, tx.signatures);
         Ok(())
     }
@@ -492,24 +441,20 @@ mod tests {
     fn test_config_conversion() -> Result<(), Box<dyn std::error::Error>> {
         let proto_config = TransactionConfig {
             max_retries: Some(3),
-            blocklist_pdas: vec!["11111111111111111111111111111111".to_string()],
+            forwarding_policies: vec!["11111111111111111111111111111111".to_string()],
             skip_preflight: true,
             skip_sanitize: true,
         };
 
-        let rpc_config_result: Result<RpcSendTransactionConfigWithBlockList, _> =
-            (&proto_config).try_into();
+        let rpc_config_result: Result<JetRpcSendTransactionConfig, _> = (&proto_config).try_into();
         let rpc_config = rpc_config_result?;
 
-        assert!(rpc_config.config.is_some());
-        let config = rpc_config.config.unwrap();
-        assert_eq!(config.max_retries, Some(3));
-        assert!(config.skip_preflight);
-        assert_eq!(config.preflight_commitment, None);
-        assert_eq!(config.encoding, None);
-        assert_eq!(config.min_context_slot, None);
-        assert!(rpc_config.blocklist_pdas.is_some());
-        assert_eq!(rpc_config.blocklist_pdas.as_ref().map(|v| v.len()), Some(1));
+        assert_eq!(rpc_config.config.max_retries, Some(3));
+        assert!(rpc_config.config.skip_preflight);
+        assert_eq!(rpc_config.config.preflight_commitment, None);
+        assert_eq!(rpc_config.config.encoding, None);
+        assert_eq!(rpc_config.config.min_context_slot, None);
+        assert_eq!(rpc_config.forwarding_policies.len(), 1);
         Ok(())
     }
 
@@ -517,7 +462,7 @@ mod tests {
     fn test_config_invalid_pubkey_conversion() -> Result<(), Box<dyn std::error::Error>> {
         let proto_config = TransactionConfig {
             max_retries: Some(3),
-            blocklist_pdas: vec![
+            forwarding_policies: vec![
                 "11111111111111111111111111111111".to_string(), // Valid pubkey
                 "invalid_pubkey".to_string(),                   // Invalid pubkey
             ],
@@ -525,29 +470,26 @@ mod tests {
             skip_sanitize: true,
         };
 
-        let rpc_config_result: Result<RpcSendTransactionConfigWithBlockList, _> =
-            (&proto_config).try_into();
-        // Now we expect success (we no longer validate pubkeys at this stage)
+        let rpc_config_result: Result<JetRpcSendTransactionConfig, _> = (&proto_config).try_into();
         assert!(rpc_config_result.is_ok());
 
         let rpc_config = rpc_config_result?;
-        assert!(rpc_config.blocklist_pdas.is_some());
-        assert_eq!(rpc_config.blocklist_pdas.as_ref().map(|v| v.len()), Some(2)); // Both pubkeys are kept
+        assert_eq!(rpc_config.forwarding_policies.len(), 1); // Only valid pubkey is included
         Ok(())
     }
 
     #[test]
     fn test_transaction_config_sanitize_flags() -> Result<(), Box<dyn std::error::Error>> {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfigWithBlockList {
-            config: Some(RpcSendTransactionConfig {
+        let config = JetRpcSendTransactionConfig::new(
+            Some(RpcSendTransactionConfig {
                 skip_preflight: true,
                 skip_sanitize: true,
                 encoding: Some(UiTransactionEncoding::Base64),
                 ..Default::default()
             }),
-            blocklist_pdas: None,
-        };
+            None,
+        );
 
         let payload = TransactionPayload::try_from((&tx, config))?;
         let proto_tx = payload.to_proto::<SubscribeTransaction>()?;
@@ -556,19 +498,17 @@ mod tests {
         let (_, decoded_config) = TransactionDecoder::decode(&decoded)?;
 
         assert!(decoded_config.is_some());
-        let config_with_blocklist = decoded_config.unwrap();
-        assert!(config_with_blocklist.config.is_some());
-        let decoded_config = config_with_blocklist.config.unwrap();
-        assert!(decoded_config.skip_preflight);
-        assert!(decoded_config.skip_sanitize);
+        let config_with_forwarding_policies = decoded_config.unwrap();
+        assert!(config_with_forwarding_policies.config.skip_preflight);
+        assert!(config_with_forwarding_policies.config.skip_sanitize);
         Ok(())
     }
 
     #[test]
     fn test_config_preservation_through_conversion() -> Result<(), Box<dyn std::error::Error>> {
         let tx = VersionedTransaction::default();
-        let original_config = RpcSendTransactionConfigWithBlockList {
-            config: Some(RpcSendTransactionConfig {
+        let original_config = JetRpcSendTransactionConfig::new(
+            Some(RpcSendTransactionConfig {
                 skip_preflight: true,
                 skip_sanitize: false,
                 max_retries: Some(3),
@@ -576,35 +516,25 @@ mod tests {
                 encoding: Some(UiTransactionEncoding::Base64),
                 min_context_slot: None,
             }),
-            blocklist_pdas: None,
-        };
+            None,
+        );
 
         let payload = TransactionPayload::try_from((&tx, original_config.clone()))?;
         let (_, decoded_config) = TransactionDecoder::decode(&payload)?;
 
         assert!(decoded_config.is_some());
-        let config_with_blocklist = decoded_config.unwrap();
-        assert!(config_with_blocklist.config.is_some());
-        let decoded_config = config_with_blocklist.config.unwrap();
+        let config_with_forwarding_policies = decoded_config.unwrap();
         assert_eq!(
-            decoded_config.max_retries,
-            original_config.config.as_ref().and_then(|c| c.max_retries)
+            config_with_forwarding_policies.config.max_retries,
+            original_config.config.max_retries
         );
         assert_eq!(
-            decoded_config.skip_preflight,
-            original_config
-                .config
-                .as_ref()
-                .map(|c| c.skip_preflight)
-                .unwrap_or_default()
+            config_with_forwarding_policies.config.skip_preflight,
+            original_config.config.skip_preflight
         );
         assert_eq!(
-            decoded_config.skip_sanitize,
-            original_config
-                .config
-                .as_ref()
-                .map(|c| c.skip_sanitize)
-                .unwrap_or_default()
+            config_with_forwarding_policies.config.skip_sanitize,
+            original_config.config.skip_sanitize
         );
         Ok(())
     }
@@ -612,13 +542,13 @@ mod tests {
     #[test]
     fn test_invalid_encoding() {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfigWithBlockList {
-            config: Some(RpcSendTransactionConfig {
+        let config = JetRpcSendTransactionConfig::new(
+            Some(RpcSendTransactionConfig {
                 encoding: Some(UiTransactionEncoding::JsonParsed),
                 ..Default::default()
             }),
-            blocklist_pdas: None,
-        };
+            None,
+        );
 
         assert!(TransactionPayload::try_from((&tx, config)).is_err());
     }
@@ -627,60 +557,90 @@ mod tests {
     fn test_empty_config_conversion() -> Result<(), Box<dyn std::error::Error>> {
         let proto_config = TransactionConfig {
             max_retries: None,
-            blocklist_pdas: vec![],
+            forwarding_policies: vec![],
             skip_preflight: false,
             skip_sanitize: false,
         };
 
-        let rpc_config_result: Result<RpcSendTransactionConfigWithBlockList, _> =
-            (&proto_config).try_into();
+        let rpc_config_result: Result<JetRpcSendTransactionConfig, _> = (&proto_config).try_into();
         let rpc_config = rpc_config_result?;
 
-        assert!(rpc_config.config.is_some());
-        let config = rpc_config.config.unwrap();
-        assert_eq!(config.max_retries, None);
-        assert!(!config.skip_preflight);
-        assert!(!config.skip_sanitize);
-        assert!(rpc_config.blocklist_pdas.is_none());
+        assert_eq!(rpc_config.config.max_retries, None);
+        assert!(!rpc_config.config.skip_preflight);
+        assert!(!rpc_config.config.skip_sanitize);
+        assert_eq!(rpc_config.forwarding_policies.len(), 0);
         Ok(())
     }
 
     #[test]
-    fn test_blocklist_pdas_conversion() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_forwarding_policies_conversion() -> Result<(), Box<dyn std::error::Error>> {
         let tx = VersionedTransaction::default();
-        let config = RpcSendTransactionConfigWithBlockList {
-            config: Some(RpcSendTransactionConfig::default()),
-            blocklist_pdas: Some(vec![
+        let config = JetRpcSendTransactionConfig::new(
+            Some(RpcSendTransactionConfig::default()),
+            Some(vec![
                 "11111111111111111111111111111111".to_string(),
                 "22222222222222222222222222222222".to_string(),
             ]),
-        };
+        );
 
         let payload = TransactionPayload::try_from((&tx, config.clone()))?;
         let (_, decoded_config) = TransactionDecoder::decode(&payload)?;
 
         assert!(decoded_config.is_some());
-        let decoded_blocklist = decoded_config.unwrap().blocklist_pdas;
-        assert!(decoded_blocklist.is_some());
-        let blocklist = decoded_blocklist.unwrap();
-        assert_eq!(blocklist.len(), 2);
-        assert_eq!(blocklist[0], "11111111111111111111111111111111");
-        assert_eq!(blocklist[1], "22222222222222222222222222222222");
+        let decoded_forwarding_policies = decoded_config.unwrap().forwarding_policies;
+        assert!(decoded_forwarding_policies.len() == config.forwarding_policies.len());
         Ok(())
     }
 
     #[test]
-    fn test_blocklist_pubkeys_conversion() -> Result<(), Box<dyn std::error::Error>> {
-        let config = RpcSendTransactionConfigWithBlockList {
-            config: None,
-            blocklist_pdas: Some(vec![
+    fn test_forwarding_policies_pubkeys_conversion() -> Result<(), Box<dyn std::error::Error>> {
+        let config = JetRpcSendTransactionConfig::new(
+            None,
+            Some(vec![
                 "11111111111111111111111111111111".to_string(), // Valid pubkey
                 "invalid_pubkey".to_string(),                   // Invalid pubkey
             ]),
-        };
+        );
 
-        let pubkeys = config.blocklist_pubkeys();
-        assert_eq!(pubkeys.len(), 1); // Only the valid pubkey should be included
+        assert_eq!(config.forwarding_policies.len(), 1); // Only valid pubkey is included
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_legacy_to_new_conversion() -> Result<(), Box<dyn std::error::Error>> {
+        let tx = VersionedTransaction::default();
+        let config = JetRpcSendTransactionConfig::new(
+            Some(RpcSendTransactionConfig {
+                encoding: Some(UiTransactionEncoding::Base58),
+                skip_preflight: true,
+                skip_sanitize: true,
+                ..Default::default()
+            }),
+            Some(vec!["11111111111111111111111111111111".to_string()]),
+        );
+
+        // Create legacy payload
+        let legacy_payload = TransactionPayload::to_legacy(&tx, &config)?;
+
+        // Convert to proto and back to test round-trip conversion
+        let proto_tx = legacy_payload.to_proto::<SubscribeTransaction>()?;
+        let decoded = TransactionPayload::try_from(proto_tx)?;
+
+        // Decode and check transaction and config
+        let (decoded_tx, decoded_config) = TransactionDecoder::decode(&decoded)?;
+
+        // Verify transaction is preserved
+        assert_eq!(decoded_tx.signatures, tx.signatures);
+
+        // Legacy format doesn't preserve forwarding policies
+        if let Some(config) = decoded_config {
+            assert_eq!(config.forwarding_policies.len(), 0);
+            assert!(config.config.skip_preflight);
+            assert!(config.config.skip_sanitize);
+        } else {
+            panic!("Decoded config is None");
+        }
 
         Ok(())
     }

@@ -11,11 +11,8 @@ identity:
 
 # Yellowstone shield policy store configuration
 shield:
-  vixen:
-    yellowstone:
-      endpoint: http://127.0.0.1:10000
-      x_token: null
-      timeout: 60
+  # Enabled shield policy store
+  enabled: false
 
 # RPC & gRPC for upstream validator
 upstream:
@@ -134,13 +131,9 @@ quic:
 #   # Event buffer queue size
 #   queue_size_buffer: 100000
 
-# yellowstone_blocklist:
-#   contract_pubkey: E47XuTVcCMMYZSmeaybv3BMu6hYktvvFgeZkAJbVgmUx
-
 features:
   enabled_features:
     - transaction_payload_v2
 
-
-prometheus: 
+prometheus:
   url: http://127.0.0.1:8429/api/v1/import/prometheus

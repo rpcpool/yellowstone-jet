@@ -13,7 +13,7 @@ Implements the Solana QUIC protocol for sending transactions.
 - Simulation and transaction sanitization support via external RPC
 - Prometheus metrics
 - Dynamic key loading via getIdentity/setIdentity
-- Support for blocklists to block forwarding to specific leaders
+- Support for shield policies to determine eligible leaders for transaction forwarding
 - Support for connecting to Triton's Cascade delivery network
 
 ## Building
@@ -73,10 +73,8 @@ ProtectSystem=full
 WantedBy=multi-user.target
 ```
 
-
 ## Attribution
 
 Created by the greybeards at [Triton One](https://triton.one)
 
 Copyright (C) 2024 Triton One Ltd
-
