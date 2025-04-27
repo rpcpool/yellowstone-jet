@@ -306,10 +306,7 @@ impl TransactionDecoder {
                 // Legacy format doesn't have forwarding policies, so we pass None
                 Ok((
                     tx,
-                    Some(JetRpcSendTransactionConfig::new(
-                        Some(legacy.config.clone()),
-                        None,
-                    )),
+                    Some(JetRpcSendTransactionConfig::new(Some(legacy.config), None)),
                 ))
             }
             TransactionPayload::New(wrapper) => {
@@ -639,8 +636,8 @@ mod tests {
         // Legacy format doesn't preserve forwarding policies
         if let Some(config) = decoded_config {
             assert_eq!(config.forwarding_policies.len(), 0);
-            assert_eq!(config.config.skip_preflight, true);
-            assert_eq!(config.config.skip_sanitize, true);
+            assert!(config.config.skip_preflight);
+            assert!(config.config.skip_sanitize);
         } else {
             panic!("Decoded config is None");
         }
