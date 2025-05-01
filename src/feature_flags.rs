@@ -12,7 +12,7 @@
 use {
     crate::proto::jet::Feature,
     serde::{de, Deserialize},
-    std::collections::HashSet,
+    std::{collections::HashSet, str::FromStr},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -27,8 +27,7 @@ impl<'de> Deserialize<'de> for FeatureFlag {
         D: serde::Deserializer<'de>,
     {
         let feature_str = String::deserialize(deserializer)?;
-        FeatureFlag::from_str(&feature_str)
-            .ok_or_else(|| de::Error::custom(format!("Unknown feature: {}", feature_str)))
+        FeatureFlag::from_str(&feature_str).map_err(de::Error::custom)
     }
 }
 
@@ -39,12 +38,20 @@ impl FeatureFlag {
             FeatureFlag::YellowstoneShield => Feature::YellowstoneShield,
         }
     }
+}
 
-    fn from_str(feature_str: impl AsRef<str>) -> Option<Self> {
+#[derive(Debug, thiserror::Error)]
+#[error("Invalid feature flag string: {0}")]
+pub struct FeatureFlagFromStrErr(String);
+
+impl FromStr for FeatureFlag {
+    type Err = FeatureFlagFromStrErr;
+
+    fn from_str(feature_str: &str) -> Result<Self, Self::Err> {
         match feature_str.as_ref() {
-            "transaction_payload_v2" => Some(FeatureFlag::TransactionPayloadV2),
-            "yellowstone_shield" => Some(FeatureFlag::YellowstoneShield),
-            _ => None,
+            "transaction_payload_v2" => Ok(FeatureFlag::TransactionPayloadV2),
+            "yellowstone_shield" => Ok(FeatureFlag::YellowstoneShield),
+            unknown => Err(FeatureFlagFromStrErr(unknown.to_string())),
         }
     }
 }
@@ -66,8 +73,9 @@ pub struct FeatureSet {
 }
 
 impl FeatureSet {
-    pub fn is_enabled(&self, feature_str: impl AsRef<str>) -> bool {
-        if let Some(feature) = FeatureFlag::from_str(feature_str) {
+    #[cfg(test)]
+    pub(crate) fn is_enabled(&self, feature_str: impl AsRef<str>) -> bool {
+        if let Ok(feature) = FeatureFlag::from_str(feature_str.as_ref()) {
             self.enabled_features.contains(&feature)
         } else {
             false
@@ -77,10 +85,7 @@ impl FeatureSet {
     pub fn is_feature_enabled(&self, feature: Feature) -> bool {
         match feature {
             Feature::Unspecified => false,
-            whatever => {
-                self.enabled_features
-                    .contains(&whatever.into())
-            }
+            whatever => self.enabled_features.contains(&whatever.into()),
         }
     }
 
@@ -99,7 +104,7 @@ impl FeatureSet {
     pub fn new_with_features(features: &[&str]) -> Self {
         let enabled_features = features
             .iter()
-            .filter_map(|f| FeatureFlag::from_str(*f))
+            .flat_map(|f| FeatureFlag::from_str(*f))
             .collect();
         Self { enabled_features }
     }
