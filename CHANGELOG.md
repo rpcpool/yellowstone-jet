@@ -17,6 +17,10 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [11.3.0]
+
+- Added `YELLOWSTONE_SHIELD` feature flag in proto file definition
+
 ## [11.2.0]
 
 ### Features

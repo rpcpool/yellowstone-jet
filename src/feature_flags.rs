@@ -48,7 +48,7 @@ impl FromStr for FeatureFlag {
     type Err = FeatureFlagFromStrErr;
 
     fn from_str(feature_str: &str) -> Result<Self, Self::Err> {
-        match feature_str.as_ref() {
+        match feature_str {
             "transaction_payload_v2" => Ok(FeatureFlag::TransactionPayloadV2),
             "yellowstone_shield" => Ok(FeatureFlag::YellowstoneShield),
             unknown => Err(FeatureFlagFromStrErr(unknown.to_string())),
@@ -56,12 +56,13 @@ impl FromStr for FeatureFlag {
     }
 }
 
-impl From<Feature> for FeatureFlag {
-    fn from(feature: Feature) -> Self {
+impl TryFrom<Feature> for FeatureFlag {
+    type Error = Feature;
+    fn try_from(feature: Feature) -> Result<Self, Feature> {
         match feature {
-            Feature::TransactionPayloadV2 => FeatureFlag::TransactionPayloadV2,
-            Feature::YellowstoneShield => FeatureFlag::YellowstoneShield,
-            _ => panic!("Unknown feature"),
+            Feature::TransactionPayloadV2 => Ok(FeatureFlag::TransactionPayloadV2),
+            Feature::YellowstoneShield => Ok(FeatureFlag::YellowstoneShield),
+            unknown => Err(unknown),
         }
     }
 }
@@ -83,10 +84,10 @@ impl FeatureSet {
     }
 
     pub fn is_feature_enabled(&self, feature: Feature) -> bool {
-        match feature {
-            Feature::Unspecified => false,
-            whatever => self.enabled_features.contains(&whatever.into()),
-        }
+        let Ok(feature_flag) = feature.try_into() else {
+            return false;
+        };
+        self.enabled_features.contains(&feature_flag)
     }
 
     pub fn enabled_features(&self) -> Vec<i32> {
@@ -104,7 +105,7 @@ impl FeatureSet {
     pub fn new_with_features(features: &[&str]) -> Self {
         let enabled_features = features
             .iter()
-            .flat_map(|f| FeatureFlag::from_str(*f))
+            .flat_map(|f| FeatureFlag::from_str(f))
             .collect();
         Self { enabled_features }
     }
