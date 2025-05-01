@@ -115,6 +115,8 @@ enum Feature {
 
   // Enables structured transaction format with additional metadata
   TRANSACTION_PAYLOAD_V2 = 1;
+  
+  YELLOWSTONE_SHIELD = 2; // Shield feature
 
   // Future features flags
 }

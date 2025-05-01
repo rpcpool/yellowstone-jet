@@ -18,6 +18,7 @@ use {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FeatureFlag {
     TransactionPayloadV2,
+    YellowstoneShield,
 }
 
 impl<'de> Deserialize<'de> for FeatureFlag {
@@ -26,13 +27,8 @@ impl<'de> Deserialize<'de> for FeatureFlag {
         D: serde::Deserializer<'de>,
     {
         let feature_str = String::deserialize(deserializer)?;
-        match feature_str.as_str() {
-            "transaction_payload_v2" => Ok(FeatureFlag::TransactionPayloadV2),
-            _ => Err(de::Error::custom(format!(
-                "Unknown feature: {}",
-                feature_str
-            ))),
-        }
+        FeatureFlag::from_str(&feature_str)
+            .ok_or_else(|| de::Error::custom(format!("Unknown feature: {}", feature_str)))
     }
 }
 
@@ -40,13 +36,25 @@ impl FeatureFlag {
     const fn to_proto_feature(&self) -> Feature {
         match self {
             FeatureFlag::TransactionPayloadV2 => Feature::TransactionPayloadV2,
+            FeatureFlag::YellowstoneShield => Feature::YellowstoneShield,
         }
     }
 
     fn from_str(feature_str: impl AsRef<str>) -> Option<Self> {
         match feature_str.as_ref() {
             "transaction_payload_v2" => Some(FeatureFlag::TransactionPayloadV2),
+            "yellowstone_shield" => Some(FeatureFlag::YellowstoneShield),
             _ => None,
+        }
+    }
+}
+
+impl From<Feature> for FeatureFlag {
+    fn from(feature: Feature) -> Self {
+        match feature {
+            Feature::TransactionPayloadV2 => FeatureFlag::TransactionPayloadV2,
+            Feature::YellowstoneShield => FeatureFlag::YellowstoneShield,
+            _ => panic!("Unknown feature"),
         }
     }
 }
@@ -68,10 +76,11 @@ impl FeatureSet {
 
     pub fn is_feature_enabled(&self, feature: Feature) -> bool {
         match feature {
-            Feature::TransactionPayloadV2 => self
-                .enabled_features
-                .contains(&FeatureFlag::TransactionPayloadV2),
             Feature::Unspecified => false,
+            whatever => {
+                self.enabled_features
+                    .contains(&whatever.into())
+            }
         }
     }
 
