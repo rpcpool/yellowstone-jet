@@ -16,7 +16,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
-## [11.3.0]
+## [12.0.0]
 
 ### Breaking Changes
 
