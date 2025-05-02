@@ -12,12 +12,13 @@
 use {
     crate::proto::jet::Feature,
     serde::{de, Deserialize},
-    std::collections::HashSet,
+    std::{collections::HashSet, str::FromStr},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FeatureFlag {
     TransactionPayloadV2,
+    YellowstoneShield,
 }
 
 impl<'de> Deserialize<'de> for FeatureFlag {
@@ -26,13 +27,7 @@ impl<'de> Deserialize<'de> for FeatureFlag {
         D: serde::Deserializer<'de>,
     {
         let feature_str = String::deserialize(deserializer)?;
-        match feature_str.as_str() {
-            "transaction_payload_v2" => Ok(FeatureFlag::TransactionPayloadV2),
-            _ => Err(de::Error::custom(format!(
-                "Unknown feature: {}",
-                feature_str
-            ))),
-        }
+        FeatureFlag::from_str(&feature_str).map_err(de::Error::custom)
     }
 }
 
@@ -40,13 +35,34 @@ impl FeatureFlag {
     const fn to_proto_feature(&self) -> Feature {
         match self {
             FeatureFlag::TransactionPayloadV2 => Feature::TransactionPayloadV2,
+            FeatureFlag::YellowstoneShield => Feature::YellowstoneShield,
         }
     }
+}
 
-    fn from_str(feature_str: impl AsRef<str>) -> Option<Self> {
-        match feature_str.as_ref() {
-            "transaction_payload_v2" => Some(FeatureFlag::TransactionPayloadV2),
-            _ => None,
+#[derive(Debug, thiserror::Error)]
+#[error("Invalid feature flag string: {0}")]
+pub struct FeatureFlagFromStrErr(String);
+
+impl FromStr for FeatureFlag {
+    type Err = FeatureFlagFromStrErr;
+
+    fn from_str(feature_str: &str) -> Result<Self, Self::Err> {
+        match feature_str {
+            "transaction_payload_v2" => Ok(FeatureFlag::TransactionPayloadV2),
+            "yellowstone_shield" => Ok(FeatureFlag::YellowstoneShield),
+            unknown => Err(FeatureFlagFromStrErr(unknown.to_string())),
+        }
+    }
+}
+
+impl TryFrom<Feature> for FeatureFlag {
+    type Error = Feature;
+    fn try_from(feature: Feature) -> Result<Self, Feature> {
+        match feature {
+            Feature::TransactionPayloadV2 => Ok(FeatureFlag::TransactionPayloadV2),
+            Feature::YellowstoneShield => Ok(FeatureFlag::YellowstoneShield),
+            unknown => Err(unknown),
         }
     }
 }
@@ -58,8 +74,9 @@ pub struct FeatureSet {
 }
 
 impl FeatureSet {
-    pub fn is_enabled(&self, feature_str: impl AsRef<str>) -> bool {
-        if let Some(feature) = FeatureFlag::from_str(feature_str) {
+    #[cfg(test)]
+    pub(crate) fn is_enabled(&self, feature_str: impl AsRef<str>) -> bool {
+        if let Ok(feature) = FeatureFlag::from_str(feature_str.as_ref()) {
             self.enabled_features.contains(&feature)
         } else {
             false
@@ -67,12 +84,10 @@ impl FeatureSet {
     }
 
     pub fn is_feature_enabled(&self, feature: Feature) -> bool {
-        match feature {
-            Feature::TransactionPayloadV2 => self
-                .enabled_features
-                .contains(&FeatureFlag::TransactionPayloadV2),
-            Feature::Unspecified => false,
-        }
+        let Ok(feature_flag) = feature.try_into() else {
+            return false;
+        };
+        self.enabled_features.contains(&feature_flag)
     }
 
     pub fn enabled_features(&self) -> Vec<i32> {
@@ -90,7 +105,7 @@ impl FeatureSet {
     pub fn new_with_features(features: &[&str]) -> Self {
         let enabled_features = features
             .iter()
-            .filter_map(|f| FeatureFlag::from_str(*f))
+            .flat_map(|f| FeatureFlag::from_str(f))
             .collect();
         Self { enabled_features }
     }

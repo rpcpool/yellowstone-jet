@@ -71,10 +71,6 @@ pub struct ConfigJet {
 
     /// Prometheus Push Gateway
     pub prometheus: Option<PrometheusConfig>,
-
-    /// Config Shield
-    #[serde(default)]
-    pub shield: ConfigShield,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,13 +116,6 @@ impl ConfigIdentity {
             None => Ok(None),
         }
     }
-}
-
-/// Yellowstone Shield policy store configuration
-#[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigShield {
-    pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]

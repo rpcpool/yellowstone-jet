@@ -116,6 +116,9 @@ enum Feature {
   // Enables structured transaction format with additional metadata
   TRANSACTION_PAYLOAD_V2 = 1;
 
+  // Enables the use of the Yellowstone Shield policy enforcement
+  YELLOWSTONE_SHIELD = 2;
+
   // Future features flags
 }
 
