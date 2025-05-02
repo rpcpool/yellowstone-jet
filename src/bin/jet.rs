@@ -347,7 +347,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     let local = tokio::task::LocalSet::new();
 
-    let shield_policy_store = if config.shield.enabled {
+    let shield_policy_store = if config
+        .features
+        .is_feature_enabled(yellowstone_jet::proto::jet::Feature::YellowstoneShield)
+    {
         let rpc =
             solana_client::nonblocking::rpc_client::RpcClient::new(config.upstream.rpc.clone());
         let BuiltPolicyStore {
