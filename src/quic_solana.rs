@@ -12,15 +12,15 @@ use {
     },
     lru::LruCache,
     quinn::{
-        crypto::rustls::QuicClientConfig, ClientConfig, ConnectError, Connection, ConnectionError,
-        Endpoint, IdleTimeout, StoppedError, TransportConfig, VarInt, WriteError,
+        ClientConfig, ConnectError, Connection, ConnectionError, Endpoint, IdleTimeout,
+        StoppedError, TransportConfig, VarInt, WriteError, crypto::rustls::QuicClientConfig,
     },
-    rand::{thread_rng, Rng},
+    rand::{Rng, thread_rng},
     rustls::{
-        client::danger::{HandshakeSignatureValid, ServerCertVerified},
-        crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider},
-        pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
         DigitallySignedStruct, Error,
+        client::danger::{HandshakeSignatureValid, ServerCertVerified},
+        crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature},
+        pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
     },
     solana_sdk::{
         pubkey::Pubkey,
@@ -36,8 +36,8 @@ use {
         time::Duration,
     },
     tokio::{
-        sync::{watch, AcquireError, Mutex, OnceCell, Semaphore},
-        time::{timeout, Instant},
+        sync::{AcquireError, Mutex, OnceCell, Semaphore, watch},
+        time::{Instant, timeout},
     },
     tracing::{debug, info},
 };

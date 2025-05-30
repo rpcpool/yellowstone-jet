@@ -3,8 +3,8 @@ use {
         config::ConfigMetricsUpstream,
         metrics::jet as metrics,
         proto::metrics::{
-            jet_metrics_upstream_client::JetMetricsUpstreamClient, transaction_event::Event,
             TransactionEvent, TransactionEventSendAttempt,
+            jet_metrics_upstream_client::JetMetricsUpstreamClient, transaction_event::Event,
         },
         util::{
             IncrementalBackoff, WaitShutdown, WaitShutdownJoinHandleResult,
@@ -13,7 +13,7 @@ use {
     },
     anyhow::Context,
     futures::{
-        future::{pending, FutureExt},
+        future::{FutureExt, pending},
         sink::SinkExt,
     },
     solana_sdk::{clock::Slot, pubkey::Pubkey, signature::Signature},
@@ -24,7 +24,7 @@ use {
         sync::Arc,
         time::{Duration, SystemTime},
     },
-    tokio::sync::{mpsc, Mutex, Notify},
+    tokio::sync::{Mutex, Notify, mpsc},
     tonic::transport::channel::{ClientTlsConfig, Endpoint},
     tracing::error,
 };
@@ -138,10 +138,15 @@ impl GrpcClient {
                 }
             });
 
-            if let Err(error) = client.stream_transaction_events(stream_rx).await {
-                error!(%error, "metrics upstream gRPC stream finished");
-            } else if let Err(error) = jh.await {
-                error!(%error, "grpc upstream metrics stream failed");
+            match client.stream_transaction_events(stream_rx).await {
+                Err(error) => {
+                    error!(%error, "metrics upstream gRPC stream finished");
+                }
+                _ => {
+                    if let Err(e) = jh.await {
+                        error!(%e, "metrics upstream gRPC stream task failed");
+                    }
+                }
             }
         }
     }

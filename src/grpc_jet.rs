@@ -17,17 +17,18 @@ use {
         },
         payload::{TransactionDecoder, TransactionPayload},
         proto::jet::{
-            auth_request, auth_response, jet_gateway_client::JetGatewayClient,
+            AnswerChallengeRequest, AnswerChallengeResponse, AuthRequest, FeatureFlags,
+            GetChallengeRequest, InitialSubscribeRequest, Ping, Pong, SubscribeRequest,
+            SubscribeResponse, SubscribeTransaction, SubscribeUpdateLimit, auth_request,
+            auth_response, jet_gateway_client::JetGatewayClient,
             subscribe_request::Message as SubscribeRequestMessage,
             subscribe_response::Message as SubscribeResponseMessage,
-            subscribe_transaction::Payload, AnswerChallengeRequest, AnswerChallengeResponse,
-            AuthRequest, FeatureFlags, GetChallengeRequest, InitialSubscribeRequest, Ping, Pong,
-            SubscribeRequest, SubscribeResponse, SubscribeTransaction, SubscribeUpdateLimit,
+            subscribe_transaction::Payload,
         },
-        pubkey_challenger::{append_nonce_and_sign, OneTimeAuthToken},
+        pubkey_challenger::{OneTimeAuthToken, append_nonce_and_sign},
         rpc::rpc_solana_like::RpcServerImpl as RpcServerImplSolanaLike,
         stake::StakeInfoMap,
-        util::{ms_since_epoch, IncrementalBackoff},
+        util::{IncrementalBackoff, ms_since_epoch},
         version::VERSION,
     },
     anyhow::Context,
@@ -41,13 +42,13 @@ use {
     tokio::{
         sync::oneshot,
         task::JoinSet,
-        time::{interval, Duration},
+        time::{Duration, interval},
     },
     tonic::{
-        metadata::{errors::InvalidMetadataValue, AsciiMetadataValue},
+        Request, Status,
+        metadata::{AsciiMetadataValue, errors::InvalidMetadataValue},
         service::Interceptor,
         transport::channel::{ClientTlsConfig, Endpoint},
-        Request, Status,
     },
     tracing::{debug, error, info},
     uuid::Uuid,
@@ -361,7 +362,9 @@ impl GrpcServer {
                     if error.to_string().contains("features")
                         || error.to_string().contains("Feature")
                     {
-                        error!("Fatal error - feature flags not supported by gateway. Please remove them from config.yml");
+                        error!(
+                            "Fatal error - feature flags not supported by gateway. Please remove them from config.yml"
+                        );
                         // Wait a bit before exiting to allow log to flush
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         std::process::exit(1);
@@ -458,7 +461,9 @@ impl GrpcServer {
             if last_connect_time.elapsed() < Duration::from_secs(2) {
                 quick_disconnects += 1;
                 if quick_disconnects >= MAX_QUICK_DISCONNECTS {
-                    error!("Too many quick disconnections ({quick_disconnects}). Last error: {loop_result}");
+                    error!(
+                        "Too many quick disconnections ({quick_disconnects}). Last error: {loop_result}"
+                    );
                     error!(
                         "This may indicate a protocol mismatch or feature flag incompatibility."
                     );
@@ -477,8 +482,8 @@ impl GrpcServer {
         stream_buffer_size: usize,
         features: FeatureSet,
     ) -> anyhow::Result<(
-        impl Sink<SubscribeRequest, Error = futures::channel::mpsc::SendError>,
-        impl Stream<Item = Result<SubscribeResponse, Status>>,
+        impl Sink<SubscribeRequest, Error = futures::channel::mpsc::SendError> + use<>,
+        impl Stream<Item = Result<SubscribeResponse, Status>> + use<>,
     )> {
         let x_token = GrpcClientXToken::new(x_token)?;
 

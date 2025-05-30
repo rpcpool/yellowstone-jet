@@ -9,7 +9,7 @@ use {
     },
     solana_sdk::{clock::MAX_RECENT_BLOCKHASHES, hash::Hash},
     std::{collections::HashMap, ops::DerefMut, sync::Arc},
-    tokio::sync::{broadcast, Notify, RwLock},
+    tokio::sync::{Notify, RwLock, broadcast},
     tracing::debug,
 };
 

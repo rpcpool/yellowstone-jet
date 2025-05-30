@@ -4,7 +4,7 @@ use {
         transactions::SendTransactionsPool,
     },
     anyhow::Context as _,
-    futures::future::{ready, BoxFuture, FutureExt, TryFutureExt},
+    futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
     hyper::{Request, Response, StatusCode},
     jsonrpsee::{
         core::http_helpers::Body,
@@ -164,14 +164,14 @@ pub mod rpc_admin {
         super::invalid_params,
         crate::quic_solana::ConnectionCacheIdentity,
         jsonrpsee::{
-            core::{async_trait, RpcResult},
+            core::{RpcResult, async_trait},
             proc_macros::rpc,
         },
         solana_sdk::{
             pubkey::Pubkey,
             signer::{
-                keypair::{read_keypair_file, Keypair},
                 Signer,
+                keypair::{Keypair, read_keypair_file},
             },
         },
         tracing::info,
@@ -269,7 +269,7 @@ pub mod rpc_solana_like {
             transactions::SendTransactionsPool,
         },
         jsonrpsee::{
-            core::{async_trait, RpcResult},
+            core::{RpcResult, async_trait},
             proc_macros::rpc,
         },
         solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient,

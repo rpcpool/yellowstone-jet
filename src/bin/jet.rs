@@ -9,20 +9,20 @@ use {
     solana_sdk::{
         commitment_config::CommitmentConfig,
         pubkey::Pubkey,
-        signature::{read_keypair, Keypair},
+        signature::{Keypair, read_keypair},
     },
     std::{
         convert::identity,
         fs,
         path::PathBuf,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     },
     tokio::{
         runtime::Builder,
-        signal::unix::{signal, SignalKind},
+        signal::unix::{SignalKind, signal},
         sync::{broadcast, oneshot},
         task::JoinHandle,
     },
@@ -31,8 +31,8 @@ use {
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{
-            load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream,
-            PrometheusConfig, RpcErrorStrategy,
+            ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream, PrometheusConfig,
+            RpcErrorStrategy, load_config,
         },
         feature_flags::FeatureSet,
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
@@ -41,10 +41,10 @@ use {
         metrics::{collect_to_text, inject_job_label, jet as metrics},
         quic::{QuicClient, QuicClientMetric},
         quic_solana::ConnectionCache,
-        rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType},
+        rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl},
         setup_tracing,
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
-        stake::{self, spawn_cache_stake_info_map, StakeInfoMap},
+        stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         task_group::TaskGroup,
         transactions::{GrpcRootedTxReceiver, SendTransactionsPool},
         util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
@@ -455,45 +455,48 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     .await?;
 
     let (stop_jet_gw_listener_tx, stop_jet_gw_listener_rx) = oneshot::channel();
-    let jet_gw_listener = if let Some(config_jet_gateway) = config.jet_gateway {
-        if config_jet_gateway.endpoints.is_empty() {
-            warn!("no endpoints for jet-gateway with existed config");
-            None
-        } else {
-            let jet_gw_config = config_jet_gateway.clone();
-            let quic_identity_observer = quic_identity_observer.clone();
-            let expected_identity = config.identity.expected;
+    let jet_gw_listener = match config.jet_gateway {
+        Some(config_jet_gateway) => {
+            if config_jet_gateway.endpoints.is_empty() {
+                warn!("no endpoints for jet-gateway with existed config");
+                None
+            } else {
+                let jet_gw_config = config_jet_gateway.clone();
+                let quic_identity_observer = quic_identity_observer.clone();
+                let expected_identity = config.identity.expected;
 
-            let tx_sender = RpcServer::create_solana_like_rpc_server_impl(
-                send_transactions.clone(),
-                config.upstream.rpc.clone(),
-                config.listen_solana_like.proxy_sanitize_check,
-                config.listen_solana_like.proxy_preflight_check,
-            )
-            .await
-            .expect("rpc server impl");
-
-            info!("starting jet-gateway listener");
-            let stake_info = stake_info_map.clone();
-            let h = tokio::spawn(async move {
-                spawn_jet_gw_listener(
-                    stake_info,
-                    jet_gw_config,
-                    quic_identity_observer,
-                    tx_sender,
-                    expected_identity,
-                    config.features,
-                    stop_jet_gw_listener_rx,
+                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(
+                    send_transactions.clone(),
+                    config.upstream.rpc.clone(),
+                    config.listen_solana_like.proxy_sanitize_check,
+                    config.listen_solana_like.proxy_preflight_check,
                 )
                 .await
-            })
-            .map(|result| result.map_err(anyhow::Error::new).and_then(identity));
+                .expect("rpc server impl");
 
-            Some(h.boxed())
+                info!("starting jet-gateway listener");
+                let stake_info = stake_info_map.clone();
+                let h = tokio::spawn(async move {
+                    spawn_jet_gw_listener(
+                        stake_info,
+                        jet_gw_config,
+                        quic_identity_observer,
+                        tx_sender,
+                        expected_identity,
+                        config.features,
+                        stop_jet_gw_listener_rx,
+                    )
+                    .await
+                })
+                .map(|result| result.map_err(anyhow::Error::new).and_then(identity));
+
+                Some(h.boxed())
+            }
         }
-    } else {
-        warn!("Skipping jet-gateway listener, no config provided");
-        None
+        _ => {
+            warn!("Skipping jet-gateway listener, no config provided");
+            None
+        }
     };
 
     let mut sigint = signal(SignalKind::interrupt())?;

@@ -255,18 +255,19 @@ impl OneTimeAuthTokenStore for InMemoryTokenStore {
 
     async fn claim(&self, token: OneTimeAuthToken) -> Result<(), OneTimeAuthTokenClaimError> {
         let mut inner = self.inner.lock().await;
-        if let Some((actual_bound_pubkey, deadline)) = inner.remove(&token) {
-            if deadline < Instant::now() {
-                return Err(OneTimeAuthTokenClaimError::NotFound);
+        match inner.remove(&token) {
+            Some((actual_bound_pubkey, deadline)) => {
+                if deadline < Instant::now() {
+                    return Err(OneTimeAuthTokenClaimError::NotFound);
+                }
+                if actual_bound_pubkey != token.pubkey {
+                    return Err(OneTimeAuthTokenClaimError::PubkeyMismatch);
+                }
+                // Here we garbage collect expired tokens
+                inner.retain(|_, (_, deadline)| deadline.elapsed() == Duration::ZERO);
+                Ok(())
             }
-            if actual_bound_pubkey != token.pubkey {
-                return Err(OneTimeAuthTokenClaimError::PubkeyMismatch);
-            }
-            // Here we garbage collect expired tokens
-            inner.retain(|_, (_, deadline)| deadline.elapsed() == Duration::ZERO);
-            Ok(())
-        } else {
-            Err(OneTimeAuthTokenClaimError::NotFound)
+            _ => Err(OneTimeAuthTokenClaimError::NotFound),
         }
     }
 }

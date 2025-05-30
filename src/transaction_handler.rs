@@ -222,7 +222,7 @@ impl TransactionHandler {
         transaction: &VersionedTransaction,
         config: &RpcSendTransactionConfig,
     ) -> Result<(), TransactionHandlerError> {
-        if let Err(error) = self
+        match self
             .rpc
             .sanitize_transaction(
                 transaction,
@@ -237,11 +237,10 @@ impl TransactionHandler {
             )
             .await
         {
-            Err(TransactionHandlerError::SanitizeCheckFailed(
+            Err(error) => Err(TransactionHandlerError::SanitizeCheckFailed(
                 error.to_string(),
-            ))
-        } else {
-            Ok(())
+            )),
+            _ => Ok(()),
         }
     }
 }
@@ -351,7 +350,7 @@ mod tests {
             transaction: &VersionedTransaction,
             config: &RpcSendTransactionConfig,
         ) -> Result<(), TransactionHandlerError> {
-            if let Err(error) = self
+            match self
                 .rpc
                 .sanitize_transaction(
                     transaction,
@@ -366,11 +365,10 @@ mod tests {
                 )
                 .await
             {
-                Err(TransactionHandlerError::SanitizeCheckFailed(
+                Err(error) => Err(TransactionHandlerError::SanitizeCheckFailed(
                     error.to_string(),
-                ))
-            } else {
-                Ok(())
+                )),
+                _ => Ok(()),
             }
         }
     }

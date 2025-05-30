@@ -124,10 +124,13 @@ where
                     if !error.is_transient() {
                         return Err(error);
                     }
-                    if let Some(interval) = retry_intervals.next() {
-                        tokio::time::sleep(interval).await;
-                    } else {
-                        return Err(error);
+                    match retry_intervals.next() {
+                        Some(interval) => {
+                            tokio::time::sleep(interval).await;
+                        }
+                        _ => {
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -340,7 +343,7 @@ pub mod testkit {
 pub mod tests {
 
     use {
-        super::{testkit::MockRpcSender, RetryRpcSender, RetryRpcSenderStrategy},
+        super::{RetryRpcSender, RetryRpcSenderStrategy, testkit::MockRpcSender},
         crate::solana_rpc_utils::testkit::{return_fatal_error, return_transient_error},
         solana_client::{
             nonblocking::rpc_client::RpcClient, rpc_client::RpcClientConfig,

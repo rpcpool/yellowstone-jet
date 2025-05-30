@@ -7,8 +7,8 @@ use {
         transactions::SendTransactionInfoId,
     },
     futures::{
-        future::{join_all, BoxFuture},
         FutureExt,
+        future::{BoxFuture, join_all},
     },
     solana_sdk::{clock::Slot, pubkey::Pubkey, signature::Signature},
     std::{fmt, net::SocketAddr, sync::Arc, time::Duration},
@@ -229,24 +229,25 @@ impl QuicClient {
 
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
-        let tpus_info = if let Some(store) = self.shield_policy_store.as_ref() {
-            let snapshot = store.snapshot();
+        let tpus_info = match self.shield_policy_store.as_ref() {
+            Some(store) => {
+                let snapshot = store.snapshot();
 
-            tpus_info
-                .into_iter()
-                .filter(
-                    |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
-                        Ok(allowed) => allowed,
-                        Err(_) => {
-                            shield_policies_not_found_inc();
+                tpus_info
+                    .into_iter()
+                    .filter(
+                        |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
+                            Ok(allowed) => allowed,
+                            Err(_) => {
+                                shield_policies_not_found_inc();
 
-                            false
-                        }
-                    },
-                )
-                .collect()
-        } else {
-            tpus_info
+                                false
+                            }
+                        },
+                    )
+                    .collect()
+            }
+            _ => tpus_info,
         };
 
         let before_policy_check_tpu_infos_count = tpus_info.len();
@@ -296,24 +297,25 @@ impl QuicClient {
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
         let before_policy_check_tpu_infos_count = tpus_info.len();
-        let tpus_info = if let Some(store) = self.shield_policy_store.as_ref() {
-            let snapshot = store.snapshot();
+        let tpus_info = match self.shield_policy_store.as_ref() {
+            Some(store) => {
+                let snapshot = store.snapshot();
 
-            tpus_info
-                .into_iter()
-                .filter(
-                    |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
-                        Ok(allowed) => allowed,
-                        Err(_) => {
-                            shield_policies_not_found_inc();
+                tpus_info
+                    .into_iter()
+                    .filter(
+                        |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
+                            Ok(allowed) => allowed,
+                            Err(_) => {
+                                shield_policies_not_found_inc();
 
-                            false
-                        }
-                    },
-                )
-                .collect()
-        } else {
-            tpus_info
+                                false
+                            }
+                        },
+                    )
+                    .collect()
+            }
+            _ => tpus_info,
         };
 
         sts_tpu_denied_inc_by(before_policy_check_tpu_infos_count - tpus_info.len());
@@ -447,7 +449,7 @@ pub mod teskit {
     use {
         super::UpcomingLeaderSchedule,
         crate::cluster_tpu_info::TpuInfo,
-        futures::{future::BoxFuture, FutureExt},
+        futures::{FutureExt, future::BoxFuture},
     };
 
     pub struct MockClusterTpuInfo {

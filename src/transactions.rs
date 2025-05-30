@@ -11,7 +11,7 @@ use {
     },
     futures::future::BoxFuture,
     solana_sdk::{
-        clock::{Slot, MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES},
+        clock::{MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES, Slot},
         pubkey::Pubkey,
         signature::Signature,
         transaction::VersionedTransaction,
@@ -21,16 +21,16 @@ use {
         future::Future,
         ops::DerefMut,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     },
     tokio::{
         sync::{
-            broadcast,
+            RwLock, broadcast,
             mpsc::{self},
-            oneshot, RwLock,
+            oneshot,
         },
         task::{self, JoinSet},
         time::Instant,
@@ -54,7 +54,7 @@ pub trait RootedTxReceiver {
     async fn subscribe_signature(&mut self, signature: Signature);
     async fn unsubscribe_signature(&mut self, signature: Signature);
     async fn get_transaction_commitment(&mut self, signature: Signature)
-        -> Option<CommitmentLevel>;
+    -> Option<CommitmentLevel>;
     async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)>;
 }
 
@@ -891,8 +891,8 @@ pub mod testkit {
         solana_sdk::signature::Signature,
         std::{collections::HashMap, sync::Arc},
         tokio::sync::{
-            mpsc::{self, UnboundedReceiver},
             RwLock,
+            mpsc::{self, UnboundedReceiver},
         },
     };
 

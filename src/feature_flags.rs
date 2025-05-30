@@ -11,7 +11,7 @@
 
 use {
     crate::proto::jet::Feature,
-    serde::{de, Deserialize},
+    serde::{Deserialize, de},
     std::{collections::HashSet, str::FromStr},
 };
 
@@ -76,10 +76,9 @@ pub struct FeatureSet {
 impl FeatureSet {
     #[cfg(test)]
     pub(crate) fn is_enabled(&self, feature_str: impl AsRef<str>) -> bool {
-        if let Ok(feature) = FeatureFlag::from_str(feature_str.as_ref()) {
-            self.enabled_features.contains(&feature)
-        } else {
-            false
+        match FeatureFlag::from_str(feature_str.as_ref()) {
+            Ok(feature) => self.enabled_features.contains(&feature),
+            _ => false,
         }
     }
 

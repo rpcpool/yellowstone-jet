@@ -1,6 +1,6 @@
 use {
     crate::{metrics, rpc::invalid_params},
-    base64::{prelude::BASE64_STANDARD, Engine},
+    base64::{Engine, prelude::BASE64_STANDARD},
     bincode::config::Options,
     jsonrpsee::core::RpcResult,
     solana_client::{
@@ -113,7 +113,9 @@ pub fn get_durable_nonce(tx: &VersionedTransaction) -> Option<Pubkey> {
         })
         .filter(|ix| {
             matches!(
-                limited_deserialize(&ix.data, 4 /* serialized size of AdvanceNonceAccount */),
+                limited_deserialize(
+                    &ix.data, 4 /* serialized size of AdvanceNonceAccount */
+                ),
                 Ok(SystemInstruction::AdvanceNonceAccount)
             )
         })
