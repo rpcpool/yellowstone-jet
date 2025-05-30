@@ -2,13 +2,13 @@ use {
     crate::{
         config::ConfigUpstreamGrpc,
         metrics::jet as metrics,
-        util::{fork_oneshot, BlockHeight, CommitmentLevel, IncrementalBackoff},
+        util::{BlockHeight, CommitmentLevel, IncrementalBackoff, fork_oneshot},
     },
     anyhow::Context,
     futures::{
-        future::{try_join, TryFutureExt},
-        stream::{Stream, StreamExt},
         FutureExt,
+        future::{TryFutureExt, try_join},
+        stream::{Stream, StreamExt},
     },
     maplit::hashmap,
     semver::{Version, VersionReq},
@@ -17,9 +17,8 @@ use {
     std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration},
     tokio::{
         sync::{
-            broadcast, mpsc,
+            Mutex, broadcast, mpsc,
             oneshot::{self, error::TryRecvError},
-            Mutex,
         },
         task::{JoinError, JoinHandle},
     },
@@ -28,11 +27,10 @@ use {
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
         prelude::{
-            subscribe_update::UpdateOneof, BlockHeight as GrpcBlockHeight,
-            CommitmentLevel as GrpcCommitmentLevel, SubscribeRequest,
-            SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots,
+            BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel,
+            SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots,
             SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta,
-            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus,
+            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
         },
         tonic::Status,
     },
@@ -338,7 +336,7 @@ impl GeyserSubscriber {
         endpoint: &str,
         x_token: Option<&str>,
         full: bool,
-    ) -> anyhow::Result<impl Stream<Item = Result<SubscribeUpdate, Status>>> {
+    ) -> anyhow::Result<impl Stream<Item = Result<SubscribeUpdate, Status>> + use<>> {
         let mut backoff = IncrementalBackoff::default();
         loop {
             backoff.maybe_tick().await;

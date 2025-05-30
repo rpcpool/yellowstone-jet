@@ -2,8 +2,8 @@ use {
     crate::{feature_flags::FeatureSet, util::CommitmentLevel},
     anyhow::Context,
     serde::{
-        de::{self, Deserializer},
         Deserialize,
+        de::{self, Deserializer},
     },
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_sdk::{
@@ -12,7 +12,7 @@ use {
             QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
             QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
         },
-        signer::keypair::{read_keypair_file, Keypair},
+        signer::keypair::{Keypair, read_keypair_file},
     },
     solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
     std::{
@@ -366,7 +366,7 @@ pub struct ConfigQuic {
 }
 
 impl ConfigQuic {
-    pub fn default_connection_max_pools() -> NonZeroUsize {
+    pub const fn default_connection_max_pools() -> NonZeroUsize {
         NonZeroUsize::new(1024).unwrap()
     }
 

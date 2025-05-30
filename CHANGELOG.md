@@ -16,6 +16,10 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [12.0.1]
+
+- Updated to Cargo edition 2024 and 1.85 toolchain.
+
 ## [12.0.0]
 
 ### Breaking Changes

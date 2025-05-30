@@ -11,14 +11,14 @@ use {
         rpc_response::{RpcContactInfo, RpcLeaderSchedule},
     },
     solana_sdk::{
-        clock::{Slot, NUM_CONSECUTIVE_LEADER_SLOTS},
+        clock::{NUM_CONSECUTIVE_LEADER_SLOTS, Slot},
         epoch_schedule::EpochSchedule,
         pubkey::Pubkey,
     },
     std::{collections::HashMap, future::Future, net::SocketAddr, sync::Arc},
     tokio::{
-        sync::{broadcast, RwLock},
-        time::{sleep, Duration, Instant},
+        sync::{RwLock, broadcast},
+        time::{Duration, Instant, sleep},
     },
     tracing::{info, warn},
 };

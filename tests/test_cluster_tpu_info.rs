@@ -6,7 +6,7 @@ use {
     },
     solana_sdk::{clock::Slot, epoch_schedule::EpochSchedule, hash::Hash, pubkey::Pubkey},
     std::{collections::HashMap, sync::Arc, time::Duration},
-    tokio::sync::{broadcast, mpsc, Mutex, RwLock},
+    tokio::sync::{Mutex, RwLock, broadcast, mpsc},
     yellowstone_jet::{
         cluster_tpu_info::{ClusterTpuInfo, ClusterTpuRpcClient},
         grpc_geyser::{GeyserStreams, GrpcUpdateMessage, SlotUpdateInfoWithCommitment},

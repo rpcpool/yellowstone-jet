@@ -3,10 +3,10 @@
 /// TODO: CREATE A COMMON LIB
 use {
     crate::solana_rpc_utils::SolanaRpcErrorKindExt,
-    futures::{stream, StreamExt},
+    futures::{StreamExt, stream},
     solana_client::{nonblocking::rpc_client::RpcClient, rpc_response::RpcVoteAccountStatus},
     solana_sdk::{pubkey::Pubkey, quic::QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS},
-    solana_streamer::nonblocking::quic::{compute_max_allowed_uni_streams, ConnectionPeerType},
+    solana_streamer::nonblocking::quic::{ConnectionPeerType, compute_max_allowed_uni_streams},
     std::{
         collections::HashMap, future::Future, str::FromStr, sync::Arc, sync::RwLock as StdRwLock,
     },
@@ -319,7 +319,7 @@ pub mod tests {
     use {
         crate::{
             solana_rpc_utils::testkit::{
-                return_fatal_error, return_sucess, return_transient_error, MockRpcSender,
+                MockRpcSender, return_fatal_error, return_sucess, return_transient_error,
             },
             stake::{self, CacheStakeInfoMapCommand, SpawnMode},
         },

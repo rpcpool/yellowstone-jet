@@ -9,9 +9,9 @@ use {
     },
     std::{cmp::Ordering, future::Future, sync::Arc},
     tokio::{
-        sync::{oneshot, watch, Mutex, RwLock},
+        sync::{Mutex, RwLock, oneshot, watch},
         task::{JoinError, JoinHandle},
-        time::{sleep, Duration},
+        time::{Duration, sleep},
     },
 };
 

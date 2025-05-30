@@ -1,10 +1,10 @@
 use {
     anyhow::Context,
-    base64::{prelude::BASE64_STANDARD, Engine},
+    base64::{Engine, prelude::BASE64_STANDARD},
     clap::Parser,
     futures::{channel::mpsc, future::TryFutureExt, sink::SinkExt},
     reqwest::Client,
-    serde::{de, Deserialize, Deserializer},
+    serde::{Deserialize, Deserializer, de},
     solana_client::{
         nonblocking::rpc_client::RpcClient,
         rpc_config::{RpcBlockConfig, RpcSendTransactionConfig},
@@ -12,11 +12,11 @@ use {
     solana_sdk::{
         commitment_config::{CommitmentConfig, CommitmentLevel},
         compute_budget::ComputeBudgetInstruction,
-        message::{v0, VersionedMessage},
+        message::{VersionedMessage, v0},
         native_token::LAMPORTS_PER_SOL,
         pubkey::Pubkey,
-        signature::{read_keypair_file, Signature},
-        signer::{keypair::Keypair, Signer},
+        signature::{Signature, read_keypair_file},
+        signer::{Signer, keypair::Keypair},
         system_instruction,
         transaction::VersionedTransaction,
     },
@@ -25,25 +25,25 @@ use {
         path::{Path, PathBuf},
         str::FromStr,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     },
     tokio::{
         fs,
         sync::Mutex,
-        time::{sleep, Duration},
+        time::{Duration, sleep},
     },
     tonic::{
-        transport::{channel::ClientTlsConfig, Endpoint},
         Response, Streaming,
+        transport::{Endpoint, channel::ClientTlsConfig},
     },
     tracing::{error, info},
     yellowstone_jet::{
         payload::{JetRpcSendTransactionConfig, TransactionPayload},
         proto::jet::{
-            jet_gateway_client::JetGatewayClient, publish_request::Message as PublishMessage,
             PublishRequest, PublishResponse, PublishTransaction,
+            jet_gateway_client::JetGatewayClient, publish_request::Message as PublishMessage,
         },
         setup_tracing,
     },

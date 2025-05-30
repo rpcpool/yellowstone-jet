@@ -63,7 +63,7 @@ pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
 }
 
 #[allow(dead_code)]
-pub fn default_config_quic() -> ConfigQuic {
+pub const fn default_config_quic() -> ConfigQuic {
     ConfigQuic {
         connection_max_pools: ConfigQuic::default_connection_max_pools(),
         connection_pool_size: ConfigQuic::default_connection_pool_size(),
@@ -92,7 +92,7 @@ pub const fn default_config_transaction() -> ConfigSendTransactionService {
 }
 
 #[allow(dead_code)]
-pub fn default_config_quic_client() -> ConfigQuic {
+pub const fn default_config_quic_client() -> ConfigQuic {
     ConfigQuic {
         connection_max_pools: NonZeroUsize::new(256).unwrap(),
         connection_pool_size: 1,
