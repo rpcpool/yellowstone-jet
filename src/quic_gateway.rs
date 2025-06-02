@@ -1,6 +1,7 @@
 use {
     crate::{crypto_provider::crypto_provider, stake::StakeInfoMap},
     derive_more::Display,
+    futures::task::AtomicWaker,
     quinn::{
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, StoppedError,
         TransportConfig, VarInt, WriteError, crypto::rustls::QuicClientConfig,
@@ -16,8 +17,10 @@ use {
     std::{
         collections::{BTreeMap, HashMap, VecDeque},
         fmt,
+        marker::PhantomData,
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        sync::{Arc, RwLock},
+        sync::{Arc, RwLock, atomic::AtomicBool},
+        task::Poll,
         time::{Duration, Instant},
     },
     tokio::{
@@ -80,6 +83,7 @@ struct ConnectingMeta {
 
 struct UpdateGatewayIdentityCommand {
     new_identity: Keypair,
+    callback: Arc<UpdateIdentityInner>,
 }
 
 enum GatewayCommand {
@@ -743,7 +747,10 @@ impl TokioQuicGatewayRuntime {
     }
 
     fn update_identity(&mut self, update_identity_cmd: UpdateGatewayIdentityCommand) {
-        let UpdateGatewayIdentityCommand { new_identity } = update_identity_cmd;
+        let UpdateGatewayIdentityCommand {
+            new_identity,
+            callback,
+        } = update_identity_cmd;
         self.schedule_graceful_drop_all_worker();
         self.connecting_tasks.abort_all();
         self.connecting_tasks.detach_all();
@@ -759,10 +766,14 @@ impl TokioQuicGatewayRuntime {
 
         self.client_certificate = cert;
         self.identity = new_identity;
-
         connecting_meta.values().for_each(|meta| {
             self.spawn_connecting(meta.remote_peer_identity, meta.connection_attempt);
         });
+
+        callback
+            .set
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        callback.waker.wake();
     }
 
     fn handle_cnc(&mut self, command: GatewayCommand) {
@@ -910,6 +921,94 @@ impl GatewayIdentityUpdater {
     /// Changes the configured identity in the QUIC gateway
     ///
     pub async fn update_identity(&mut self, identity: Keypair) {
-        todo!()
+        let shared = UpdateIdentityInner {
+            set: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
+        };
+        let shared = Arc::new(shared);
+        let cmd = UpdateGatewayIdentityCommand {
+            new_identity: identity,
+            callback: Arc::clone(&shared),
+        };
+        self.cnc_tx
+            .send(GatewayCommand::UpdateIdenttiy(cmd))
+            .await
+            .expect("disconnected");
+        let update_identity = UpdateIdentity {
+            inner: shared,
+            _this: self,
+        };
+        update_identity.await
+    }
+}
+
+struct UpdateIdentityInner {
+    set: AtomicBool,
+    waker: AtomicWaker,
+}
+
+pub struct UpdateIdentity<'a> {
+    inner: Arc<UpdateIdentityInner>,
+    _this: &'a GatewayIdentityUpdater,
+}
+
+impl<'a> Future for UpdateIdentity<'a> {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // quick check to avoid registration if already done.
+        if self.inner.set.load(std::sync::atomic::Ordering::Relaxed) {
+            return Poll::Ready(());
+        }
+
+        self.inner.waker.register(cx.waker());
+
+        // Need to check condition **after** `register` to avoid a race
+        // condition that would result in lost notifications.
+        if self.inner.set.load(std::sync::atomic::Ordering::Relaxed) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use {
+        crate::quic_gateway::{
+            GatewayCommand, GatewayIdentityUpdater, UpdateGatewayIdentityCommand,
+        },
+        solana_sdk::signature::Keypair,
+        std::time::Duration,
+        tokio::sync::mpsc,
+    };
+
+    #[tokio::test]
+    async fn test_update_identity_fut() {
+        let (cnc_tx, mut cnc_rx) = mpsc::channel(10);
+        let mut updater = GatewayIdentityUpdater { cnc_tx };
+
+        let jh = tokio::spawn(async move {
+            let GatewayCommand::UpdateIdenttiy(UpdateGatewayIdentityCommand {
+                new_identity,
+                callback,
+            }) = cnc_rx.recv().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2));
+            callback
+                .set
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            callback.waker.wake();
+            new_identity
+        });
+
+        let identity = Keypair::new();
+        updater.update_identity(identity.insecure_clone()).await;
+
+        let actual = jh.await.unwrap();
+        assert_eq!(actual, identity)
     }
 }
