@@ -83,15 +83,6 @@ impl ConnectionCacheIdentity {
         self.identity_watcher.send_replace(keypair.pubkey());
     }
 
-    pub async fn get_cert(&self) -> CertificateDer {
-        self.shared
-            .lock()
-            .await
-            .client_certificate
-            .certificate
-            .clone()
-    }
-
     pub async fn get_identity(&self) -> Pubkey {
         self.shared.lock().await.client_certificate.pubkey
     }
