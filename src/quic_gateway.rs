@@ -7,7 +7,6 @@ use {
         TransportConfig, VarInt, WriteError, crypto::rustls::QuicClientConfig,
     },
     quinn_proto::TransportError,
-    rustls::crypto::hmac::Key,
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_quic_client::nonblocking::quic_client::{QuicClientCertificate, SkipServerVerification},
     solana_sdk::{pubkey::Pubkey, quic::QUIC_SEND_FAIRNESS, signature::Keypair, signer::Signer},
@@ -15,17 +14,15 @@ use {
         nonblocking::quic::ALPN_TPU_PROTOCOL_ID, tls_certificates::new_dummy_x509_certificate,
     },
     std::{
-        collections::{BTreeMap, HashMap, VecDeque},
-        fmt,
-        marker::PhantomData,
+        collections::{HashMap, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        sync::{Arc, RwLock, atomic::AtomicBool},
+        sync::{Arc, atomic::AtomicBool},
         task::Poll,
         time::{Duration, Instant},
     },
     tokio::{
         runtime::Handle,
-        sync::mpsc::{self, UnboundedReceiver},
+        sync::mpsc::{self},
         task::{self, Id, JoinError, JoinHandle, JoinSet},
     },
 };
@@ -49,15 +46,14 @@ pub(crate) enum ConnectingError {
 }
 
 pub struct QuicGatewayConfig {
-    port_range: PortRange,
-    max_idle_timeout: Option<Duration>,
-    keep_alive_interval: Option<Duration>,
+    pub port_range: PortRange,
+    pub max_idle_timeout: Option<Duration>,
+    pub keep_alive_interval: Option<Duration>,
     ///
     /// Maximum number of consecutive connection attempts
     ///
-    max_connection_attempts: usize,
-
-    transaction_sender_worker_channel_capacity: usize,
+    pub max_connection_attempts: usize,
+    pub transaction_sender_worker_channel_capacity: usize,
 }
 
 impl Default for QuicGatewayConfig {
@@ -94,22 +90,56 @@ enum TokioGateawyTaskMeta {
     DropAllWorkers,
 }
 
+///
+/// Tokio-based runtime to driver a QUIC gateway.
 pub(crate) struct TokioQuicGatewayRuntime {
-    // sm: QuicGatewaySM,
+    ///
+    /// The stake info map used to compute max stream limit
+    ///
     stake_info_map: StakeInfoMap,
 
+    ///
+    /// Holds on-going remote peer transaction sender workers.
+    ///
     tx_worker_sender_map: HashMap<Pubkey, mpsc::Sender<GatewayTransaction>>,
+
+    ///
+    /// Map from tokio task id to the remote peer it refers too.
+    ///
     tx_worker_meta: HashMap<Id, Pubkey>,
+
+    ///
+    /// JoinSet of all transaction sender workers.
+    ///
     tx_worker_set: JoinSet<TxSenderWorkerCompleted>,
+
+    ///
+    /// Transaction queues per remote identity waiting for connection to be come available.
+    ///
     tx_queues: HashMap<Pubkey, VecDeque<GatewayTransaction>>,
+
+    ///
+    /// The runtime to spawn transation sender worker on.
     tx_worker_rt: tokio::runtime::Handle,
 
+    ///
+    /// JoinSet of inflight connection attempt
+    ///
     connecting_tasks: JoinSet<Result<Connection, ConnectingError>>,
 
+    ///
+    /// Metadata about inflight connection attempt.
+    ///
     connecting_meta: HashMap<tokio::task::Id, ConnectingMeta>,
 
+    ///
+    /// Reversed of [`TokioQuicGatewayRuntime::connecting_meta`]
+    ///
     connecting_remote_peers: HashMap<Pubkey, tokio::task::Id>,
 
+    ///
+    /// Service to locate tpu port address from remote peer identity.
+    ///
     leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
 
     config: QuicGatewayConfig,
@@ -148,13 +178,16 @@ pub trait LeaderTpuInfoService {
     async fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
 }
 
+///
+/// A transaction with destination details to be sent to a remote peer.
+///
 pub struct GatewayTransaction {
     /// Id set by the sender to identify the transaction. Only meaningful to the sender.
-    tx_id: u64,
+    pub tx_id: u64,
     /// The wire format of the transaction.
-    wire: Arc<[u8]>,
+    pub wire: Arc<[u8]>,
     /// The pubkey of the remote peer to send the transaction to.
-    remote_peer: Pubkey,
+    pub remote_peer: Pubkey,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -169,17 +202,19 @@ enum SendTxError {
     ZeroRttRejected,
 }
 
+#[derive(Debug)]
 pub struct GatewayTxSent {
     pub remote_peer_identity: Pubkey,
     pub tx_id: u64,
 }
 
+#[derive(Debug)]
 pub struct GatewayTxFailed {
     pub remote_peer_identity: Pubkey,
     pub tx_id: u64,
 }
 
-#[derive(Clone, Display)]
+#[derive(Clone, Debug, Display)]
 pub enum TxDropReason {
     #[display("reached downstream transaction worker transaction queue capacity")]
     RateLimited,
@@ -189,12 +224,14 @@ pub enum TxDropReason {
     DropByGateway,
 }
 
+#[derive(Debug)]
 pub struct TxDrop {
     pub remote_peer_identity: Pubkey,
     pub tx_id: u64,
     pub drop_reason: TxDropReason,
 }
 
+#[derive(Debug)]
 pub enum GatewayResponse {
     TxSent(GatewayTxSent),
     TxFailed(GatewayTxFailed),
@@ -264,14 +301,16 @@ impl ConnectingTask {
 
         let connecting = endpoint
             .connect(remote_peer_addr, "connect")
-            .map_err(|e| ConnectingError::ConnectError(e))?;
+            .map_err(ConnectingError::ConnectError)?;
         let conn = connecting.await?;
         Ok(conn)
     }
 }
 
+///
+/// Transaction sender worker bound to a specific remote peer over the same connection.
+///
 struct QuicTxSenderWorker {
-    send_rt: tokio::runtime::Handle,
     remote_peer: Pubkey,
     max_stream_limit: u64,
     inflight_send: JoinSet<Result<SentOk, SendTxError>>,
@@ -326,9 +365,9 @@ impl QuicTxSenderWorker {
             Ok(ok)
         };
 
-        let abort_handle = self.inflight_send.spawn_on(fut, &self.send_rt);
+        let abort_handle = self.inflight_send.spawn(fut);
         tracing::debug!(
-            "Sent tx: {:?} to remote peer: {:?} at permit height",
+            "Sent tx: {:?} to remote peer: {:?}",
             tx.tx_id,
             remote_peer_identity,
         );
@@ -480,10 +519,10 @@ impl QuicTxSenderWorker {
             let _ = self.handle_tx_sent_result(result);
         }
 
-        return TxSenderWorkerCompleted {
+        TxSenderWorkerCompleted {
             err: maybe_err,
             rx: self.incoming_rx,
-        };
+        }
     }
 }
 
@@ -508,12 +547,22 @@ impl TokioQuicGatewayRuntime {
             connection_attempt: attempt,
         };
         let abort_handle = self.connecting_tasks.spawn(fut);
+        tracing::trace!(
+            "Spawning connection for remote peer: {:?}, attempt: {}",
+            remote_peer_identity,
+            attempt
+        );
         self.connecting_remote_peers
             .insert(remote_peer_identity, abort_handle.id());
         self.connecting_meta.insert(abort_handle.id(), meta);
     }
 
     fn drop_peer_queued_tx(&mut self, remote_peer_identity: Pubkey, reason: TxDropReason) {
+        tracing::trace!(
+            "Dropping queued tx for remote peer: {} due to reason: {:?}",
+            remote_peer_identity,
+            reason
+        );
         let _ = self
             .tx_queues
             .remove(&remote_peer_identity)
@@ -533,7 +582,7 @@ impl TokioQuicGatewayRuntime {
 
     fn current_max_stream_limit(&self) -> u64 {
         let limits = self.stake_info_map.get_stake_limits(self.identity.pubkey());
-        return limits.max_streams;
+        limits.max_streams
     }
 
     fn install_worker(&mut self, remote_peer_identity: Pubkey, connection: Connection) {
@@ -541,10 +590,10 @@ impl TokioQuicGatewayRuntime {
 
         let connection = Arc::new(connection);
         let output_tx = self.response_outlet.clone();
+        let max_stream_capacity = self.current_max_stream_limit();
         let worker = QuicTxSenderWorker {
-            send_rt: self.tx_worker_rt.clone(),
             remote_peer: remote_peer_identity,
-            max_stream_limit: self.current_max_stream_limit(),
+            max_stream_limit: max_stream_capacity,
             inflight_send: JoinSet::new(),
             inflight_send_meta: HashMap::new(),
             connection,
@@ -565,8 +614,7 @@ impl TokioQuicGatewayRuntime {
         );
         self.tx_worker_meta.insert(ah.id(), remote_peer_identity);
         tracing::debug!(
-            "Installed tx worker for remote peer: {:?}",
-            remote_peer_identity
+            "Installed tx worker for remote peer: {remote_peer_identity} with max stream limit: {max_stream_capacity}"
         );
     }
 
@@ -647,6 +695,11 @@ impl TokioQuicGatewayRuntime {
                 }
                 Err(e) => match e {
                     mpsc::error::TrySendError::Full(tx) => {
+                        tracing::warn!(
+                            "Remote peer: {:?} tx queue is full, dropping tx: {:?}",
+                            remote_peer_identity,
+                            tx_id
+                        );
                         let txdrop = TxDrop {
                             remote_peer_identity,
                             tx_id: tx.tx_id,
@@ -655,6 +708,11 @@ impl TokioQuicGatewayRuntime {
                         let _ = self.response_outlet.send(GatewayResponse::TxDrop(txdrop));
                     }
                     mpsc::error::TrySendError::Closed(tx) => {
+                        tracing::debug!(
+                            "Remote peer: {:?} tx worker is closed, enqueuing tx: {:?}",
+                            remote_peer_identity,
+                            tx_id
+                        );
                         self.tx_queues
                             .entry(remote_peer_identity)
                             .or_default()
@@ -690,6 +748,10 @@ impl TokioQuicGatewayRuntime {
                     .remove(&remote_peer_identity)
                     .expect("tx worker sender");
                 drop(worker_tx);
+                tracing::trace!(
+                    "Tx worker for remote peer: {:?} completed",
+                    remote_peer_identity
+                );
                 let tx_to_rescue = self.tx_queues.entry(remote_peer_identity).or_default();
                 while let Ok(tx) = worker_completed.rx.try_recv() {
                     tx_to_rescue.push_back(tx);
@@ -723,6 +785,7 @@ impl TokioQuicGatewayRuntime {
     }
 
     fn schedule_graceful_drop_all_worker(&mut self) {
+        tracing::trace!("Scheduling graceful drop of all transaction workers");
         let mut tx_worker_meta = std::mem::take(&mut self.tx_worker_meta);
         let tx_worker_sender_map = std::mem::take(&mut self.tx_worker_sender_map);
         let mut tx_worker_set = std::mem::take(&mut self.tx_worker_set);
@@ -735,6 +798,7 @@ impl TokioQuicGatewayRuntime {
                     Err(e) => e.id(),
                 };
                 let remote_peer = tx_worker_meta.remove(&id).unwrap();
+                tracing::trace!("graceful drop worker for remote peer: {}", remote_peer);
                 if let Err(e) = result {
                     tracing::debug!("remote peer {remote_peer} join failed with {e:?}");
                 }
@@ -770,10 +834,18 @@ impl TokioQuicGatewayRuntime {
             self.spawn_connecting(meta.remote_peer_identity, meta.connection_attempt);
         });
 
+        if !connecting_meta.is_empty() {
+            tracing::trace!(
+                "Will auto-reconnect to {} remote peers after identity update",
+                connecting_meta.len()
+            );
+        }
+
         callback
             .set
             .store(true, std::sync::atomic::Ordering::Relaxed);
         callback.waker.wake();
+        tracing::trace!("Updated gateway identity to: {}", self.identity.pubkey());
     }
 
     fn handle_cnc(&mut self, command: GatewayCommand) {
@@ -819,33 +891,33 @@ pub struct TokioQuicGatewaySession {
     ///
     /// The [`GatewayIdentityUpdater`] use to change the gateway configured [`Keypair`].
     ///
-    identity_updater: GatewayIdentityUpdater,
+    pub gateway_identity_updater: GatewayIdentityUpdater,
 
     ///
     /// Sink to send transaction to.
     /// If all reference to the sink are dropped, the underlying gateway runtime will stop too.
     ///
-    transaction_sink: mpsc::Sender<GatewayTransaction>,
+    pub transaction_sink: mpsc::Sender<GatewayTransaction>,
 
     ///
     /// Source emitting gateway response.
     ///
-    gateway_response_source: mpsc::UnboundedReceiver<GatewayResponse>,
+    pub gateway_response_source: mpsc::UnboundedReceiver<GatewayResponse>,
 
     ///
     /// Handle to tokio-based QUIC gateway runtime.
     /// Dropping this handle does not interrupt the gateway runtime.
     ///
-    gateway_join_handle: JoinHandle<()>,
+    pub gateway_join_handle: JoinHandle<()>,
 }
 
 ///
 /// Factory struct to spawn tokio-based QUIC gateway
 ///
 pub struct TokioQuicGatewaySpawner {
-    stake_info_map: StakeInfoMap,
-    leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
-    gateway_tx_channel_capacity: usize,
+    pub stake_info_map: StakeInfoMap,
+    pub leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
+    pub gateway_tx_channel_capacity: usize,
 }
 
 impl TokioQuicGatewaySpawner {
@@ -885,7 +957,7 @@ impl TokioQuicGatewaySpawner {
             connecting_meta: Default::default(),
             connecting_remote_peers: Default::default(),
             leader_tpu_info_service: Arc::clone(&self.leader_tpu_info_service),
-            config: config,
+            config,
             client_certificate: cert,
             tx_inlet: tx_outlet,
             response_outlet: gateway_resp_tx,
@@ -898,7 +970,7 @@ impl TokioQuicGatewaySpawner {
 
         TokioQuicGatewaySession {
             transaction_sink: tx_inlet,
-            identity_updater: GatewayIdentityUpdater {
+            gateway_identity_updater: GatewayIdentityUpdater {
                 cnc_tx: gateway_cnc_tx,
             },
             gateway_response_source: gateway_resp_rx,
@@ -952,7 +1024,7 @@ pub struct UpdateIdentity<'a> {
     _this: &'a GatewayIdentityUpdater,
 }
 
-impl<'a> Future for UpdateIdentity<'a> {
+impl Future for UpdateIdentity<'_> {
     type Output = ();
 
     fn poll(
@@ -976,6 +1048,10 @@ impl<'a> Future for UpdateIdentity<'a> {
     }
 }
 
+pub fn module_path_for_test() -> &'static str {
+    module_path!()
+}
+
 #[cfg(test)]
 mod test {
     use {
@@ -997,7 +1073,7 @@ mod test {
                 new_identity,
                 callback,
             }) = cnc_rx.recv().await.unwrap();
-            tokio::time::sleep(Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_secs(2)).await;
             callback
                 .set
                 .store(true, std::sync::atomic::Ordering::Relaxed);
