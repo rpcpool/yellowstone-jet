@@ -1,6 +1,5 @@
 use {
     std::io::{self, IsTerminal},
-    tokio::io::stdout,
     tracing_subscriber::{
         filter::{EnvFilter, LevelFilter},
         layer::SubscriberExt,

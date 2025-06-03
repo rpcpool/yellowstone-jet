@@ -9,7 +9,12 @@ use {
     quinn_proto::TransportError,
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_quic_client::nonblocking::quic_client::{QuicClientCertificate, SkipServerVerification},
-    solana_sdk::{pubkey::Pubkey, quic::QUIC_SEND_FAIRNESS, signature::Keypair, signer::Signer},
+    solana_sdk::{
+        pubkey::Pubkey,
+        quic::{QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS, QUIC_SEND_FAIRNESS},
+        signature::Keypair,
+        signer::Signer,
+    },
     solana_streamer::{
         nonblocking::quic::ALPN_TPU_PROTOCOL_ID, tls_certificates::new_dummy_x509_certificate,
     },
@@ -27,6 +32,7 @@ use {
     },
 };
 
+pub const DEFAULT_QUIC_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
 pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
 
@@ -47,12 +53,18 @@ pub(crate) enum ConnectingError {
 
 pub struct QuicGatewayConfig {
     pub port_range: PortRange,
-    pub max_idle_timeout: Option<Duration>,
-    pub keep_alive_interval: Option<Duration>,
+    pub max_idle_timeout: Duration,
+    // TODO check if we really need keep alive interval.
+    // we could use `max_idle_timeout` to detect dead connections and naturally stopped tx sender workers.
+    // pub keep_alive_interval: Option<Duration>,
     ///
     /// Maximum number of consecutive connection attempts
     ///
     pub max_connection_attempts: usize,
+
+    ///
+    /// Capacity of the transaction sender worker channel per remote peer.
+    ///
     pub transaction_sender_worker_channel_capacity: usize,
 }
 
@@ -60,8 +72,8 @@ impl Default for QuicGatewayConfig {
     fn default() -> Self {
         Self {
             port_range: VALIDATOR_PORT_RANGE,
-            max_idle_timeout: None,
-            keep_alive_interval: None,
+            max_idle_timeout: DEFAULT_QUIC_MAX_IDLE_TIMEOUT,
+            // keep_alive_interval: None,
             max_connection_attempts: DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT,
             transaction_sender_worker_channel_capacity: DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE,
         }
@@ -72,16 +84,25 @@ pub struct SentOk {
     pub e2e_time: Duration,
 }
 
+///
+/// Metadata about an inflight connection attempt to a remote peer.
+///
 struct ConnectingMeta {
     remote_peer_identity: Pubkey,
     connection_attempt: usize,
 }
 
+///
+/// Inner part of the update identity command.
+///
 struct UpdateGatewayIdentityCommand {
     new_identity: Keypair,
     callback: Arc<UpdateIdentityInner>,
 }
 
+///
+/// Command to control gateway behavior.
+///
 enum GatewayCommand {
     UpdateIdenttiy(UpdateGatewayIdentityCommand),
 }
@@ -238,13 +259,15 @@ pub enum GatewayResponse {
     TxDrop(TxDrop),
 }
 
+///
+/// A task to connect to a remote peer.
+/// 
 struct ConnectingTask {
     service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     remote_peer_identity: Pubkey,
     port_range: PortRange,
     cert: Arc<QuicClientCertificate>,
-    max_idle_timeout: Option<Duration>,
-    keep_alive_interval: Option<Duration>,
+    max_idle_timeout: Duration,
 }
 
 impl ConnectingTask {
@@ -284,13 +307,13 @@ impl ConnectingTask {
         let transport_config = {
             let mut res = TransportConfig::default();
 
-            let max_idle_timeout = self.max_idle_timeout.map(|timeout| {
-                IdleTimeout::try_from(timeout).expect("Failed to set QUIC max idle timeout")
-            });
-            res.max_idle_timeout(max_idle_timeout);
-            res.keep_alive_interval(self.keep_alive_interval);
+            let max_idle_timeout = IdleTimeout::try_from(self.max_idle_timeout)
+                .expect("Failed to set QUIC max idle timeout");
+            res.max_idle_timeout(Some(max_idle_timeout));
+            // We don't want automatic keep-alive, since we want to use it to detect inactive connections.
+            res.keep_alive_interval(None);
+            // We don't want fairness.
             res.send_fairness(QUIC_SEND_FAIRNESS);
-
             res
         };
 
@@ -417,8 +440,10 @@ impl QuicTxSenderWorker {
                                 }) = connection_error
                                 {
                                     if code == quinn_proto::TransportErrorCode::STREAM_LIMIT_ERROR {
-                                        self.max_stream_limit =
-                                            self.max_stream_limit.saturating_sub(1);
+                                        self.max_stream_limit = self
+                                            .max_stream_limit
+                                            .saturating_sub(1)
+                                            .max(QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS as u64);
                                         tracing::warn!(
                                             "Remote peer {} hit stream limit, prior load before sending this tx: {}, reducing max stream limit to {}",
                                             self.remote_peer,
@@ -527,19 +552,20 @@ impl QuicTxSenderWorker {
 }
 
 impl TokioQuicGatewayRuntime {
+    ///
+    /// Spawn a new connection attempt to a remote peer.
+    ///
     fn spawn_connecting(&mut self, remote_peer_identity: Pubkey, attempt: usize) {
         let service = Arc::clone(&self.leader_tpu_info_service);
         let port_range = self.config.port_range;
         let cert = Arc::clone(&self.client_certificate);
         let max_idle_timeout = self.config.max_idle_timeout;
-        let keep_alive_interval = self.config.keep_alive_interval;
         let fut = ConnectingTask {
             service,
             remote_peer_identity,
             port_range,
             cert,
             max_idle_timeout,
-            keep_alive_interval,
         }
         .run();
         let meta = ConnectingMeta {
@@ -557,6 +583,9 @@ impl TokioQuicGatewayRuntime {
         self.connecting_meta.insert(abort_handle.id(), meta);
     }
 
+    ///
+    /// Drops all queued transactions for a remote peer and notify the response outlet.
+    ///
     fn drop_peer_queued_tx(&mut self, remote_peer_identity: Pubkey, reason: TxDropReason) {
         tracing::trace!(
             "Dropping queued tx for remote peer: {} due to reason: {:?}",
@@ -585,6 +614,9 @@ impl TokioQuicGatewayRuntime {
         limits.max_streams
     }
 
+    ///
+    /// Installs a transaction sender worker for a remote peer with the given connection.
+    ///
     fn install_worker(&mut self, remote_peer_identity: Pubkey, connection: Connection) {
         let (tx, rx) = mpsc::channel(self.config.transaction_sender_worker_channel_capacity);
 
@@ -618,6 +650,11 @@ impl TokioQuicGatewayRuntime {
         );
     }
 
+    ///
+    /// Handles the result of a connection attempt to a remote peer.
+    ///
+    /// Reattempts the connection if it fails, up to the maximum number of attempts, unless the peer is unreachable.
+    ///
     fn handle_connecting_result(
         &mut self,
         result: Result<(task::Id, Result<Connection, ConnectingError>), JoinError>,
@@ -636,17 +673,10 @@ impl TokioQuicGatewayRuntime {
                     }
                     Err(connect_err) => match connect_err {
                         ConnectingError::ConnectError(connect_error) => {
-                            if connection_attempt < self.config.max_connection_attempts {
-                                tracing::debug!(
-                                    "Failed to connect to remote peer: {remote_peer_identity}: {connect_error:?}, retrying..."
-                                );
-                                self.spawn_connecting(remote_peer_identity, connection_attempt + 1);
-                            } else {
-                                tracing::error!(
-                                    "Failed to connect to remote peer: {remote_peer_identity}: {connect_error:?}"
-                                );
-                                self.unreachable_peer(remote_peer_identity);
-                            }
+                            tracing::error!(
+                                "Failed to connect to remote peer: {remote_peer_identity}: {connect_error:?}"
+                            );
+                            self.unreachable_peer(remote_peer_identity);
                         }
                         ConnectingError::ConnectionError(connection_error) => {
                             tracing::error!("Connection error: {:?}", connection_error);
@@ -681,10 +711,14 @@ impl TokioQuicGatewayRuntime {
         }
     }
 
+    ///
+    /// Accepts a transaction and determines how to handle it based on the remote peer's status.
+    ///
     fn accept_tx(&mut self, tx: GatewayTransaction) {
         let remote_peer_identity = tx.remote_peer;
         let tx_id = tx.tx_id;
         if let Some(sender) = self.tx_worker_sender_map.get(&remote_peer_identity) {
+            // If we have an active transaction sender worker for the remote peer,
             match sender.try_send(tx) {
                 Ok(_) => {
                     tracing::trace!(
@@ -721,10 +755,14 @@ impl TokioQuicGatewayRuntime {
                 },
             }
         } else {
+            // We don't have any active transaction sender worker for the remote peer,
+            // we need to queue the transaction and try to spawn a new connection.
             self.tx_queues
                 .entry(remote_peer_identity)
                 .or_default()
                 .push_back(tx);
+
+            // Check if we are not already connecting to this remote peer.
             if !self
                 .connecting_remote_peers
                 .contains_key(&remote_peer_identity)
@@ -739,6 +777,9 @@ impl TokioQuicGatewayRuntime {
         }
     }
 
+    ///
+    /// One of the transaction sender worker has completed its work.
+    ///
     fn handle_worker_result(&mut self, result: Result<(Id, TxSenderWorkerCompleted), JoinError>) {
         match result {
             Ok((id, mut worker_completed)) => {
@@ -756,18 +797,25 @@ impl TokioQuicGatewayRuntime {
                 while let Ok(tx) = worker_completed.rx.try_recv() {
                     tx_to_rescue.push_back(tx);
                 }
-                if let Some(e) = worker_completed.err {
-                    tracing::error!("tx worker {remote_peer_identity} terminate with error: {e:?}");
-                    if !matches!(
-                        e,
-                        TxSenderWorkerError::ConnectionLost(ConnectionError::VersionMismatch)
-                    ) {
-                        self.spawn_connecting(remote_peer_identity, 1);
-                    } else {
-                        self.unreachable_peer(remote_peer_identity);
-                    }
-                } else {
-                    self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DropByGateway);
+
+                let is_peer_unreachable = worker_completed
+                    .err
+                    .filter(|e| {
+                        matches!(
+                            e,
+                            TxSenderWorkerError::ConnectionLost(ConnectionError::VersionMismatch)
+                        )
+                    })
+                    .is_some();
+
+                if is_peer_unreachable {
+                    self.unreachable_peer(remote_peer_identity);
+                } else if !tx_to_rescue.is_empty() {
+                    tracing::trace!(
+                        "Remote peer: {} has queued tx, wil reconnect",
+                        remote_peer_identity
+                    );
+                    self.spawn_connecting(remote_peer_identity, 1);
                 }
             }
             Err(join_err) => {
@@ -784,6 +832,13 @@ impl TokioQuicGatewayRuntime {
         }
     }
 
+    ///
+    /// Schedules a graceful drop of all transaction workers.
+    ///
+    /// The scheduled task waits for all transaction workers to complete and drop their senders.
+    /// All transaction workers are detached from the gateway runtime and not managed anymore.
+    ///
+    ///
     fn schedule_graceful_drop_all_worker(&mut self) {
         tracing::trace!("Scheduling graceful drop of all transaction workers");
         let mut tx_worker_meta = std::mem::take(&mut self.tx_worker_meta);
@@ -856,6 +911,22 @@ impl TokioQuicGatewayRuntime {
         }
     }
 
+    fn handle_tasklet_result(&mut self, result: Result<(Id, ()), JoinError>) {
+        let id = match &result {
+            Ok((id, _)) => *id,
+            Err(join_err) => join_err.id(),
+        };
+        let meta = self.tasklet_meta.remove(&id).expect("tasklet meta");
+
+        match meta {
+            TokioGateawyTaskMeta::DropAllWorkers => {
+                tracing::info!(
+                    "finished graceful drop of all transaction workers with : {result:?}"
+                );
+            }
+        }
+    }
+
     pub async fn run(mut self) {
         loop {
             tokio::select! {
@@ -882,7 +953,16 @@ impl TokioQuicGatewayRuntime {
                 Some(result) = self.connecting_tasks.join_next_with_id() => {
                     self.handle_connecting_result(result);
                 }
+
+                Some(result) = self.tasklet.join_next_with_id() => {
+                    self.handle_tasklet_result(result);
+                }
             }
+        }
+
+        self.schedule_graceful_drop_all_worker();
+        while let Some(result) = self.tasklet.join_next_with_id().await {
+            self.handle_tasklet_result(result);
         }
     }
 }
@@ -1014,14 +1094,21 @@ impl GatewayIdentityUpdater {
     }
 }
 
+///
+/// The shared state used to notify the completion of the identity update.
+/// See [`UpdateIdentity`] for more details.
 struct UpdateIdentityInner {
     set: AtomicBool,
     waker: AtomicWaker,
 }
 
+///
+/// Future that waits for the identity update to complete.
+/// This future is used to ensure that the identity update is completed before proceeding.
+///
 pub struct UpdateIdentity<'a> {
     inner: Arc<UpdateIdentityInner>,
-    _this: &'a GatewayIdentityUpdater,
+    _this: &'a GatewayIdentityUpdater, /* phantom data to prevent two threads from updating the identity at the same time */
 }
 
 impl Future for UpdateIdentity<'_> {
@@ -1048,7 +1135,7 @@ impl Future for UpdateIdentity<'_> {
     }
 }
 
-pub fn module_path_for_test() -> &'static str {
+pub const fn module_path_for_test() -> &'static str {
     module_path!()
 }
 
