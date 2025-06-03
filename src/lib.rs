@@ -20,6 +20,7 @@ pub mod payload;
 pub mod proto;
 pub mod pubkey_challenger;
 pub mod quic;
+pub mod quic_gateway;
 pub mod quic_solana;
 pub mod rpc;
 pub mod solana;
@@ -48,5 +49,40 @@ pub fn setup_tracing(json: bool) -> anyhow::Result<()> {
             .with_ansi(is_atty);
         subscriber.with(io_layer).try_init()?;
     }
+    Ok(())
+}
+
+pub fn setup_tracing_test(module: &str) -> anyhow::Result<()> {
+    let io_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(true)
+        .with_line_number(true);
+
+    let level_layer = EnvFilter::builder()
+        .with_default_directive(format!("{module}=trace").parse()?)
+        .from_env_lossy();
+    tracing_subscriber::registry()
+        .with(io_layer)
+        .with(level_layer)
+        .try_init()?;
+    Ok(())
+}
+
+pub fn setup_tracing_test_many(
+    modules: impl IntoIterator<Item = &'static str>,
+) -> anyhow::Result<()> {
+    let io_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(true)
+        .with_line_number(true);
+
+    let directives = modules
+        .into_iter()
+        .fold(EnvFilter::default(), |filter, module| {
+            filter.add_directive(format!("{module}=trace").parse().expect("invalid module"))
+        });
+
+    tracing_subscriber::registry()
+        .with(io_layer)
+        .with(directives)
+        .try_init()?;
     Ok(())
 }
