@@ -19,10 +19,7 @@ use {
     tokio::sync::{Barrier, Notify, RwLock, broadcast, oneshot},
     yellowstone_jet::{
         blockhash_queue::testkit::MockBlockhashQueue,
-        transactions::{
-            BoxedTxChannelPermit, SendTransactionInfoId, SendTransactionRequest,
-            SendTransactionsPool, TxChannel, TxChannelPermit, testkit::mock_rooted_tx_channel,
-        },
+        transactions::{SendTransactionRequest, testkit::mock_rooted_tx_channel},
     },
 };
 

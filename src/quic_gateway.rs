@@ -228,6 +228,7 @@ impl LeaderTpuInfoService for ClusterTpuInfo {
 ///
 /// A transaction with destination details to be sent to a remote peer.
 ///
+#[derive(Debug)]
 pub struct GatewayTransaction {
     /// Id set by the sender to identify the transaction. Only meaningful to the sender.
     pub tx_sig: Signature,

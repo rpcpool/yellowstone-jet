@@ -146,7 +146,7 @@ pub mod testkit {
         },
     };
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     pub struct MockBlockhashQueue {
         slots: SharedSlots,
     }

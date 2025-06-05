@@ -41,12 +41,15 @@ pub type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
 /// Trait for getting the upcoming leader schedule
 ///
 pub trait UpcomingLeaderSchedule {
-    fn get_leader_tpus(&self, leader_forward_lookahead: usize) -> Vec<TpuInfo>;
+    fn leader_lookahead(&self, leader_forward_lookahead: usize) -> Vec<Pubkey>;
 }
 
 impl UpcomingLeaderSchedule for ClusterTpuInfo {
-    fn get_leader_tpus(&self, leader_forward_lookahead: usize) -> Vec<TpuInfo> {
+    fn leader_lookahead(&self, leader_forward_lookahead: usize) -> Vec<Pubkey> {
         self.get_leader_tpus(leader_forward_lookahead)
+            .into_iter()
+            .map(|tpu| tpu.leader)
+            .collect()
     }
 }
 
@@ -383,17 +386,17 @@ impl TransactionRetrySchedulerRuntime {
 }
 
 pub struct TransactionRetryScheduler {
-    runtime_tx: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
-    runtime_response: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+    pub sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    pub source: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
 }
 
-pub struct TransactionSchedulerConfig {
+pub struct TransactionRetrySchedulerConfig {
     pub retry_rate: tokio::time::Duration,
     pub stop_send_on_commitment: CommitmentLevel,
     pub max_retry: usize,
 }
 
-impl Default for TransactionSchedulerConfig {
+impl Default for TransactionRetrySchedulerConfig {
     fn default() -> Self {
         Self {
             retry_rate: tokio::time::Duration::from_secs(1),
@@ -408,8 +411,8 @@ impl Default for TransactionSchedulerConfig {
 /// It forwards transactions to the next leader if the transaction's last valid block height is less than the current block height.
 ///
 pub struct TransactionNoRetryScheduler {
-    runtime_tx: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
-    runtime_response: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+    pub sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    pub source: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
 }
 
 impl TransactionNoRetryScheduler {
@@ -422,8 +425,8 @@ impl TransactionNoRetryScheduler {
             async move { Self::fwd_loop(blockheight_service, rx, scheduler_resp_tx).await },
         );
         Self {
-            runtime_tx: tx,
-            runtime_response: scheduler_resp_rx,
+            sink: tx,
+            source: scheduler_resp_rx,
         }
     }
 
@@ -457,7 +460,7 @@ impl TransactionNoRetryScheduler {
 
 impl TransactionRetryScheduler {
     pub fn new(
-        config: TransactionSchedulerConfig,
+        config: TransactionRetrySchedulerConfig,
         block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
         rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
     ) -> Self {
@@ -470,7 +473,7 @@ impl TransactionRetryScheduler {
     }
 
     pub fn new_on(
-        config: TransactionSchedulerConfig,
+        config: TransactionRetrySchedulerConfig,
         block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
         rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
         runtime: tokio::runtime::Handle,
@@ -496,8 +499,8 @@ impl TransactionRetryScheduler {
             scheduler_runtime.run().await;
         });
         Self {
-            runtime_tx: tx,
-            runtime_response: scheduler_resp_rx,
+            sink: tx,
+            source: scheduler_resp_rx,
         }
     }
 }
@@ -512,14 +515,6 @@ impl TransactionRetryScheduler {
 pub struct TransactionFanout {
     leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
     policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
-    ///
-    /// Sends data to a "scheduler".
-    /// The "scheduler" is responsible from choosing which transactions to send next.
-    scheduler_tx: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
-    ///
-    /// Receives data from a "scheduler"
-    ///
-    scheduler_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
     tx_gateway_sender: mpsc::Sender<GatewayTransaction>,
     gateway_response_rx: mpsc::UnboundedReceiver<GatewayResponse>,
     incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
@@ -561,33 +556,24 @@ pub struct TransactionSchedulerBidi {
 }
 
 pub struct QuicGatewayBidi {
-    pub tx_gateway_sender: mpsc::Sender<GatewayTransaction>,
-    pub gateway_response_rx: mpsc::UnboundedReceiver<GatewayResponse>,
+    pub sink: mpsc::Sender<GatewayTransaction>,
+    pub source: mpsc::UnboundedReceiver<GatewayResponse>,
 }
 
 // The following example illustrates the transaction fanout architecture up to 3 remote validators.
 //
-//                            ┌─────────────────┐
-//                            │                 │
-//                            │  Transaction    │
-//                            │   Scheduler     │
-//                            │                 │
-//                            └────▲────┬───────┘
-//                                 │    │
-//                                 2    3
-//                                 │    │
-//  ┌────────────────┐        ┌────┼────▼───────┐        ┌────────────────┐
-//  │                │        │                 ┼───4.1──►                │
-//  │   Transaction  │        │ Transaction     ├───4.2──► QuicGateway    │
-//  │    Source      ┼──1────►│  Fanout         ├───4.3──►                │
-//  │                │        │                 │◄───5────                │
-//  └────────────────┘        └─────────────────┘        └────────────────┘
-//
-//  1. Transaction Source sends a transaction to the Transaction Fanout.
-//  2. Transaction Fanout sends to the Transaction Scheduler.
-//  3. Transaction sends transaction back to the Transaction Fanout.
-//  4. Transaction Fanout forwards the transaction to the next (N) validators:
-//  5. Quic Gateway sends back transaction status
+//  ┌─────────────┐         ┌─────────────┐      ┌─────────────┐         ┌────────────┐
+//  │  Transaction│         │  Transaction│      │ Transaction ┼───3.1──►│    QUIC    │
+//  │   Source    ┼───1────►│  Scheduler  ├──2───►   Fanout    ├───3.2──►│  Gateway   │
+//  │             │         │             │      │             ├───3.3──►│            │
+//  └─────────────┘         └─────────────┘      └──────▲──────┘         └─────┬──────┘
+//                                                      │                      │
+//                                                      │                      4
+//                                                      └────────(feedback)────┘
+//  1. Transaction Source sends a transaction to the Scheduler.
+//  2. Transaction Scheduler select a transaction and sends it to the fanout.
+//  3. Transaction Fanout forwards the transaction to the next (N) validators:
+//  4. Quic Gateway sends back transaction status
 //
 // Tranasction fanout should stay relatively "dumb":
 //  1. No scheduling decisions.
@@ -605,17 +591,14 @@ impl TransactionFanout {
         leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
         policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
         incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
-        scheduler_bidi: TransactionSchedulerBidi,
         quic_gateway_bidi: QuicGatewayBidi,
         leader_fwd_count: usize,
     ) -> Self {
         Self {
             leader_schedule_service,
             policy_store_service,
-            tx_gateway_sender: quic_gateway_bidi.tx_gateway_sender,
-            gateway_response_rx: quic_gateway_bidi.gateway_response_rx,
-            scheduler_tx: scheduler_bidi.scheduler_tx,
-            scheduler_rx: scheduler_bidi.scheduler_rx,
+            tx_gateway_sender: quic_gateway_bidi.sink,
+            gateway_response_rx: quic_gateway_bidi.source,
             incoming_transaction_rx,
             leader_fwd_count,
             transaction_send_set: JoinSet::new(),
@@ -629,18 +612,9 @@ impl TransactionFanout {
             tokio::select! {
                 maybe = self.incoming_transaction_rx.recv() => {
                     match maybe {
-                        Some(newtx) => self.add_new_transaction(newtx),
-                        None => {
-                            error!("new transactions channel is closed");
-                            break;
-                        }
-                    }
-                }
-                maybe = self.scheduler_rx.recv() => {
-                    match maybe {
                         Some(newtx) => self.fwd_tx(newtx),
                         None => {
-                            error!("scheduler channel is closed");
+                            error!("new transactions channel is closed");
                             break;
                         }
                     }
@@ -723,16 +697,16 @@ impl TransactionFanout {
         let gateway_sink = self.tx_gateway_sender.clone();
         let signature = tx.signature;
         let send_fut = async move {
-            let next_leaders = leader_schedule_service.get_leader_tpus(leader_fwd);
+            let next_leaders = leader_schedule_service.leader_lookahead(leader_fwd);
 
             for dest in next_leaders {
-                if !policy_store_service.is_allowed(&tx.policies, &dest.leader)? {
+                if !policy_store_service.is_allowed(&tx.policies, &dest)? {
                     continue;
                 }
                 let gateway_tx = GatewayTransaction {
                     tx_sig: tx.signature,
                     wire: tx.wire_transaction.clone(),
-                    remote_peer: dest.leader,
+                    remote_peer: dest,
                 };
                 gateway_sink
                     .send(gateway_tx)
@@ -744,10 +718,6 @@ impl TransactionFanout {
 
         let ah = self.transaction_send_set.spawn(send_fut);
         self.transaction_send_set_meta.insert(ah.id(), signature);
-    }
-
-    fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>) {
-        let _ = self.scheduler_tx.send(Arc::clone(&tx));
     }
 }
 

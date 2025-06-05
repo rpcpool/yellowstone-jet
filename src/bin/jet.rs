@@ -45,8 +45,9 @@ use {
         task_group::TaskGroup,
         transaction_handler::TransactionHandler,
         transactions::{
-            AlwaysAllowTransactionPolicyStore, GrpcRootedTxReceiver, TransactionFanout,
-            TransactionPolicyStore, TransactionRetrier,
+            AlwaysAllowTransactionPolicyStore, GrpcRootedTxReceiver, QuicGatewayBidi,
+            TransactionFanout, TransactionNoRetryScheduler, TransactionPolicyStore,
+            TransactionRetryScheduler, TransactionRetrySchedulerConfig,
         },
         util::WaitShutdown,
     },
@@ -352,15 +353,43 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         gateway_join_handle,
     } = quic_gateway_spawner.spawn(initial_identity.insecure_clone(), quic_gateway_config);
 
-    let (transaction_fwd_sender, transaction_fwd_receiver) = tokio::sync::mpsc::unbounded_channel();
+    tg.spawn_cancelable("gateway", async move {
+        gateway_join_handle.await.expect("quic gateway join handle");
+    });
+
+    let quic_gateway_bidi = QuicGatewayBidi {
+        sink: gateway_tx_sink,
+        source: gateway_response_source,
+    };
+
+    let (scheduler_in, scheduler_out) = if config.send_transaction_service.relay_only_mode {
+        info!("Running in relay-only mode, transactions retry will be enabled");
+        warn!("disabling relay-only mode should be used only by unstaked jet instance");
+        let TransactionRetryScheduler { sink, source } = TransactionRetryScheduler::new(
+            TransactionRetrySchedulerConfig {
+                retry_rate: config.send_transaction_service.retry_rate,
+                stop_send_on_commitment: config.send_transaction_service.stop_send_on_commitment,
+                max_retry: config
+                    .send_transaction_service
+                    .default_max_retries
+                    .unwrap_or(config.send_transaction_service.service_max_retries),
+            },
+            Arc::new(blockhash_queue.clone()),
+            Box::new(rooted_transactions_rx),
+        );
+        (sink, source)
+    } else {
+        tracing::info!("Running in non-relay mode, transactions retry will be disabled");
+        let TransactionNoRetryScheduler { sink, source } =
+            TransactionNoRetryScheduler::new(Arc::new(blockhash_queue.clone()));
+        (sink, source)
+    };
 
     let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
         shield_policy_store,
-        Arc::new(blockhash_queue.clone()),
-        gateway_tx_sink,
-        gateway_response_source,
-        transaction_fwd_receiver,
+        scheduler_out,
+        quic_gateway_bidi,
         config.send_transaction_service.leader_forward_count,
     );
 
@@ -368,23 +397,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         "transaction_forwarder",
         async move { tx_forwader.run().await },
     );
-
-    let transaction_sink = if config.send_transaction_service.relay_only_mode {
-        info!("Running in relay-only mode, transactions retry will be enabled");
-        warn!("disabling relay-only mode should be used only by unstaked jet instance");
-        let (sink, source) = tokio::sync::mpsc::unbounded_channel();
-        let mut retrier = TransactionRetrier::new(
-            Arc::new(blockhash_queue.clone()),
-            Box::new(rooted_transactions_rx),
-            source,
-            transaction_fwd_sender,
-            config.send_transaction_service.clone(),
-        );
-        tg.spawn_cancelable("transaction_retrier", async move { retrier.run().await });
-        sink
-    } else {
-        transaction_fwd_sender
-    };
 
     // TODO check if really need lewis
     // let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
@@ -398,7 +410,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .await
         .expect("sanitize transaction support check");
     let tx_handler = TransactionHandler {
-        transaction_sink: transaction_sink,
+        transaction_sink: scheduler_in,
         rpc: tx_handler_rpc,
         proxy_sanitize_check: config.listen_solana_like.proxy_sanitize_check && sanitize_supported,
         proxy_preflight_check: config.listen_solana_like.proxy_preflight_check,
