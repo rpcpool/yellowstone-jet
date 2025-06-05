@@ -45,7 +45,7 @@ use {
         task_group::TaskGroup,
         transaction_handler::TransactionHandler,
         transactions::{
-            AlwaysAllowTransactionPolicyStore, GrpcRootedTxReceiver, TransactionFowarder,
+            AlwaysAllowTransactionPolicyStore, GrpcRootedTxReceiver, TransactionFanout,
             TransactionPolicyStore, TransactionRetrier,
         },
         util::WaitShutdown,
@@ -354,7 +354,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     let (transaction_fwd_sender, transaction_fwd_receiver) = tokio::sync::mpsc::unbounded_channel();
 
-    let mut tx_forwader = TransactionFowarder::new(
+    let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
         shield_policy_store,
         Arc::new(blockhash_queue.clone()),

@@ -2,7 +2,6 @@ use {
     crate::{
         blockhash_queue::BlockHeighService,
         cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
-        config::ConfigSendTransactionService,
         grpc_geyser::{GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived},
         metrics::jet as metrics,
         quic_gateway::{GatewayResponse, GatewayTransaction},
@@ -235,63 +234,40 @@ struct RetryableTx {
     leftover_attempt: usize,
 }
 
-pub struct TransactionRetrier {
+///
+/// Transaction scheduler runtime that tracks which transaction landed and resends transactions that are not landed yet.
+///
+pub struct TransactionRetrySchedulerRuntime {
     block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
     rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
-    incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
-    sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
-    config: ConfigSendTransactionService,
     last_known_block_height: u64,
-    tx_buffer_map: HashMap<Signature, RetryableTx>,
+    tx_pool: HashMap<Signature, RetryableTx>,
     block_height_deadline_map: BTreeMap<u64, Vec<Signature>>,
     insertion_order: VecDeque<(Instant, Signature)>,
+    transaction_source: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+    response_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    retry_rate: tokio::time::Duration,
+    stop_send_on_commitment: CommitmentLevel,
+    max_retry: usize,
 }
 
-impl TransactionRetrier {
-    pub fn new(
-        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
-        rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
-        incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
-        sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
-        config: ConfigSendTransactionService,
-    ) -> Self {
-        Self {
-            block_height_service,
-            rooted_transactions,
-            incoming_transaction_rx,
-            sink,
-            config,
-            last_known_block_height: 0,
-            tx_buffer_map: HashMap::new(),
-            block_height_deadline_map: BTreeMap::new(),
-            insertion_order: VecDeque::new(),
-        }
-    }
-
+impl TransactionRetrySchedulerRuntime {
     pub async fn run(&mut self) {
-        let mut interval = tokio::time::interval(self.config.retry_rate);
+        let mut interval = tokio::time::interval(self.retry_rate);
 
         loop {
-            if self.incoming_transaction_rx.is_closed() {
-                break;
-            }
-            if self.sink.is_closed() {
-                break;
-            }
-
             tokio::select! {
-                maybe = self.incoming_transaction_rx.recv() => {
-                    match maybe {
-                        Some(newtx) => self.add_new_transaction(newtx).await,
-                        None => {
-                            error!("new transactions channel is closed");
-                            break;
-                        }
-                    }
-                }
                 now = interval.tick() => {
                     self.gc_deadline_map();
                     self.resend_non_landed_tx(now);
+                }
+                source = self.transaction_source.recv() => {
+                    match source {
+                        Some(newtx) => self.add_new_transaction(newtx).await,
+                        None => {
+                            break;
+                        }
+                    }
                 }
                 maybe_signature_update = self.rooted_transactions.recv() => {
                     match maybe_signature_update {
@@ -303,22 +279,23 @@ impl TransactionRetrier {
                     }
                 },
             }
+            metrics::sts_pool_set_size(self.tx_pool.len());
         }
     }
 
     fn resend_non_landed_tx(&mut self, now: Instant) {
         while let Some(inserted_at) = self.insertion_order.front().map(|(t, _)| t.clone()) {
-            if now.duration_since(inserted_at) < self.config.retry_rate {
+            if now.duration_since(inserted_at) < self.retry_rate {
                 break;
             }
             let (_, signature) = self.insertion_order.pop_front().unwrap();
-            if let Some(rtx) = self.tx_buffer_map.get_mut(&signature) {
+            if let Some(rtx) = self.tx_pool.get_mut(&signature) {
                 if rtx.leftover_attempt > 0 {
                     rtx.leftover_attempt = rtx.leftover_attempt.saturating_sub(1);
-                    let _ = self.sink.send(Arc::clone(&rtx.tx));
+                    let _ = self.response_sink.send(Arc::clone(&rtx.tx));
                     self.insertion_order.push_back((now, signature));
                 } else {
-                    self.tx_buffer_map.remove(&signature);
+                    self.tx_pool.remove(&signature);
                     tracing::trace!("tx {signature} reached max attempts, dropping it");
                 }
             }
@@ -339,23 +316,19 @@ impl TransactionRetrier {
             .into_iter()
             .flat_map(|(_, signatures)| signatures)
             .for_each(|signature| {
-                self.tx_buffer_map.remove(&signature);
+                self.tx_pool.remove(&signature);
                 self.rooted_transactions.unsubscribe_signature(signature);
             });
     }
 
     fn handle_tx_commitment_update(&mut self, signature: Signature, commitment: CommitmentLevel) {
-        if commitment == self.config.stop_send_on_commitment {
-            self.tx_buffer_map.remove(&signature);
+        if commitment == self.stop_send_on_commitment {
+            self.tx_pool.remove(&signature);
         }
     }
 
     async fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>) {
-        let max_retries = tx
-            .max_retries
-            .or(self.config.default_max_retries)
-            .unwrap_or(self.config.service_max_retries)
-            .min(self.config.service_max_retries);
+        let max_retries = tx.max_retries.unwrap_or(0).min(self.max_retry);
 
         let current_block_height = self
             .block_height_service
@@ -382,7 +355,7 @@ impl TransactionRetrier {
         let is_landed = self
             .rooted_transactions
             .get_transaction_commitment(signature)
-            .filter(|cl| cl >= &self.config.stop_send_on_commitment)
+            .filter(|cl| cl >= &self.stop_send_on_commitment)
             .is_some();
 
         if is_landed {
@@ -394,7 +367,7 @@ impl TransactionRetrier {
         // -1 because we are going to send the transaction immediately
         let leftover_attempt = max_retries.saturating_sub(1);
 
-        self.tx_buffer_map.insert(
+        self.tx_pool.insert(
             signature,
             RetryableTx {
                 tx: Arc::clone(&tx),
@@ -405,23 +378,148 @@ impl TransactionRetrier {
             .entry(last_valid_block_height)
             .or_default()
             .push(signature);
+        let _ = self.response_sink.send(tx);
+    }
+}
 
-        self.sink
-            .send(tx)
-            .expect("transaction retrier sink is closed");
+pub struct TransactionRetryScheduler {
+    runtime_tx: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    runtime_response: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+}
+
+pub struct TransactionSchedulerConfig {
+    pub retry_rate: tokio::time::Duration,
+    pub stop_send_on_commitment: CommitmentLevel,
+    pub max_retry: usize,
+}
+
+impl Default for TransactionSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            retry_rate: tokio::time::Duration::from_secs(1),
+            stop_send_on_commitment: CommitmentLevel::Confirmed,
+            max_retry: 3,
+        }
     }
 }
 
 ///
-/// Foward transactions to N valitx_sigs.
+/// Transaction scheduler that does not retry transactions.
+/// It forwards transactions to the next leader if the transaction's last valid block height is less than the current block height.
+///
+pub struct TransactionNoRetryScheduler {
+    runtime_tx: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    runtime_response: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+}
+
+impl TransactionNoRetryScheduler {
+    pub fn new(blockheight_service: Arc<dyn BlockHeighService + Send + Sync + 'static>) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (scheduler_resp_tx, scheduler_resp_rx) =
+            mpsc::unbounded_channel::<Arc<SendTransactionRequest>>();
+
+        tokio::spawn(
+            async move { Self::fwd_loop(blockheight_service, rx, scheduler_resp_tx).await },
+        );
+        Self {
+            runtime_tx: tx,
+            runtime_response: scheduler_resp_rx,
+        }
+    }
+
+    async fn fwd_loop(
+        blockheight_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+        mut incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+        response_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    ) {
+        loop {
+            let Some(tx) = incoming_transaction_rx.recv().await else {
+                tracing::trace!("incoming transaction channel is closed");
+                break;
+            };
+
+            let current_block_height = blockheight_service
+                .get_block_height_for_commitment(CommitmentLevel::Confirmed)
+                .unwrap_or(0);
+            let last_valid_block_height = blockheight_service
+                .get_block_height(tx.transaction.message.recent_blockhash())
+                .unwrap_or(0)
+                + MAX_PROCESSING_AGE as u64;
+
+            if last_valid_block_height < current_block_height {
+                if response_sink.send(tx).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl TransactionRetryScheduler {
+    pub fn new(
+        config: TransactionSchedulerConfig,
+        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+        rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
+    ) -> Self {
+        Self::new_on(
+            config,
+            block_height_service,
+            rooted_transactions,
+            tokio::runtime::Handle::current(),
+        )
+    }
+
+    pub fn new_on(
+        config: TransactionSchedulerConfig,
+        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+        rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (scheduler_resp_tx, scheduler_resp_rx) =
+            mpsc::unbounded_channel::<Arc<SendTransactionRequest>>();
+        let mut scheduler_runtime = TransactionRetrySchedulerRuntime {
+            block_height_service,
+            rooted_transactions,
+            last_known_block_height: 0,
+            tx_pool: Default::default(),
+            block_height_deadline_map: Default::default(),
+            insertion_order: Default::default(),
+            transaction_source: rx,
+            retry_rate: config.retry_rate,
+            stop_send_on_commitment: config.stop_send_on_commitment,
+            max_retry: config.max_retry,
+            response_sink: scheduler_resp_tx,
+        };
+        // Automatically close the runtime when all reference to `tx` are dropped.
+        runtime.spawn(async move {
+            scheduler_runtime.run().await;
+        });
+        Self {
+            runtime_tx: tx,
+            runtime_response: scheduler_resp_rx,
+        }
+    }
+}
+
+///
+/// Foward transactions to N validators.
+///
 /// Applies transaction's shield policies configuration.
 ///
 /// Prevent duplicate transaction being inflight at the same time.
 ///
-pub struct TransactionFowarder {
+pub struct TransactionFanout {
     leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
     policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
-    block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+    ///
+    /// Sends data to a "scheduler".
+    /// The "scheduler" is responsible from choosing which transactions to send next.
+    scheduler_tx: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    ///
+    /// Receives data from a "scheduler"
+    ///
+    scheduler_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
     tx_gateway_sender: mpsc::Sender<GatewayTransaction>,
     gateway_response_rx: mpsc::UnboundedReceiver<GatewayResponse>,
     incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
@@ -457,22 +555,67 @@ impl TransactionPolicyStore for AlwaysAllowTransactionPolicyStore {
     }
 }
 
-impl TransactionFowarder {
+pub struct TransactionSchedulerBidi {
+    pub scheduler_tx: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    pub scheduler_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+}
+
+pub struct QuicGatewayBidi {
+    pub tx_gateway_sender: mpsc::Sender<GatewayTransaction>,
+    pub gateway_response_rx: mpsc::UnboundedReceiver<GatewayResponse>,
+}
+
+// The following example illustrates the transaction fanout architecture up to 3 remote validators.
+//
+//                            ┌─────────────────┐
+//                            │                 │
+//                            │  Transaction    │
+//                            │   Scheduler     │
+//                            │                 │
+//                            └────▲────┬───────┘
+//                                 │    │
+//                                 2    3
+//                                 │    │
+//  ┌────────────────┐        ┌────┼────▼───────┐        ┌────────────────┐
+//  │                │        │                 ┼───4.1──►                │
+//  │   Transaction  │        │ Transaction     ├───4.2──► QuicGateway    │
+//  │    Source      ┼──1────►│  Fanout         ├───4.3──►                │
+//  │                │        │                 │◄───5────                │
+//  └────────────────┘        └─────────────────┘        └────────────────┘
+//
+//  1. Transaction Source sends a transaction to the Transaction Fanout.
+//  2. Transaction Fanout sends to the Transaction Scheduler.
+//  3. Transaction sends transaction back to the Transaction Fanout.
+//  4. Transaction Fanout forwards the transaction to the next (N) validators:
+//  5. Quic Gateway sends back transaction status
+//
+// Tranasction fanout should stay relatively "dumb":
+//  1. No scheduling decisions.
+//  2. No transaction retry logic.
+//  3. No transaction validation.
+//
+// We do however apply transaction's shield policies configuration + prevent duplicate transaction being inflight at the same time.
+//
+// It should just forward transactions to the next (N) validators and wait for the response from the QUIC gateway.
+//
+// Custom retry logic is implemented in the "transaction scheduler" which is hidden behind a tokio channel giving us free polymorphism.
+//
+impl TransactionFanout {
     pub fn new(
         leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
         policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
-        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
-        tx_gateway_sender: mpsc::Sender<GatewayTransaction>,
-        gateway_response_rx: mpsc::UnboundedReceiver<GatewayResponse>,
         incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+        scheduler_bidi: TransactionSchedulerBidi,
+        quic_gateway_bidi: QuicGatewayBidi,
         leader_fwd_count: usize,
     ) -> Self {
         Self {
             leader_schedule_service,
             policy_store_service,
-            block_height_service,
-            tx_gateway_sender,
-            gateway_response_rx,
+            tx_gateway_sender: quic_gateway_bidi.tx_gateway_sender,
+            gateway_response_rx: quic_gateway_bidi.gateway_response_rx,
+            scheduler_tx: scheduler_bidi.scheduler_tx,
+            scheduler_rx: scheduler_bidi.scheduler_rx,
             incoming_transaction_rx,
             leader_fwd_count,
             transaction_send_set: JoinSet::new(),
@@ -483,16 +626,21 @@ impl TransactionFowarder {
 
     pub async fn run(&mut self) {
         loop {
-            if self.tx_gateway_sender.is_closed() {
-                error!("gateway sender is closed, stopping transaction pool");
-                break;
-            }
             tokio::select! {
                 maybe = self.incoming_transaction_rx.recv() => {
                     match maybe {
                         Some(newtx) => self.add_new_transaction(newtx),
                         None => {
                             error!("new transactions channel is closed");
+                            break;
+                        }
+                    }
+                }
+                maybe = self.scheduler_rx.recv() => {
+                    match maybe {
+                        Some(newtx) => self.fwd_tx(newtx),
+                        None => {
+                            error!("scheduler channel is closed");
                             break;
                         }
                     }
@@ -560,28 +708,15 @@ impl TransactionFowarder {
         }
     }
 
-    fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>) {
-        let last_valid_block_height = self
-            .block_height_service
-            .get_block_height(tx.transaction.message.recent_blockhash())
-            .map(|block_height| block_height + MAX_PROCESSING_AGE as u64)
-            .unwrap_or(0);
-
-        let current_block_height = self
-            .block_height_service
-            .get_block_height_for_commitment(CommitmentLevel::Confirmed)
-            .unwrap_or(0);
-
-        if last_valid_block_height < current_block_height {
-            tracing::warn!(
-                %tx.signature,
-                last_valid_block_height,
-                current_block_height,
-                "transaction last valid block height is less than current block height, dropping transaction"
+    fn fwd_tx(&mut self, tx: Arc<SendTransactionRequest>) {
+        if self.inflight_transactions.contains(&tx.signature) {
+            tracing::debug!(
+                "transaction {} is already in flight, skipping",
+                tx.signature
             );
             return;
         }
-
+        self.inflight_transactions.insert(tx.signature);
         let leader_schedule_service = Arc::clone(&self.leader_schedule_service);
         let policy_store_service = Arc::clone(&self.policy_store_service);
         let leader_fwd = self.leader_fwd_count;
@@ -609,6 +744,10 @@ impl TransactionFowarder {
 
         let ah = self.transaction_send_set.spawn(send_fut);
         self.transaction_send_set_meta.insert(ah.id(), signature);
+    }
+
+    fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>) {
+        let _ = self.scheduler_tx.send(Arc::clone(&tx));
     }
 }
 
