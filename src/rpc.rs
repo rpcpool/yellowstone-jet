@@ -1,16 +1,14 @@
 use {
-    crate::{
-        quic_solana::ConnectionCacheIdentity, solana::sanitize_transaction_support_check,
-        transactions::SendTransactionsPool,
-    },
+    crate::{solana::sanitize_transaction_support_check, transaction_handler::TransactionHandler},
     anyhow::Context as _,
     futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
     hyper::{Request, Response, StatusCode},
     jsonrpsee::{
         core::http_helpers::Body,
-        server::{ServerBuilder, ServerHandle},
+        server::{ServerBuilder, ServerHandle, middleware::rpc},
         types::error::{ErrorObject, ErrorObjectOwned, INVALID_PARAMS_CODE},
     },
+    rpc_admin::JetIdentityUpdater,
     solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient,
     solana_sdk::pubkey::Pubkey,
     std::{
@@ -22,6 +20,7 @@ use {
         task::{Context, Poll},
         time::Instant,
     },
+    tokio::sync::Mutex,
     tower::Service,
     tracing::{debug, info},
 };
@@ -31,15 +30,12 @@ const MAX_REQUEST_BODY_SIZE: u32 = 32 * (1 << 10); // 32kB
 
 pub enum RpcServerType {
     Admin {
-        quic_identity_man: ConnectionCacheIdentity,
+        jet_identity_updater: Arc<Mutex<Box<dyn JetIdentityUpdater + Send + 'static>>>,
         allowed_identity: Option<Pubkey>,
     },
 
     SolanaLike {
-        stp: SendTransactionsPool,
-        rpc: String,
-        proxy_sanitize_check: bool,
-        proxy_preflight_check: bool,
+        tx_handler: TransactionHandler,
     },
 }
 
@@ -62,7 +58,7 @@ impl RpcServer {
         };
         let server_handle = match server_type {
             RpcServerType::Admin {
-                quic_identity_man,
+                jet_identity_updater: quic_identity_man,
                 allowed_identity,
             } => {
                 use rpc_admin::{RpcServer, RpcServerImpl};
@@ -95,27 +91,16 @@ impl RpcServer {
                         server.start(
                             RpcServerImpl {
                                 allowed_identity,
-                                quic_identity_man,
+                                jet_identity_updater: quic_identity_man,
                             }
                             .into_rpc(),
                         )
                     })
             }
-            RpcServerType::SolanaLike {
-                stp: sts,
-                rpc,
-                proxy_sanitize_check,
-                proxy_preflight_check,
-            } => {
+            RpcServerType::SolanaLike { tx_handler } => {
                 use rpc_solana_like::RpcServer;
 
-                let rpc_server_impl = Self::create_solana_like_rpc_server_impl(
-                    sts,
-                    rpc,
-                    proxy_sanitize_check,
-                    proxy_preflight_check,
-                )
-                .await?;
+                let rpc_server_impl = Self::create_solana_like_rpc_server_impl(tx_handler);
 
                 ServerBuilder::new()
                     .max_request_body_size(MAX_REQUEST_BODY_SIZE)
@@ -132,21 +117,10 @@ impl RpcServer {
         })
     }
 
-    pub async fn create_solana_like_rpc_server_impl(
-        sts: SendTransactionsPool,
-        rpc: String,
-        proxy_sanitize_check: bool,
-        proxy_preflight_check: bool,
-    ) -> anyhow::Result<rpc_solana_like::RpcServerImpl> {
-        let rpc = Arc::new(SolanaRpcClient::new(rpc));
-        let sanitize_supported = sanitize_transaction_support_check(&rpc).await?;
-
-        Ok(rpc_solana_like::RpcServerImpl {
-            sts,
-            rpc,
-            proxy_sanitize_check: proxy_sanitize_check && sanitize_supported,
-            proxy_preflight_check,
-        })
+    pub fn create_solana_like_rpc_server_impl(
+        tx_handler: TransactionHandler,
+    ) -> rpc_solana_like::RpcServerImpl {
+        rpc_solana_like::RpcServerImpl { tx_handler }
     }
 
     pub fn shutdown(self) {
@@ -162,7 +136,6 @@ impl RpcServer {
 pub mod rpc_admin {
     use {
         super::invalid_params,
-        crate::quic_solana::ConnectionCacheIdentity,
         jsonrpsee::{
             core::{RpcResult, async_trait},
             proc_macros::rpc,
@@ -174,6 +147,8 @@ pub mod rpc_admin {
                 keypair::{Keypair, read_keypair_file},
             },
         },
+        std::sync::Arc,
+        tokio::sync::Mutex,
         tracing::info,
     };
 
@@ -196,25 +171,38 @@ pub mod rpc_admin {
         async fn reset_identity(&self) -> RpcResult<()>;
     }
 
+    #[async_trait::async_trait]
+    pub trait JetIdentityUpdater {
+        async fn update_identity(&mut self, identity: Keypair);
+
+        async fn get_identity(&self) -> Pubkey;
+    }
+
     pub struct RpcServerImpl {
         // pub quic: QuicTxSender,
         pub allowed_identity: Option<Pubkey>,
-        pub quic_identity_man: ConnectionCacheIdentity,
+        pub jet_identity_updater: Arc<Mutex<Box<dyn JetIdentityUpdater + Send + 'static>>>,
     }
 
     #[async_trait]
     impl RpcServer for RpcServerImpl {
         async fn get_identity(&self) -> RpcResult<String> {
-            Ok(self.quic_identity_man.get_identity().await.to_string())
+            let identity = self.jet_identity_updater.lock().await.get_identity().await;
+            Ok(identity.to_string())
         }
 
         async fn set_identity(&self, keypair_file: String, require_tower: bool) -> RpcResult<()> {
+            if require_tower {
+                return Err(invalid_params(
+                    "set_identity with require_tower is not supported".to_owned(),
+                ));
+            }
             let keypair = read_keypair_file(&keypair_file).map_err(|err| {
                 invalid_params(format!(
                     "Failed to read identity keypair from {keypair_file}: {err}"
                 ))
             })?;
-            self.set_keypair(keypair, require_tower).await
+            self.set_keypair(keypair).await
         }
 
         async fn set_identity_from_bytes(
@@ -222,39 +210,44 @@ pub mod rpc_admin {
             identity_keypair: Vec<u8>,
             require_tower: bool,
         ) -> RpcResult<()> {
+            if require_tower {
+                return Err(invalid_params(
+                    "set_identity_from_bytes with require_tower is not supported".to_owned(),
+                ));
+            }
             let keypair = Keypair::from_bytes(&identity_keypair).map_err(|err| {
                 invalid_params(format!(
                     "Failed to read identity keypair from provided byte array: {err}"
                 ))
             })?;
-            self.set_keypair(keypair, require_tower).await
+            self.set_keypair(keypair).await
         }
 
         async fn reset_identity(&self) -> RpcResult<()> {
             let random_identity = Keypair::new();
-            self.quic_identity_man
-                .update_keypair(&random_identity)
+            self.jet_identity_updater
+                .lock()
+                .await
+                .update_identity(random_identity)
                 .await;
             Ok(())
         }
     }
 
     impl RpcServerImpl {
-        async fn set_keypair(&self, identity: Keypair, require_tower: bool) -> RpcResult<()> {
-            if require_tower {
-                return Err(invalid_params(
-                    "`require_tower: true` is not supported at the moment".to_owned(),
-                ));
-            }
-
+        async fn set_keypair(&self, identity: Keypair) -> RpcResult<()> {
             if let Some(allow_ident) = &self.allowed_identity {
                 if allow_ident != &identity.pubkey() {
                     return Err(invalid_params("invalid identity".to_owned()));
                 }
             }
-
-            self.quic_identity_man.update_keypair(&identity).await;
-            info!("update identity: {}", identity.pubkey());
+            let pubkey = identity.pubkey();
+            self.jet_identity_updater
+                .lock()
+                .await
+                .update_identity(identity)
+                .await;
+            info!("update identity: {pubkey}");
 
             Ok(())
         }
@@ -266,17 +259,14 @@ pub mod rpc_solana_like {
         crate::{
             payload::JetRpcSendTransactionConfig, rpc::invalid_params,
             solana::decode_and_deserialize, transaction_handler::TransactionHandler,
-            transactions::SendTransactionsPool,
         },
         jsonrpsee::{
             core::{RpcResult, async_trait},
             proc_macros::rpc,
         },
-        solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient,
         solana_rpc_client_api::response::RpcVersionInfo,
         solana_sdk::transaction::VersionedTransaction,
         solana_transaction_status::UiTransactionEncoding,
-        std::sync::Arc,
         tracing::debug,
     };
 
@@ -295,10 +285,7 @@ pub mod rpc_solana_like {
 
     #[derive(Clone)]
     pub struct RpcServerImpl {
-        pub sts: SendTransactionsPool,
-        pub rpc: Arc<SolanaRpcClient>,
-        pub proxy_sanitize_check: bool,
-        pub proxy_preflight_check: bool,
+        pub tx_handler: TransactionHandler,
     }
 
     impl RpcServerImpl {
@@ -310,14 +297,7 @@ pub mod rpc_solana_like {
         ) -> RpcResult<String /* Signature */> {
             debug!("handling internal versioned transaction");
 
-            let handler = TransactionHandler::new(
-                self.sts.clone(),
-                &self.rpc,
-                self.proxy_sanitize_check,
-                self.proxy_preflight_check,
-            );
-
-            handler
+            self.tx_handler
                 .handle_versioned_transaction(transaction, config)
                 .await
                 .map_err(Into::into)

@@ -1,15 +1,14 @@
 use {
     crate::{
         blockhash_queue::BlockHeighService,
+        cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
         config::ConfigSendTransactionService,
         grpc_geyser::{GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived},
         metrics::jet as metrics,
-        quic::{QuicClient, QuicSendTxPermit},
-        quic_solana::IdentityFlusher,
-        solana::get_durable_nonce,
-        util::{BlockHeight, CommitmentLevel},
+        quic_gateway::{GatewayResponse, GatewayTransaction},
+        util::CommitmentLevel,
     },
-    futures::future::BoxFuture,
+    bytes::Bytes,
     solana_sdk::{
         clock::{MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES, Slot},
         pubkey::Pubkey,
@@ -20,22 +19,15 @@ use {
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         future::Future,
         ops::DerefMut,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Duration,
+        sync::{Arc, RwLock as StdRwLock},
     },
     tokio::{
-        sync::{
-            RwLock, broadcast,
-            mpsc::{self},
-            oneshot,
-        },
+        sync::mpsc::{self},
         task::{self, JoinSet},
         time::Instant,
     },
-    tracing::{debug, error, info, instrument},
+    tracing::{debug, error},
+    yellowstone_shield_store::{CheckError, PolicyStoreTrait},
 };
 
 #[derive(Debug, Default)]
@@ -47,14 +39,27 @@ pub struct RootedTransactionsSlotInfo {
 pub type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
 
 ///
+/// Trait for getting the upcoming leader schedule
+///
+pub trait UpcomingLeaderSchedule {
+    fn get_leader_tpus(&self, leader_forward_lookahead: usize) -> Vec<TpuInfo>;
+}
+
+impl UpcomingLeaderSchedule for ClusterTpuInfo {
+    fn get_leader_tpus(&self, leader_forward_lookahead: usize) -> Vec<TpuInfo> {
+        self.get_leader_tpus(leader_forward_lookahead)
+    }
+}
+
+///
 /// Base trait for Rooted transaction update notifier
 ///
 #[async_trait::async_trait]
 pub trait RootedTxReceiver {
-    async fn subscribe_signature(&mut self, signature: Signature);
-    async fn unsubscribe_signature(&mut self, signature: Signature);
-    async fn get_transaction_commitment(&mut self, signature: Signature)
-    -> Option<CommitmentLevel>;
+    fn subscribe_signature(&mut self, signature: Signature);
+    fn unsubscribe_signature(&mut self, signature: Signature);
+    // async fn unsubscribe_signatures(&mut self, signatures: Vec<Signature>);
+    fn get_transaction_commitment(&mut self, signature: Signature) -> Option<CommitmentLevel>;
     async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)>;
 }
 
@@ -70,17 +75,14 @@ pub struct RootedTransactionsInner {
 ///
 #[derive(Debug)]
 pub struct GrpcRootedTxReceiver {
-    inner: Arc<RwLock<RootedTransactionsInner>>,
+    inner: Arc<StdRwLock<RootedTransactionsInner>>,
     rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
 }
 
 #[async_trait::async_trait]
 impl RootedTxReceiver for GrpcRootedTxReceiver {
-    async fn get_transaction_commitment(
-        &mut self,
-        signature: Signature,
-    ) -> Option<CommitmentLevel> {
-        let locked = self.inner.read().await;
+    fn get_transaction_commitment(&mut self, signature: Signature) -> Option<CommitmentLevel> {
+        let locked = self.inner.read().expect("RwLock poisoned");
         locked
             .transactions
             .get(&signature)
@@ -89,13 +91,13 @@ impl RootedTxReceiver for GrpcRootedTxReceiver {
             .map(|info| info.commitment)
     }
 
-    async fn subscribe_signature(&mut self, signature: Signature) {
-        let mut locked = self.inner.write().await;
+    fn subscribe_signature(&mut self, signature: Signature) {
+        let mut locked = self.inner.write().expect("RwLock poisoned");
         locked.watch_signatures.insert(signature);
     }
 
-    async fn unsubscribe_signature(&mut self, signature: Signature) {
-        let mut locked = self.inner.write().await;
+    fn unsubscribe_signature(&mut self, signature: Signature) {
+        let mut locked = self.inner.write().expect("RwLock poisoned");
         locked.watch_signatures.remove(&signature);
     }
 
@@ -122,7 +124,7 @@ impl GrpcRootedTxReceiver {
 
     async fn start_loop(
         mut grpc_rx: mpsc::Receiver<GrpcUpdateMessage>,
-        inner: Arc<RwLock<RootedTransactionsInner>>,
+        inner: Arc<StdRwLock<RootedTransactionsInner>>,
         signature_updates_tx: mpsc::UnboundedSender<RootedTransactionsUpdateSignature>,
     ) {
         let mut transactions_bulk = vec![];
@@ -139,7 +141,8 @@ impl GrpcRootedTxReceiver {
             };
 
             // Acquire write lock
-            let mut locked = inner.write().await;
+            // IMPORTANT: Don't hold lock across await points
+            let mut locked = inner.write().expect("RwLock poisoned");
             let RootedTransactionsInner {
                 slots,
                 transactions,
@@ -222,278 +225,62 @@ impl GrpcRootedTxReceiver {
 pub struct SendTransactionRequest {
     pub signature: Signature,
     pub transaction: VersionedTransaction,
-    pub wire_transaction: Vec<u8>,
+    pub wire_transaction: Bytes,
     pub max_retries: Option<usize>,
     pub policies: Vec<Pubkey>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SendTransactionsPool {
-    new_transactions_tx: mpsc::UnboundedSender<SendTransactionRequest>,
-    cnc_tx: mpsc::Sender<SendTransactionPoolCommand>,
-    dead_letter_queue: broadcast::Sender<Signature>,
-    finalized_tx_notifier: broadcast::Sender<Signature>,
+struct RetryableTx {
+    tx: Arc<SendTransactionRequest>,
+    leftover_attempt: usize,
 }
 
-impl SendTransactionsPool {
-    pub async fn spawn(
-        config: ConfigSendTransactionService,
-        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
-        rooted_transactions_rx: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
-        tx_sender: Arc<dyn TxChannel + Send + Sync + 'static>,
-    ) -> (Self, impl Future<Output = ()>) {
-        let (new_transactions_tx, new_transactions_rx) = mpsc::unbounded_channel();
-
-        let (deadletter_tx, _) = broadcast::channel(1000);
-        let (finalized_tx_notifier, _) = broadcast::channel(1000);
-        let task = SendTransactionsPoolTask {
-            config,
-            block_height_service,
-            rooted_transactions: rooted_transactions_rx,
-            tx_channel: tx_sender,
-            new_transactions_rx,
-            transactions: HashMap::new(),
-            retry_schedule: BTreeMap::new(),
-            connecting_map: Default::default(),
-            connecting_tasks: JoinSet::new(),
-            send_map: Default::default(),
-            send_tasks: JoinSet::new(),
-            dead_letter_queue: deadletter_tx.clone(),
-            finalized_tx_notifier: finalized_tx_notifier.clone(),
-        };
-
-        let (cnc_tx, cnc_rx) = mpsc::channel(10);
-        let frontend = Self {
-            new_transactions_tx,
-            cnc_tx,
-            dead_letter_queue: deadletter_tx,
-            finalized_tx_notifier,
-        };
-
-        // The backend task will end after all reference to the frontend task are dropped
-        let backend = task.run(cnc_rx);
-        (frontend, backend)
-    }
-
-    pub fn send_transaction(&self, request: SendTransactionRequest) -> anyhow::Result<()> {
-        debug!(
-            "Sending transaction with signature {} and policies: {:?}",
-            request.signature, request.policies
-        );
-        anyhow::ensure!(
-            self.new_transactions_tx.send(request).is_ok(),
-            "send service task finished"
-        );
-        Ok(())
-    }
-
-    pub async fn flush(&self) {
-        let (tx, rx) = oneshot::channel();
-        self.cnc_tx
-            .send(SendTransactionPoolCommand::Flush { callback: tx })
-            .await
-            .expect("failed to send flush command");
-        rx.await.expect("failed to receive flush command result");
-    }
-
-    pub fn subscribe_dead_letter(&self) -> broadcast::Receiver<Signature> {
-        self.dead_letter_queue.subscribe()
-    }
-
-    pub fn subscribe_to_finalized_tx(&self) -> broadcast::Receiver<Signature> {
-        self.finalized_tx_notifier.subscribe()
-    }
-}
-
-#[async_trait::async_trait]
-impl IdentityFlusher for SendTransactionsPool {
-    async fn flush(&self) {
-        SendTransactionsPool::flush(self).await;
-    }
-}
-
-pub type SendTransactionInfoId = usize;
-
-#[derive(Debug)]
-struct SendTransactionInfo {
-    id: SendTransactionInfoId,
-    signature: Signature,
-    wire_transaction: Arc<Vec<u8>>,
-    total_retries: usize,
-    max_retries: usize,
-    last_valid_block_height: BlockHeight,
-    landed: bool,
-    policies: Vec<Pubkey>,
-}
-
-impl SendTransactionInfo {
-    fn next_id() -> SendTransactionInfoId {
-        static ID: AtomicUsize = AtomicUsize::new(0);
-        ID.fetch_add(1, Ordering::Relaxed)
-    }
-}
-
-#[derive(Debug)]
-struct SendTransactionTaskResult {
-    id: SendTransactionInfoId,
-    signature: Signature,
-    retry_timestamp: Instant,
-}
-
-pub enum SendTransactionPoolCommand {
-    Flush { callback: oneshot::Sender<()> },
-}
-
-#[async_trait::async_trait]
-pub trait TxChannelPermit {
-    async fn send_transaction(
-        self,
-        id: SendTransactionInfoId,
-        signature: Signature,
-        wire_transaction: Arc<Vec<u8>>,
-    ) -> ();
-}
-
-type BoxedInnerTxChannelPermit = Box<
-    dyn FnOnce(SendTransactionInfoId, Signature, Arc<Vec<u8>>) -> BoxFuture<'static, ()> + Send,
->;
-
-pub struct BoxedTxChannelPermit {
-    inner: BoxedInnerTxChannelPermit,
-}
-
-impl BoxedTxChannelPermit {
-    pub fn new<T>(pointee: T) -> Self
-    where
-        T: TxChannelPermit + Send + 'static,
-    {
-        Self {
-            inner: Box::new(move |id, sig, wire_tx| pointee.send_transaction(id, sig, wire_tx)),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl TxChannelPermit for BoxedTxChannelPermit {
-    async fn send_transaction(
-        self,
-        id: SendTransactionInfoId,
-        signature: Signature,
-        wire_transaction: Arc<Vec<u8>>,
-    ) {
-        (self.inner)(id, signature, wire_transaction).await;
-    }
-}
-
-///
-/// Back-pressured transaction channel
-///
-#[async_trait::async_trait]
-pub trait TxChannel {
-    ///
-    /// Reserve a permit to send a transaction
-    ///
-    async fn reserve(
-        &self,
-        leader_foward_count: usize,
-        policies: Vec<Pubkey>,
-    ) -> Option<BoxedTxChannelPermit>;
-}
-
-#[async_trait::async_trait]
-impl TxChannelPermit for QuicSendTxPermit {
-    async fn send_transaction(
-        self,
-        id: SendTransactionInfoId,
-        signature: Signature,
-        wire_transaction: Arc<Vec<u8>>,
-    ) {
-        QuicSendTxPermit::send_transaction(self, id, signature, wire_transaction).await;
-    }
-}
-
-#[async_trait::async_trait]
-impl TxChannel for QuicClient {
-    async fn reserve(
-        &self,
-        leader_foward_count: usize,
-        policies: Vec<Pubkey>,
-    ) -> Option<BoxedTxChannelPermit> {
-        debug!(
-            "QuicClient::reserve called with forwarding policies: {:?}",
-            policies
-        );
-        QuicClient::reserve_send_permit(self, leader_foward_count, policies)
-            .await
-            .map(BoxedTxChannelPermit::new)
-    }
-}
-
-pub struct TransactionInfo {
-    pub id: SendTransactionInfoId,
-    pub signature: Signature,
-    pub wire_transaction: Arc<Vec<u8>>,
-    pub policies: Vec<Pubkey>,
-}
-
-pub struct SendTransactionsPoolTask {
-    config: ConfigSendTransactionService,
+pub struct TransactionRetrier {
     block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
     rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
-    tx_channel: Arc<dyn TxChannel + Send + Sync + 'static>,
-
-    /// Connecting map holds pending connection request with the underlying tx sender.
-    /// We split connection handling from transaction sending logic for flushing purposes.
-    connecting_map: HashMap<task::Id, TransactionInfo>,
-    /// Connecting task are stored in its seperated joinset.
-    connecting_tasks: JoinSet<Option<BoxedTxChannelPermit>>,
-
-    /// Send map holds pending send request with the underlying tx sender.
-    /// Pending sends are transaction that acquired a TxSenderPermit prior to be send.
-    send_map: HashMap<task::Id, (SendTransactionInfoId, Signature)>,
-    /// Send task are stored in its seperated joinset.
-    send_tasks: JoinSet<SendTransactionTaskResult>,
-
-    new_transactions_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
-
-    transactions: HashMap<Signature, SendTransactionInfo>,
-    retry_schedule: BTreeMap<Instant, VecDeque<Signature>>,
-    dead_letter_queue: broadcast::Sender<Signature>,
-
-    ///
-    /// Notifies when a managed transaction in the pool has been detected finalized.
-    ///
-    finalized_tx_notifier: broadcast::Sender<Signature>,
+    incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+    sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    config: ConfigSendTransactionService,
+    last_known_block_height: u64,
+    tx_buffer_map: HashMap<Signature, RetryableTx>,
+    block_height_deadline_map: BTreeMap<u64, Vec<Signature>>,
+    insertion_order: VecDeque<(Instant, Signature)>,
 }
 
-impl SendTransactionsPoolTask {
-    pub async fn run(
-        mut self,
-        mut cnc_rx: mpsc::Receiver<SendTransactionPoolCommand>, // command-and-control channel
-    ) {
-        // let mut retry_interval = interval(Duration::from_millis(10));
+impl TransactionRetrier {
+    pub fn new(
+        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+        rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
+        incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+        sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+        config: ConfigSendTransactionService,
+    ) -> Self {
+        Self {
+            block_height_service,
+            rooted_transactions,
+            incoming_transaction_rx,
+            sink,
+            config,
+            last_known_block_height: 0,
+            tx_buffer_map: HashMap::new(),
+            block_height_deadline_map: BTreeMap::new(),
+            insertion_order: VecDeque::new(),
+        }
+    }
+
+    pub async fn run(&mut self) {
+        let mut interval = tokio::time::interval(self.config.retry_rate);
+
         loop {
-            metrics::sts_pool_set_size(self.transactions.len());
-            metrics::sts_inflight_set_size(self.send_tasks.len());
+            if self.incoming_transaction_rx.is_closed() {
+                break;
+            }
+            if self.sink.is_closed() {
+                break;
+            }
 
-            let next_retry_deadline = self
-                .next_retry_deadline()
-                .unwrap_or(Instant::now() + self.config.retry_rate);
             tokio::select! {
-                maybe = cnc_rx.recv() => {
-                    match maybe {
-                        Some(SendTransactionPoolCommand::Flush { callback }) => {
-                            self.flush_transactions().await;
-                            let _ = callback.send(());
-                        },
-                        None => break,
-                    }
-                },
-                _ = tokio::time::sleep_until(next_retry_deadline) => {
-                    self.retry_next_in_schedule().await;
-                }
-
-                maybe = self.new_transactions_rx.recv(), if next_retry_deadline.elapsed() == Duration::ZERO => {
+                maybe = self.incoming_transaction_rx.recv() => {
                     match maybe {
                         Some(newtx) => self.add_new_transaction(newtx).await,
                         None => {
@@ -502,15 +289,13 @@ impl SendTransactionsPoolTask {
                         }
                     }
                 }
-                Some(result) = self.connecting_tasks.join_next_with_id() => {
-                    self.handle_connecting_result(result).await;
-                }
-                Some(result) = self.send_tasks.join_next_with_id() => {
-                    self.handle_send_result(result).await;
+                now = interval.tick() => {
+                    self.gc_deadline_map();
+                    self.resend_non_landed_tx(now);
                 }
                 maybe_signature_update = self.rooted_transactions.recv() => {
                     match maybe_signature_update {
-                        Some((signature, commitment)) => self.update_signature(signature, commitment).await,
+                        Some((signature, commitment)) => self.handle_tx_commitment_update(signature, commitment),
                         None => {
                             error!("signature updates channel is closed");
                             break;
@@ -521,366 +306,309 @@ impl SendTransactionsPoolTask {
         }
     }
 
-    async fn handle_connecting_result(
-        &mut self,
-        result: Result<(task::Id, Option<BoxedTxChannelPermit>), task::JoinError>,
-    ) {
-        match result {
-            Ok((task_id, maybe_permit)) => {
-                let tx_info = self
-                    .connecting_map
-                    .remove(&task_id)
-                    .expect("unknown task id");
-                match maybe_permit {
-                    Some(permit) => self.spawn_send(permit, tx_info),
-                    None => {
-                        error!("upcoming leaders unavailable");
-                    }
-                }
+    fn resend_non_landed_tx(&mut self, now: Instant) {
+        while let Some(inserted_at) = self.insertion_order.front().map(|(t, _)| t.clone()) {
+            if now.duration_since(inserted_at) < self.config.retry_rate {
+                break;
             }
-            Err(e) => {
-                let task_id = e.id();
-                error!("connecting task panic with {:?}", e);
-                let tx_info = self
-                    .connecting_map
-                    .remove(&task_id)
-                    .expect("unknown task id");
-
-                // We must use the same code when we handle a failed send result, see [`SendTransactionsPoolTask::handle_send_result`]
-                if let Some(info) = self.transactions.get_mut(&tx_info.signature) {
-                    if info.id == tx_info.id {
-                        info.total_retries += 1;
-                        self.schedule_transaction_retry(
-                            tx_info.signature,
-                            Instant::now() + self.config.retry_rate,
-                        )
-                        .await;
-                    }
+            let (_, signature) = self.insertion_order.pop_front().unwrap();
+            if let Some(rtx) = self.tx_buffer_map.get_mut(&signature) {
+                if rtx.leftover_attempt > 0 {
+                    rtx.leftover_attempt = rtx.leftover_attempt.saturating_sub(1);
+                    let _ = self.sink.send(Arc::clone(&rtx.tx));
+                    self.insertion_order.push_back((now, signature));
+                } else {
+                    self.tx_buffer_map.remove(&signature);
+                    tracing::trace!("tx {signature} reached max attempts, dropping it");
                 }
             }
         }
     }
 
-    fn spawn_send(&mut self, permit: BoxedTxChannelPermit, tx_info: TransactionInfo) {
-        if !self.transactions.contains_key(&tx_info.signature) {
-            // The transaction has been removed from the pool
-            return;
-        }
-        let retry_rate = self.config.retry_rate;
-        let abort_handle = self.send_tasks.spawn(async move {
-            permit
-                .send_transaction(tx_info.id, tx_info.signature, tx_info.wire_transaction)
-                .await;
-            SendTransactionTaskResult {
-                id: tx_info.id,
-                signature: tx_info.signature,
-                retry_timestamp: Instant::now() + retry_rate,
-            }
-        });
-        self.send_map
-            .insert(abort_handle.id(), (tx_info.id, tx_info.signature));
+    fn gc_deadline_map(&mut self) {
+        let outdated_block_height = self
+            .last_known_block_height
+            .saturating_sub(MAX_PROCESSING_AGE as u64);
+        let right = self
+            .block_height_deadline_map
+            .split_off(&outdated_block_height);
+
+        let deprecrated_tx = std::mem::replace(&mut self.block_height_deadline_map, right);
+
+        deprecrated_tx
+            .into_iter()
+            .flat_map(|(_, signatures)| signatures)
+            .for_each(|signature| {
+                self.tx_buffer_map.remove(&signature);
+                self.rooted_transactions.unsubscribe_signature(signature);
+            });
     }
 
-    async fn handle_send_result(
-        &mut self,
-        result: Result<(task::Id, SendTransactionTaskResult), task::JoinError>,
-    ) {
-        let send_tx_result = match result {
-            Ok((task_id, result)) => {
-                let _ = self.send_map.remove(&task_id).expect("unknown task id");
-                result
-            }
-            Err(e) => {
-                let task_id = e.id();
-                let (tx_id, tx_sig) = self.send_map.remove(&task_id).expect("unknown task id");
-                error!("send task for tx {tx_sig} panic with {e:?}");
-                SendTransactionTaskResult {
-                    retry_timestamp: Instant::now() + self.config.retry_rate,
-                    id: tx_id,
-                    signature: tx_sig,
-                }
-            }
-        };
-
-        if let Some(info) = self.transactions.get_mut(&send_tx_result.signature) {
-            if info.id == send_tx_result.id {
-                info.total_retries += 1;
-                self.schedule_transaction_retry(
-                    send_tx_result.signature,
-                    send_tx_result.retry_timestamp,
-                )
-                .await;
-            }
+    fn handle_tx_commitment_update(&mut self, signature: Signature, commitment: CommitmentLevel) {
+        if commitment == self.config.stop_send_on_commitment {
+            self.tx_buffer_map.remove(&signature);
         }
     }
 
-    ///
-    /// Flush will :
-    ///
-    /// 1. interrupt any connection attempt prior to calling this method.
-    /// 2. Wait for all pending send tasks to complete.
-    /// 3. Reschedule the managed retry attempt of each send transaction.
-    /// 4. Resechdule the connection attempt interrupt at step (1).
-    ///
-    async fn flush_transactions(&mut self) {
-        self.connecting_tasks.abort_all();
-        let connectiong_map = std::mem::take(&mut self.connecting_map);
-
-        for tx_info in connectiong_map.into_values() {
-            // This is not good practice, but this code work because how ConnectionCacheIdentity flusher is implemented.
-            // When the connection cache identity manager starts the flushing process, it clears out all connections certificates
-            // AND it prevents concurrent connection from happening while the flush is in process.
-            // Doing spawn_connect will not block the current flush process and they will internally wait for
-            // new connection to be available.
-            self.spawn_connect(
-                tx_info.id,
-                tx_info.signature,
-                tx_info.wire_transaction,
-                tx_info.policies,
-            );
-        }
-
-        while let Some(result) = self.send_tasks.join_next_with_id().await {
-            self.handle_send_result(result).await;
-        }
-    }
-
-    #[instrument(skip_all, fields(signature = %signature))]
-    async fn add_new_transaction(
-        &mut self,
-        SendTransactionRequest {
-            signature,
-            transaction,
-            wire_transaction,
-            max_retries,
-            policies,
-        }: SendTransactionRequest,
-    ) {
-        if self.transactions.contains_key(&signature) {
-            info!(%signature, "transaction already in the pool");
-            return;
-        }
-        // Resolve the proper max retries
-        let max_retries = max_retries
+    async fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>) {
+        let max_retries = tx
+            .max_retries
             .or(self.config.default_max_retries)
             .unwrap_or(self.config.service_max_retries)
             .min(self.config.service_max_retries);
 
-        let mut last_valid_block_height = self
+        let current_block_height = self
             .block_height_service
-            .get_block_height(transaction.message.recent_blockhash())
-            .await
+            .get_block_height_for_commitment(CommitmentLevel::Confirmed)
+            .unwrap_or(0);
+        self.last_known_block_height = current_block_height;
+        let last_valid_block_height = self
+            .block_height_service
+            .get_block_height(tx.transaction.message.recent_blockhash())
+            .map(|block_height| block_height + MAX_PROCESSING_AGE as u64)
+            .unwrap_or(current_block_height + MAX_PROCESSING_AGE as u64);
+
+        let signature = tx.signature;
+        if last_valid_block_height < current_block_height {
+            tracing::warn!(
+                %signature,
+                last_valid_block_height,
+                current_block_height,
+                "transaction last valid block height is less than current block height, dropping transaction"
+            );
+            return;
+        }
+
+        let is_landed = self
+            .rooted_transactions
+            .get_transaction_commitment(signature)
+            .filter(|cl| cl >= &self.config.stop_send_on_commitment)
+            .is_some();
+
+        if is_landed {
+            tracing::debug!("skipping {signature}, transaction already landed");
+            return;
+        }
+
+        self.rooted_transactions.subscribe_signature(signature);
+        // -1 because we are going to send the transaction immediately
+        let leftover_attempt = max_retries.saturating_sub(1);
+
+        self.tx_buffer_map.insert(
+            signature,
+            RetryableTx {
+                tx: Arc::clone(&tx),
+                leftover_attempt,
+            },
+        );
+        self.block_height_deadline_map
+            .entry(last_valid_block_height)
+            .or_default()
+            .push(signature);
+
+        self.sink
+            .send(tx)
+            .expect("transaction retrier sink is closed");
+    }
+}
+
+///
+/// Foward transactions to N valitx_sigs.
+/// Applies transaction's shield policies configuration.
+///
+/// Prevent duplicate transaction being inflight at the same time.
+///
+pub struct TransactionFowarder {
+    leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
+    policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
+    block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+    tx_gateway_sender: mpsc::Sender<GatewayTransaction>,
+    gateway_response_rx: mpsc::UnboundedReceiver<GatewayResponse>,
+    incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+    leader_fwd_count: usize,
+    transaction_send_set: JoinSet<Result<Signature, SendTransactionError>>,
+    transaction_send_set_meta: HashMap<task::Id, Signature>,
+    inflight_transactions: HashSet<Signature>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SendTransactionError {
+    #[error("transaction gateway sink is closed")]
+    GatewayClosed,
+    #[error(transparent)]
+    ShieldPoliciesNotFound(#[from] CheckError),
+}
+
+pub trait TransactionPolicyStore {
+    fn is_allowed(&self, policies: &[Pubkey], leader: &Pubkey) -> Result<bool, CheckError>;
+}
+
+impl<T: PolicyStoreTrait> TransactionPolicyStore for T {
+    fn is_allowed(&self, policies: &[Pubkey], leader: &Pubkey) -> Result<bool, CheckError> {
+        self.snapshot().is_allowed(policies, leader)
+    }
+}
+
+pub struct AlwaysAllowTransactionPolicyStore;
+
+impl TransactionPolicyStore for AlwaysAllowTransactionPolicyStore {
+    fn is_allowed(&self, _policies: &[Pubkey], _leader: &Pubkey) -> Result<bool, CheckError> {
+        Ok(true)
+    }
+}
+
+impl TransactionFowarder {
+    pub fn new(
+        leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
+        policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
+        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+        tx_gateway_sender: mpsc::Sender<GatewayTransaction>,
+        gateway_response_rx: mpsc::UnboundedReceiver<GatewayResponse>,
+        incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+        leader_fwd_count: usize,
+    ) -> Self {
+        Self {
+            leader_schedule_service,
+            policy_store_service,
+            block_height_service,
+            tx_gateway_sender,
+            gateway_response_rx,
+            incoming_transaction_rx,
+            leader_fwd_count,
+            transaction_send_set: JoinSet::new(),
+            transaction_send_set_meta: HashMap::new(),
+            inflight_transactions: HashSet::new(),
+        }
+    }
+
+    pub async fn run(&mut self) {
+        loop {
+            if self.tx_gateway_sender.is_closed() {
+                error!("gateway sender is closed, stopping transaction pool");
+                break;
+            }
+            tokio::select! {
+                maybe = self.incoming_transaction_rx.recv() => {
+                    match maybe {
+                        Some(newtx) => self.add_new_transaction(newtx),
+                        None => {
+                            error!("new transactions channel is closed");
+                            break;
+                        }
+                    }
+                }
+                maybe = self.gateway_response_rx.recv() => {
+                    match maybe {
+                        Some(response) => {
+                            self.handle_gateway_response(response);
+                        }
+                        None => {
+                            error!("gateway response channel is closed");
+                            break;
+                        }
+                    }
+                }
+                Some(result) = self.transaction_send_set.join_next_with_id() => {
+                    let (task_id, result) = result.expect("task join failed");
+                    self.handle_transaction_sent_result(task_id, result);
+                }
+            }
+        }
+    }
+
+    fn handle_gateway_response(&mut self, response: GatewayResponse) {
+        match response {
+            GatewayResponse::TxSent(gateway_tx_sent) => {
+                let tx_sig = gateway_tx_sent.tx_sig;
+                assert!(self.inflight_transactions.remove(&tx_sig));
+                tracing::trace!(
+                    "transaction {tx_sig} forwarded to {} validator",
+                    gateway_tx_sent.remote_peer_identity
+                );
+            }
+            GatewayResponse::TxFailed(gateway_tx_failed) => {
+                let tx_sig = gateway_tx_failed.tx_sig;
+                assert!(self.inflight_transactions.remove(&tx_sig));
+            }
+            GatewayResponse::TxDrop(tx_drop) => {
+                let tx_sig = tx_drop.tx_sig;
+                assert!(self.inflight_transactions.remove(&tx_sig));
+            }
+        }
+    }
+
+    fn handle_transaction_sent_result(
+        &mut self,
+        task_id: task::Id,
+        result: Result<Signature, SendTransactionError>,
+    ) {
+        let signature = self
+            .transaction_send_set_meta
+            .remove(&task_id)
+            .expect("unknown task id");
+        match result {
+            Ok(signature2) => {
+                assert!(signature == signature2, "task id mismatch");
+                tracing::trace!("transaction {signature} sent to QUIC gateway");
+            }
+            Err(SendTransactionError::GatewayClosed) => {
+                tracing::error!("gateway sender is closed");
+            }
+            Err(SendTransactionError::ShieldPoliciesNotFound(_)) => {
+                metrics::shield_policies_not_found_inc();
+            }
+        }
+    }
+
+    fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>) {
+        let last_valid_block_height = self
+            .block_height_service
+            .get_block_height(tx.transaction.message.recent_blockhash())
             .map(|block_height| block_height + MAX_PROCESSING_AGE as u64)
             .unwrap_or(0);
 
-        // check durable nonce
-        // we do not have access to Bank and can not make proper nonce checks
-        let durable_nonce_info = get_durable_nonce(&transaction);
-        if durable_nonce_info.is_some() {
-            last_valid_block_height = self
-                .block_height_service
-                .get_block_height_for_commitment(CommitmentLevel::Confirmed)
-                .await
-                .map(|block_height| block_height + MAX_PROCESSING_AGE as u64)
-                .unwrap_or(0);
-        }
+        let current_block_height = self
+            .block_height_service
+            .get_block_height_for_commitment(CommitmentLevel::Confirmed)
+            .unwrap_or(0);
 
-        let tx_commitment = self
-            .rooted_transactions
-            .get_transaction_commitment(signature)
-            .await;
-
-        // If the transaction is finalized we
-        if tx_commitment == Some(CommitmentLevel::Finalized) {
-            info!(%signature, "new transaction already finalized");
-
-            let _ = self.finalized_tx_notifier.send(signature);
-            return;
-        }
-
-        metrics::sts_received_inc();
-        let mut landed = false;
-        if let Some(tx_commitment) = tx_commitment {
-            landed = tx_commitment >= self.config.stop_send_on_commitment;
-            metrics::sts_landed_inc();
-        }
-
-        let id = SendTransactionInfo::next_id();
-        let wire_transaction = Arc::new(wire_transaction);
-        let info = SendTransactionInfo {
-            id,
-            signature,
-            wire_transaction: Arc::clone(&wire_transaction),
-            total_retries: 0,
-            max_retries,
-            last_valid_block_height,
-            landed,
-            policies: policies.clone(),
-        };
-        let update_existed = self.transactions.insert(signature, info).is_some();
-        if !update_existed {
-            self.rooted_transactions
-                .subscribe_signature(signature)
-                .await;
-            metrics::sts_pool_set_size(self.transactions.len());
-        }
-        info!(
-            id,
-            %signature,
-            max_retries,
-            last_valid_block_height,
-            landed,
-            durable_nonce = durable_nonce_info.is_some(),
-            update_existed,
-            "add transaction to the pool"
-        );
-
-        if landed {
-            let retry_timestamp = Instant::now() + self.config.retry_rate;
-            self.schedule_transaction_retry(signature, retry_timestamp)
-                .await;
-        } else {
-            self.spawn_connect(id, signature, wire_transaction, policies);
-        }
-    }
-
-    async fn remove_transaction(&mut self, signature: Signature, reason: &'static str) {
-        let removed_tx = self.transactions.remove(&signature);
-        self.rooted_transactions
-            .unsubscribe_signature(signature)
-            .await;
-        if let Some(info) = removed_tx {
-            info!(id = info.id, %signature, reason, "remove transaction");
-            if !info.landed {
-                let _ = self.dead_letter_queue.send(info.signature);
-            }
-        }
-    }
-
-    fn spawn_connect(
-        &mut self,
-        id: SendTransactionInfoId,
-        signature: Signature,
-        wire_transaction: Arc<Vec<u8>>,
-        policies: Vec<Pubkey>,
-    ) {
-        debug!(
-            "Spawning connect for tx {}, id {}, with policies: {:?}",
-            signature, id, &policies
-        );
-        let leader_forward_count = self.config.leader_forward_count;
-        let tx_channel = Arc::clone(&self.tx_channel);
-        let policies_connecting = policies.clone();
-        let abort_handle = self.connecting_tasks.spawn(async move {
-            debug!(
-                "Reserving tx {} with policies: {:?}",
-                signature, &policies_connecting
+        if last_valid_block_height < current_block_height {
+            tracing::warn!(
+                %tx.signature,
+                last_valid_block_height,
+                current_block_height,
+                "transaction last valid block height is less than current block height, dropping transaction"
             );
-            tx_channel
-                .reserve(leader_forward_count, policies_connecting)
-                .await
-        });
-        self.connecting_map.insert(
-            abort_handle.id(),
-            TransactionInfo {
-                id,
-                signature,
-                wire_transaction,
-                policies,
-            },
-        );
-    }
-
-    async fn schedule_transaction_retry(&mut self, signature: Signature, retry_timestamp: Instant) {
-        if !self.transactions.contains_key(&signature) {
             return;
         }
-        let retry_required = if self.config.relay_only_mode {
-            self.transactions
-                .get(&signature)
-                .map(|info| info.total_retries <= info.max_retries)
-                .unwrap_or(true)
-        } else {
-            true
+
+        let leader_schedule_service = Arc::clone(&self.leader_schedule_service);
+        let policy_store_service = Arc::clone(&self.policy_store_service);
+        let leader_fwd = self.leader_fwd_count;
+        let gateway_sink = self.tx_gateway_sender.clone();
+        let signature = tx.signature;
+        let send_fut = async move {
+            let next_leaders = leader_schedule_service.get_leader_tpus(leader_fwd);
+
+            for dest in next_leaders {
+                if !policy_store_service.is_allowed(&tx.policies, &dest.leader)? {
+                    continue;
+                }
+                let gateway_tx = GatewayTransaction {
+                    tx_sig: tx.signature,
+                    wire: tx.wire_transaction.clone(),
+                    remote_peer: dest.leader,
+                };
+                gateway_sink
+                    .send(gateway_tx)
+                    .await
+                    .map_err(|_| SendTransactionError::GatewayClosed)?;
+            }
+            Ok(tx.signature)
         };
 
-        if retry_required {
-            self.retry_schedule
-                .entry(retry_timestamp)
-                .or_default()
-                .push_back(signature);
-        } else {
-            self.remove_transaction(signature, "max_retries reached")
-                .await;
-        }
-    }
-
-    ///
-    /// Returns the next retry deadline if any.
-    ///
-    fn next_retry_deadline(&self) -> Option<Instant> {
-        self.retry_schedule.keys().next().cloned()
-    }
-
-    ///
-    /// Tries to retry the next transaction in the schedule
-    ///
-    /// If the transaction has expired due to block height, it will be removed and the permit will be returned.
-    async fn retry_next_in_schedule(&mut self) {
-        if let Some(mut entry) = self.retry_schedule.first_entry() {
-            if let Some(signature) = entry.get_mut().pop_front() {
-                if let Some(info) = self.transactions.get(&signature) {
-                    let latest_block_height = self
-                        .block_height_service
-                        .get_block_height_for_commitment(CommitmentLevel::Confirmed)
-                        .await;
-
-                    if let Some(block_height) = latest_block_height {
-                        if info.last_valid_block_height < block_height {
-                            self.remove_transaction(signature, "block_height expired")
-                                .await;
-                            return;
-                        }
-                    }
-
-                    if info.total_retries <= info.max_retries {
-                        self.spawn_connect(
-                            info.id,
-                            info.signature,
-                            Arc::clone(&info.wire_transaction),
-                            info.policies.clone(),
-                        );
-                    } else {
-                        let retry_timestamp = Instant::now() + self.config.retry_rate;
-                        self.schedule_transaction_retry(signature, retry_timestamp)
-                            .await;
-                    }
-                }
-            } else {
-                // If the queue is empty, remove the key
-                self.retry_schedule.pop_first();
-            }
-        }
-    }
-
-    #[instrument(skip_all, fields(signature = %signature, commitment = ?commitment))]
-    async fn update_signature(&mut self, signature: Signature, commitment: CommitmentLevel) {
-        if commitment == CommitmentLevel::Finalized {
-            if let Some(info) = self.transactions.remove(&signature) {
-                self.rooted_transactions
-                    .unsubscribe_signature(signature)
-                    .await;
-                let _ = self.finalized_tx_notifier.send(info.signature);
-                info!(id = info.id, %signature, "remove transaction: reached finalized commitment");
-                metrics::sts_pool_set_size(self.transactions.len());
-            }
-        } else if let Some(info) = self.transactions.get_mut(&signature) {
-            if !info.landed && commitment >= self.config.stop_send_on_commitment {
-                info.landed = true;
-                info!(id = info.id, %signature, "transaction landed");
-                metrics::sts_landed_inc();
-            }
-        }
+        let ah = self.transaction_send_set.spawn(send_fut);
+        self.transaction_send_set_meta.insert(ah.id(), signature);
     }
 }
 
@@ -889,11 +617,11 @@ pub mod testkit {
         super::RootedTxReceiver,
         crate::util::CommitmentLevel,
         solana_sdk::signature::Signature,
-        std::{collections::HashMap, sync::Arc},
-        tokio::sync::{
-            RwLock,
-            mpsc::{self, UnboundedReceiver},
+        std::{
+            collections::HashMap,
+            sync::{Arc, RwLock as StdRwLock},
         },
+        tokio::sync::mpsc::{self, UnboundedReceiver},
     };
 
     #[derive(Default)]
@@ -902,7 +630,7 @@ pub mod testkit {
     }
 
     pub struct MockRootedTransactionsTx {
-        shared: Arc<RwLock<MockRootedTxChannelShared>>,
+        shared: Arc<StdRwLock<MockRootedTxChannelShared>>,
         tx: mpsc::UnboundedSender<(Signature, CommitmentLevel)>,
     }
 
@@ -910,7 +638,7 @@ pub mod testkit {
         pub async fn send(&self, signature: Signature, commitment: CommitmentLevel) {
             self.shared
                 .write()
-                .await
+                .expect("shared lock poisoned")
                 .transactions
                 .insert(signature, Default::default());
             self.tx.send((signature, commitment)).unwrap();
@@ -918,7 +646,7 @@ pub mod testkit {
     }
 
     pub struct MockRootedTransactionsRx {
-        shared: Arc<RwLock<MockRootedTxChannelShared>>,
+        shared: Arc<StdRwLock<MockRootedTxChannelShared>>,
         rx: UnboundedReceiver<(Signature, CommitmentLevel)>,
     }
 
@@ -935,15 +663,12 @@ pub mod testkit {
 
     #[async_trait::async_trait]
     impl RootedTxReceiver for MockRootedTransactionsRx {
-        async fn subscribe_signature(&mut self, _signature: Signature) {}
+        fn subscribe_signature(&mut self, _signature: Signature) {}
 
-        async fn unsubscribe_signature(&mut self, _signature: Signature) {}
+        fn unsubscribe_signature(&mut self, _signature: Signature) {}
 
-        async fn get_transaction_commitment(
-            &mut self,
-            signature: Signature,
-        ) -> Option<CommitmentLevel> {
-            let locked = self.shared.read().await;
+        fn get_transaction_commitment(&mut self, signature: Signature) -> Option<CommitmentLevel> {
+            let locked = self.shared.read().expect("shared lock poisoned");
             locked.transactions.get(&signature).copied()
         }
 

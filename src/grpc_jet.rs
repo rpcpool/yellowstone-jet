@@ -40,7 +40,6 @@ use {
     solana_sdk::signer::Signer,
     std::sync::Arc,
     tokio::{
-        sync::oneshot,
         task::JoinSet,
         time::{Duration, interval},
     },
@@ -308,12 +307,8 @@ impl GrpcServer {
         config: ConfigJetGatewayClient,
         tx_sender: RpcServerImplSolanaLike,
         features: FeatureSet,
-        mut stop_rx: oneshot::Receiver<()>,
     ) {
-        tokio::select! {
-            () = Self::grpc_subscribe(signer, stake_info, config, tx_sender, features) => {},
-            _ = &mut stop_rx => {},
-        }
+        Self::grpc_subscribe(signer, stake_info, config, tx_sender, features).await
     }
 
     async fn grpc_subscribe(

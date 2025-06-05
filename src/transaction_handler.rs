@@ -1,10 +1,10 @@
 use {
     crate::{
-        payload::JetRpcSendTransactionConfig,
-        solana::decode_and_deserialize,
-        transactions::{SendTransactionRequest, SendTransactionsPool},
+        payload::JetRpcSendTransactionConfig, solana::decode_and_deserialize,
+        transactions::SendTransactionRequest,
     },
     anyhow::Result,
+    bytes::Bytes,
     jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE},
     solana_client::{
         client_error::ClientErrorKind,
@@ -19,6 +19,7 @@ use {
     solana_version::Version,
     std::sync::Arc,
     thiserror::Error,
+    tokio::sync::mpsc,
 };
 
 #[derive(Debug, Error)]
@@ -34,9 +35,6 @@ pub enum TransactionHandlerError {
 
     #[error("transaction sanitize check failed: {0}")]
     SanitizeCheckFailed(String),
-
-    #[error("failed to send transaction: {0}")]
-    SendFailed(String),
 
     #[error("node unhealthy: {num_slots_behind} slots behind")]
     NodeUnhealthy { num_slots_behind: u64 },
@@ -60,8 +58,9 @@ impl From<TransactionHandlerError> for ErrorObjectOwned {
     }
 }
 
+#[derive(Clone)]
 pub struct TransactionHandler {
-    pub stp: SendTransactionsPool,
+    pub transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
     pub rpc: Arc<RpcClient>,
     pub proxy_sanitize_check: bool,
     pub proxy_preflight_check: bool,
@@ -69,13 +68,13 @@ pub struct TransactionHandler {
 
 impl TransactionHandler {
     pub fn new(
-        stp: SendTransactionsPool,
+        transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
         rpc: &Arc<RpcClient>,
         proxy_sanitize_check: bool,
         proxy_preflight_check: bool,
     ) -> Self {
         Self {
-            stp,
+            transaction_sink,
             rpc: Arc::clone(rpc),
             proxy_sanitize_check,
             proxy_preflight_check,
@@ -110,17 +109,17 @@ impl TransactionHandler {
         }
 
         let signature = transaction.signatures[0];
-        let wire_transaction = bincode::serialize(&transaction)?;
+        let wire_transaction = Bytes::from(bincode::serialize(&transaction)?);
 
-        if let Err(error) = self.stp.send_transaction(SendTransactionRequest {
-            signature,
-            transaction,
-            wire_transaction,
-            max_retries: config.max_retries,
-            policies: config_with_forwarding_policies.forwarding_policies,
-        }) {
-            return Err(TransactionHandlerError::SendFailed(error.to_string()));
-        }
+        self.transaction_sink
+            .send(Arc::new(SendTransactionRequest {
+                signature,
+                transaction,
+                wire_transaction,
+                max_retries: config.max_retries,
+                policies: config_with_forwarding_policies.forwarding_policies,
+            }))
+            .expect("transaction sink closed");
 
         Ok(signature.to_string())
     }
@@ -136,15 +135,15 @@ impl TransactionHandler {
         let (wire_transaction, transaction) = self.prepare_transaction(data, config).await?;
         let signature = transaction.signatures[0];
 
-        if let Err(error) = self.stp.send_transaction(SendTransactionRequest {
-            signature,
-            transaction,
-            wire_transaction,
-            max_retries: config.max_retries,
-            policies: config_with_forwarding_policies.forwarding_policies,
-        }) {
-            return Err(TransactionHandlerError::SendFailed(error.to_string()));
-        }
+        self.transaction_sink
+            .send(Arc::new(SendTransactionRequest {
+                signature,
+                transaction,
+                wire_transaction,
+                max_retries: config.max_retries,
+                policies: config_with_forwarding_policies.forwarding_policies,
+            }))
+            .expect("transaction sink closed");
 
         Ok(signature.to_string())
     }
@@ -153,7 +152,7 @@ impl TransactionHandler {
         &self,
         data: String,
         config: RpcSendTransactionConfig,
-    ) -> Result<(Vec<u8>, VersionedTransaction), TransactionHandlerError> {
+    ) -> Result<(Bytes, VersionedTransaction), TransactionHandlerError> {
         let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
 
         let (wire_transaction, transaction) = decode_and_deserialize(

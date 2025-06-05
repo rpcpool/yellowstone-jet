@@ -112,6 +112,8 @@ pub mod jet {
         static ref STS_INFLIGHT_SIZE: IntGauge = IntGauge::new("sts_inflight_size", "Number of transactions sending right now").unwrap();
         static ref STS_RECEIVED_TOTAL: IntCounter = IntCounter::new("sts_received_total", "Total number of received transactions").unwrap();
         static ref STS_LANDED_TOTAL: IntCounter = IntCounter::new("sts_landed_total", "Total number of landed transactions").unwrap();
+        // TODO we should rename this to "tpu_send_total" since STS was an syntax error in the first place and we don't have a send-transaction-pool anymore.
+        // But we can't do it now since it will break the metrics dashboard.
         static ref STS_TPU_SEND: IntCounterVec = IntCounterVec::new(
             Opts::new("sts_tpu_send_total", "Number of transactions sent to TPU"),
             &["leaders"]
@@ -402,9 +404,9 @@ pub mod jet {
         STS_LANDED_TOTAL.inc();
     }
 
-    pub fn sts_tpu_send_inc(leaders: usize) {
+    pub fn sts_tpu_send_inc(leader: Pubkey) {
         STS_TPU_SEND
-            .with_label_values(&[leaders.to_string().as_str()])
+            .with_label_values(&[leader.to_string().as_str()])
             .inc();
     }
 
@@ -432,6 +434,7 @@ pub mod jet {
         *QUIC_IDENTITY_EXPECTED_VALUE.lock().unwrap() = Some(identity);
     }
 
+    #[deprecated]
     pub fn quic_send_attempts_inc(
         leader: &Pubkey,
         address: &SocketAddr,

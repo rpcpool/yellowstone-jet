@@ -8,12 +8,16 @@ use {
         },
     },
     solana_sdk::{clock::MAX_RECENT_BLOCKHASHES, hash::Hash},
-    std::{collections::HashMap, ops::DerefMut, sync::Arc},
-    tokio::sync::{Notify, RwLock, broadcast},
+    std::{
+        collections::HashMap,
+        ops::DerefMut,
+        sync::{Arc, RwLock as StdRwLock},
+    },
+    tokio::sync::{Notify, broadcast},
     tracing::debug,
 };
 
-type SharedSlots = Arc<RwLock<HashMap<Hash, SlotUpdateInfoWithCommitment>>>;
+type SharedSlots = Arc<StdRwLock<HashMap<Hash, SlotUpdateInfoWithCommitment>>>;
 
 #[derive(Debug, Clone)]
 pub struct BlockhashQueue {
@@ -39,7 +43,7 @@ impl BlockhashQueue {
         G: GeyserStreams + Send + Sync + 'static,
     {
         let shutdown = Arc::new(Notify::new());
-        let slots = Arc::new(RwLock::new(HashMap::new()));
+        let slots = Arc::new(StdRwLock::new(HashMap::new()));
         Self {
             slots: Arc::clone(&slots),
             shutdown: Arc::clone(&shutdown),
@@ -59,7 +63,10 @@ impl BlockhashQueue {
             }
             .map_err(|error| anyhow::anyhow!("BlockhashQueue: grpc stream finished: {error:?}"))?;
 
-            let mut slots = slots.write().await;
+            // IMPORTANT Don't hold the lock across await points
+            let mut slots = slots
+                .write()
+                .expect("Failed to acquire write lock on slots");
             slots.insert(slot_update.block_hash, slot_update);
 
             if slot_update.commitment == CommitmentLevel::Finalized {
@@ -78,16 +85,19 @@ impl BlockhashQueue {
         }
     }
 
-    pub async fn get_block_height(&self, block_hash: &Hash) -> Option<BlockHeight> {
-        let slots = self.slots.read().await;
+    pub fn get_block_height(&self, block_hash: &Hash) -> Option<BlockHeight> {
+        let slots = self
+            .slots
+            .read()
+            .expect("Failed to acquire read lock on slots");
         slots.get(block_hash).map(|slot| slot.block_height)
     }
 
-    pub async fn get_block_height_latest(
-        &self,
-        commitment: CommitmentLevel,
-    ) -> Option<BlockHeight> {
-        let slots = self.slots.read().await;
+    pub fn get_block_height_latest(&self, commitment: CommitmentLevel) -> Option<BlockHeight> {
+        let slots = self
+            .slots
+            .read()
+            .expect("Failed to acquire read lock on slots");
         slots
             .values()
             .filter(|info| info.commitment == commitment)
@@ -99,32 +109,25 @@ impl BlockhashQueue {
 ///
 /// Interface to query block height information
 ///
-#[async_trait::async_trait]
 pub trait BlockHeighService {
     ///
     /// Get the block height for the given blockhash
     ///
-    async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight>;
+    fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight>;
+
     ///
     /// Get the latest block height for the given commitment level
     ///
-    async fn get_block_height_for_commitment(
-        &self,
-        commitment: CommitmentLevel,
-    ) -> Option<BlockHeight>;
+    fn get_block_height_for_commitment(&self, commitment: CommitmentLevel) -> Option<BlockHeight>;
 }
 
-#[async_trait::async_trait]
 impl BlockHeighService for BlockhashQueue {
-    async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
-        self.get_block_height(blockhash).await
+    fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
+        self.get_block_height(blockhash)
     }
 
-    async fn get_block_height_for_commitment(
-        &self,
-        commitment: CommitmentLevel,
-    ) -> Option<BlockHeight> {
-        self.get_block_height_latest(commitment).await
+    fn get_block_height_for_commitment(&self, commitment: CommitmentLevel) -> Option<BlockHeight> {
+        self.get_block_height_latest(commitment)
     }
 }
 
@@ -137,8 +140,10 @@ pub mod testkit {
             util::{BlockHeight, CommitmentLevel},
         },
         solana_sdk::hash::Hash,
-        std::{collections::HashMap, sync::Arc},
-        tokio::sync::RwLock,
+        std::{
+            collections::HashMap,
+            sync::{Arc, RwLock as StdRwLock},
+        },
     };
 
     #[derive(Default)]
@@ -149,12 +154,15 @@ pub mod testkit {
     impl MockBlockhashQueue {
         pub fn new() -> Self {
             Self {
-                slots: Arc::new(RwLock::new(HashMap::new())),
+                slots: Arc::new(StdRwLock::new(HashMap::new())),
             }
         }
 
-        pub async fn increase_block_height(&self, hash: Hash) {
-            let mut slots = self.slots.write().await;
+        pub fn increase_block_height(&self, hash: Hash) {
+            let mut slots = self
+                .slots
+                .write()
+                .expect("Failed to acquire write lock on slots");
             let last_block = slots.values().last();
 
             let new_last_block = if let Some(last_block) = last_block {
@@ -176,8 +184,11 @@ pub mod testkit {
             slots.insert(new_last_block.block_hash, new_last_block);
         }
 
-        pub async fn change_last_block_confirmation(&self) {
-            let mut slots = self.slots.write().await;
+        pub fn change_last_block_confirmation(&self) {
+            let mut slots = self
+                .slots
+                .write()
+                .expect("Failed to acquire write lock on slots");
             let last_block = slots.values_mut().last();
             if let Some(last_block) = last_block {
                 last_block.commitment = CommitmentLevel::Finalized;
@@ -185,18 +196,23 @@ pub mod testkit {
         }
     }
 
-    #[async_trait::async_trait]
     impl BlockHeighService for MockBlockhashQueue {
-        async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
-            let slots = self.slots.read().await;
+        fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
+            let slots = self
+                .slots
+                .read()
+                .expect("Failed to acquire read lock on slots");
             slots.get(blockhash).map(|slot| slot.block_height)
         }
 
-        async fn get_block_height_for_commitment(
+        fn get_block_height_for_commitment(
             &self,
             commitment: CommitmentLevel,
         ) -> Option<BlockHeight> {
-            let slots = self.slots.read().await;
+            let slots = self
+                .slots
+                .read()
+                .expect("Failed to acquire read lock on slots");
             slots
                 .values()
                 .filter(|info| info.commitment == commitment)

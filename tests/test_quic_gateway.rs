@@ -2,12 +2,16 @@ mod testkit;
 
 use {
     bytes::Bytes,
-    solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer},
+    solana_sdk::{
+        pubkey::Pubkey,
+        signature::{Keypair, Signature},
+        signer::Signer,
+    },
     std::{
         array,
         collections::HashMap,
         net::SocketAddr,
-        sync::{Arc, RwLock},
+        sync::{Arc, RwLock as StdRwLock},
     },
     testkit::{build_random_endpoint, generate_random_local_addr},
     tokio::sync::mpsc,
@@ -22,7 +26,7 @@ use {
 
 #[derive(Clone)]
 pub struct FakeLeaderTpuInfoService {
-    shared: Arc<RwLock<HashMap<Pubkey, SocketAddr>>>,
+    shared: Arc<StdRwLock<HashMap<Pubkey, SocketAddr>>>,
 }
 
 impl FakeLeaderTpuInfoService {
@@ -30,14 +34,13 @@ impl FakeLeaderTpuInfoService {
     where
         IT: IntoIterator<Item = (Pubkey, SocketAddr)>,
     {
-        let shared = Arc::new(RwLock::new(HashMap::from_iter(it)));
+        let shared = Arc::new(StdRwLock::new(HashMap::from_iter(it)));
         Self { shared }
     }
 }
 
-#[async_trait::async_trait]
 impl LeaderTpuInfoService for FakeLeaderTpuInfoService {
-    async fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+    fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
         let shared = self.shared.read().expect("read lock");
         shared.get(&leader_pubkey).cloned()
     }
@@ -63,7 +66,7 @@ async fn send_buffer_should_land_properly() {
 
     let TokioQuicGatewaySession {
         gateway_identity_updater: _,
-        transaction_sink,
+        gateway_tx_sink: transaction_sink,
         mut gateway_response_source,
         gateway_join_handle: _,
     } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
@@ -93,10 +96,11 @@ async fn send_buffer_should_land_properly() {
         client_tx.send((remote_key, combined)).await.expect("send");
     });
 
+    let tx_sig = Signature::new_unique();
     transaction_sink
         .send(GatewayTransaction {
-            tx_id: 1,
-            wire: Arc::from("helloworld".as_bytes()),
+            tx_sig,
+            wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
         })
         .await
@@ -111,7 +115,7 @@ async fn send_buffer_should_land_properly() {
         panic!("Expected GatewayResponse::TxSent, got something else");
     };
 
-    assert_eq!(actual_resp.tx_id, 1);
+    assert_eq!(actual_resp.tx_sig, tx_sig);
     assert_eq!(
         actual_resp.remote_peer_identity,
         rx_server_identity.pubkey()
@@ -142,7 +146,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
 
     let TokioQuicGatewaySession {
         gateway_identity_updater: _,
-        transaction_sink,
+        gateway_tx_sink: transaction_sink,
         mut gateway_response_source,
         gateway_join_handle: _,
     } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
@@ -173,12 +177,15 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
             client_tx.send((remote_key, combined)).await.expect("send");
         }
     });
-
-    for tx_id in 1..=MAX_TX {
+    let tx_sig_vec = (0..MAX_TX)
+        .into_iter()
+        .map(|_| Signature::new_unique())
+        .collect::<Vec<_>>();
+    for (i, tx_sig) in tx_sig_vec.iter().enumerate() {
         transaction_sink
             .send(GatewayTransaction {
-                tx_id,
-                wire: Arc::from(format!("helloworld{}", tx_id).as_bytes()),
+                tx_sig: tx_sig.clone(),
+                wire: Bytes::from(format!("helloworld{i}").as_bytes().to_vec()),
                 remote_peer: rx_server_identity.pubkey(),
             })
             .await
@@ -193,11 +200,11 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         else {
             panic!("Expected GatewayResponse::TxSent, got something else");
         };
-        assert_eq!(actual_resp.tx_id, i + 1);
+        assert_eq!(actual_resp.tx_sig, tx_sig_vec[i as usize]);
         let (_, buf) = client_rx.recv().await.expect("recv");
 
         let msg = String::from_utf8(buf).expect("utf8");
-        assert_eq!(msg, format!("helloworld{}", i + 1));
+        assert_eq!(msg, format!("helloworld{i}"));
         assert_eq!(
             actual_resp.remote_peer_identity,
             rx_server_identity.pubkey()
@@ -228,7 +235,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
 
     let TokioQuicGatewaySession {
         gateway_identity_updater: _,
-        transaction_sink,
+        gateway_tx_sink: transaction_sink,
         mut gateway_response_source,
         gateway_join_handle: _,
     } = gateway_spawner.spawn(gateway_kp.insecure_clone(), gateway_config);
@@ -238,10 +245,11 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         drop(connecting);
     });
 
+    let tx_sig = Signature::new_unique();
     transaction_sink
         .send(GatewayTransaction {
-            tx_id: 1,
-            wire: Arc::from("helloworld".as_bytes()),
+            tx_sig,
+            wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
         })
         .await
@@ -255,7 +263,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         panic!("Expected GatewayResponse::TxSent, got something {resp:?}");
     };
 
-    assert_eq!(actual_resp.tx_id, 1);
+    assert_eq!(actual_resp.tx_sig, tx_sig);
     assert!(matches!(
         actual_resp.drop_reason,
         TxDropReason::RemotePeerUnreachable
@@ -289,7 +297,7 @@ async fn it_should_update_gatway_identity() {
 
     let TokioQuicGatewaySession {
         mut gateway_identity_updater,
-        transaction_sink,
+        gateway_tx_sink: transaction_sink,
         gateway_response_source: _,
         gateway_join_handle: _,
     } = gateway_spawner.spawn(gateway_kp.insecure_clone(), gateway_config);
@@ -324,8 +332,8 @@ async fn it_should_update_gatway_identity() {
 
     transaction_sink
         .send(GatewayTransaction {
-            tx_id: 1,
-            wire: Arc::from("helloworld".as_bytes()),
+            tx_sig: Signature::new_unique(),
+            wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
         })
         .await
@@ -340,8 +348,8 @@ async fn it_should_update_gatway_identity() {
 
     transaction_sink
         .send(GatewayTransaction {
-            tx_id: 2,
-            wire: Arc::from("helloworld".as_bytes()),
+            tx_sig: Signature::new_unique(),
+            wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
         })
         .await

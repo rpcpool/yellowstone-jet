@@ -1,5 +1,15 @@
 use {
-    crate::{crypto_provider::crypto_provider, stake::StakeInfoMap},
+    crate::{
+        cluster_tpu_info::ClusterTpuInfo,
+        crypto_provider::crypto_provider,
+        identity::JetIdentitySyncMember,
+        metrics::{
+            self,
+            jet::{observe_leader_rtt, observe_send_transaction_e2e_latency, set_leader_mtu},
+        },
+        stake::StakeInfoMap,
+    },
+    bytes::Bytes,
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
@@ -12,7 +22,7 @@ use {
     solana_sdk::{
         pubkey::Pubkey,
         quic::{QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS, QUIC_SEND_FAIRNESS},
-        signature::Keypair,
+        signature::{Keypair, Signature},
         signer::Signer,
     },
     solana_streamer::{
@@ -27,7 +37,10 @@ use {
     },
     tokio::{
         runtime::Handle,
-        sync::mpsc::{self},
+        sync::{
+            Barrier,
+            mpsc::{self},
+        },
         task::{self, Id, JoinError, JoinHandle, JoinSet},
     },
 };
@@ -37,7 +50,7 @@ pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
 pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
 
 pub(crate) struct InflightMeta {
-    tx_id: u64,
+    tx_sig: Signature,
     prior_inflight_load: usize,
 }
 
@@ -100,11 +113,17 @@ struct UpdateGatewayIdentityCommand {
     callback: Arc<UpdateIdentityInner>,
 }
 
+struct MultiStepIdentitySynchronizationCommand {
+    new_identity: Keypair,
+    barrier: Arc<Barrier>,
+}
+
 ///
 /// Command to control gateway behavior.
 ///
 enum GatewayCommand {
     UpdateIdenttiy(UpdateGatewayIdentityCommand),
+    MultiStepIdentitySynchronization(MultiStepIdentitySynchronizationCommand),
 }
 
 enum TokioGateawyTaskMeta {
@@ -194,9 +213,16 @@ pub(crate) struct TokioQuicGatewayRuntime {
     tasklet_meta: HashMap<Id, TokioGateawyTaskMeta>,
 }
 
-#[async_trait::async_trait]
 pub trait LeaderTpuInfoService {
-    async fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
+    fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
+}
+
+impl LeaderTpuInfoService for ClusterTpuInfo {
+    fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+        self.get_cluster_nodes()
+            .get(&leader_pubkey)
+            .and_then(|node| node.tpu)
+    }
 }
 
 ///
@@ -204,9 +230,9 @@ pub trait LeaderTpuInfoService {
 ///
 pub struct GatewayTransaction {
     /// Id set by the sender to identify the transaction. Only meaningful to the sender.
-    pub tx_id: u64,
+    pub tx_sig: Signature,
     /// The wire format of the transaction.
-    pub wire: Arc<[u8]>,
+    pub wire: Bytes,
     /// The pubkey of the remote peer to send the transaction to.
     pub remote_peer: Pubkey,
 }
@@ -226,13 +252,13 @@ enum SendTxError {
 #[derive(Debug)]
 pub struct GatewayTxSent {
     pub remote_peer_identity: Pubkey,
-    pub tx_id: u64,
+    pub tx_sig: Signature,
 }
 
 #[derive(Debug)]
 pub struct GatewayTxFailed {
     pub remote_peer_identity: Pubkey,
-    pub tx_id: u64,
+    pub tx_sig: Signature,
 }
 
 #[derive(Clone, Debug, Display)]
@@ -248,7 +274,7 @@ pub enum TxDropReason {
 #[derive(Debug)]
 pub struct TxDrop {
     pub remote_peer_identity: Pubkey,
-    pub tx_id: u64,
+    pub tx_sig: Signature,
     pub drop_reason: TxDropReason,
 }
 
@@ -261,7 +287,7 @@ pub enum GatewayResponse {
 
 ///
 /// A task to connect to a remote peer.
-/// 
+///
 struct ConnectingTask {
     service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     remote_peer_identity: Pubkey,
@@ -275,7 +301,6 @@ impl ConnectingTask {
         let remote_peer_addr = self
             .service
             .get_tpu_socket_addr(self.remote_peer_identity)
-            .await
             .ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
 
         let client_socket =
@@ -365,8 +390,9 @@ impl QuicTxSenderWorker {
             "inflight_send limit reached"
         );
         let remote_peer_identity = tx.remote_peer;
-        let tx_id = tx.tx_id;
+        let tx_sig = tx.tx_sig;
         let conn = Arc::clone(&self.connection);
+        metrics::jet::incr_send_tx_attempt(remote_peer_identity);
         let fut = async move {
             let t = Instant::now();
             let mut uni = conn.open_uni().await?;
@@ -391,11 +417,11 @@ impl QuicTxSenderWorker {
         let abort_handle = self.inflight_send.spawn(fut);
         tracing::debug!(
             "Sent tx: {:?} to remote peer: {:?}",
-            tx.tx_id,
+            tx.tx_sig,
             remote_peer_identity,
         );
         let meta = InflightMeta {
-            tx_id,
+            tx_sig,
             prior_inflight_load: total_inflight_before,
         };
         self.inflight_send_meta.insert(abort_handle.id(), meta);
@@ -408,7 +434,7 @@ impl QuicTxSenderWorker {
         match result {
             Ok((task_id, result)) => {
                 let InflightMeta {
-                    tx_id,
+                    tx_sig,
                     prior_inflight_load,
                 } = self.inflight_send_meta.remove(&task_id).unwrap();
                 match result {
@@ -420,15 +446,21 @@ impl QuicTxSenderWorker {
                         );
                         let resp = GatewayTxSent {
                             remote_peer_identity: self.remote_peer,
-                            tx_id,
+                            tx_sig,
                         };
                         let _ = self.output_tx.send(GatewayResponse::TxSent(resp));
+                        metrics::jet::sts_tpu_send_inc(self.remote_peer);
+                        observe_send_transaction_e2e_latency(self.remote_peer, sent_ok.e2e_time);
+                        let path_stats = self.connection.stats().path;
+                        let current_mut = path_stats.current_mtu;
+                        set_leader_mtu(self.remote_peer, current_mut);
+                        observe_leader_rtt(self.remote_peer, path_stats.rtt);
                         Ok(())
                     }
                     Err(send_err) => {
                         let resp = GatewayTxFailed {
                             remote_peer_identity: self.remote_peer,
-                            tx_id,
+                            tx_sig,
                         };
                         let _ = self.output_tx.send(GatewayResponse::TxFailed(resp));
                         match send_err {
@@ -459,7 +491,7 @@ impl QuicTxSenderWorker {
                             SendTxError::StreamStopped(_) | SendTxError::StreamClosed => {
                                 tracing::trace!(
                                     "Stream stopped or closed for tx: {:?} to remote peer: {:?}",
-                                    tx_id,
+                                    tx_sig,
                                     self.remote_peer
                                 );
                                 Ok(())
@@ -468,7 +500,7 @@ impl QuicTxSenderWorker {
                                 tracing::warn!(
                                     "0-RTT rejected by remote peer: {:?} for tx: {:?}",
                                     self.remote_peer,
-                                    tx_id
+                                    tx_sig
                                 );
                                 Err(TxSenderWorkerError::ZeroRttRejected)
                             }
@@ -482,19 +514,19 @@ impl QuicTxSenderWorker {
                     .remove(&join_err.id())
                     .expect("inflight_meta");
                 let InflightMeta {
-                    tx_id,
+                    tx_sig,
                     prior_inflight_load: _,
                 } = inflight_meta;
                 tracing::error!(
                     "Join error during sending tx to {:?}: {:?} for tx_id: {}",
                     self.remote_peer,
                     join_err,
-                    tx_id
+                    tx_sig
                 );
 
                 let resp = GatewayTxFailed {
                     remote_peer_identity: self.remote_peer,
-                    tx_id,
+                    tx_sig,
                 };
                 let _ = self.output_tx.send(GatewayResponse::TxFailed(resp));
 
@@ -599,7 +631,7 @@ impl TokioQuicGatewayRuntime {
             .flatten()
             .map(|tx| TxDrop {
                 remote_peer_identity,
-                tx_id: tx.tx_id,
+                tx_sig: tx.tx_sig,
                 drop_reason: reason.clone(),
             })
             .try_for_each(|txdrop| self.response_outlet.send(GatewayResponse::TxDrop(txdrop)));
@@ -716,7 +748,7 @@ impl TokioQuicGatewayRuntime {
     ///
     fn accept_tx(&mut self, tx: GatewayTransaction) {
         let remote_peer_identity = tx.remote_peer;
-        let tx_id = tx.tx_id;
+        let tx_id = tx.tx_sig;
         if let Some(sender) = self.tx_worker_sender_map.get(&remote_peer_identity) {
             // If we have an active transaction sender worker for the remote peer,
             match sender.try_send(tx) {
@@ -736,7 +768,7 @@ impl TokioQuicGatewayRuntime {
                         );
                         let txdrop = TxDrop {
                             remote_peer_identity,
-                            tx_id: tx.tx_id,
+                            tx_sig: tx.tx_sig,
                             drop_reason: TxDropReason::RateLimited,
                         };
                         let _ = self.response_outlet.send(GatewayResponse::TxDrop(txdrop));
@@ -885,6 +917,7 @@ impl TokioQuicGatewayRuntime {
 
         self.client_certificate = cert;
         self.identity = new_identity;
+        metrics::jet::quic_set_identity(self.identity.pubkey());
         connecting_meta.values().for_each(|meta| {
             self.spawn_connecting(meta.remote_peer_identity, meta.connection_attempt);
         });
@@ -903,10 +936,54 @@ impl TokioQuicGatewayRuntime {
         tracing::trace!("Updated gateway identity to: {}", self.identity.pubkey());
     }
 
-    fn handle_cnc(&mut self, command: GatewayCommand) {
+    async fn update_identity_sync(&mut self, command: MultiStepIdentitySynchronizationCommand) {
+        let MultiStepIdentitySynchronizationCommand {
+            new_identity,
+            barrier,
+        } = command;
+
+        self.schedule_graceful_drop_all_worker();
+        self.connecting_tasks.abort_all();
+        self.connecting_tasks.detach_all();
+        self.connecting_remote_peers.clear();
+        let connecting_meta = std::mem::take(&mut self.connecting_meta);
+
+        // Update identity
+        let (certificate, privkey) = new_dummy_x509_certificate(&new_identity);
+        let cert = Arc::new(QuicClientCertificate {
+            certificate,
+            key: privkey,
+        });
+
+        self.client_certificate = cert;
+        self.identity = new_identity;
+        metrics::jet::quic_set_identity(self.identity.pubkey());
+        // Wait for the barrier to be released
+        barrier.wait().await;
+        connecting_meta.values().for_each(|meta| {
+            self.spawn_connecting(meta.remote_peer_identity, meta.connection_attempt);
+        });
+
+        if !connecting_meta.is_empty() {
+            tracing::trace!(
+                "Will auto-reconnect to {} remote peers after identity update",
+                connecting_meta.len()
+            );
+        }
+
+        tracing::trace!("Updated gateway identity to: {}", self.identity.pubkey());
+    }
+
+    async fn handle_cnc(&mut self, command: GatewayCommand) {
         match command {
             GatewayCommand::UpdateIdenttiy(update_gateway_identity_command) => {
                 self.update_identity(update_gateway_identity_command);
+            }
+            GatewayCommand::MultiStepIdentitySynchronization(
+                multi_step_identity_synchronization_command,
+            ) => {
+                self.update_identity_sync(multi_step_identity_synchronization_command)
+                    .await;
             }
         }
     }
@@ -928,6 +1005,7 @@ impl TokioQuicGatewayRuntime {
     }
 
     pub async fn run(mut self) {
+        metrics::jet::quic_set_identity(self.identity.pubkey());
         loop {
             tokio::select! {
                 maybe = self.tx_inlet.recv() => {
@@ -943,7 +1021,7 @@ impl TokioQuicGatewayRuntime {
                 }
                 // If cnc_rx returns None, we don't care as clients can safely drop cnc sender and the runtime should keep function.
                 Some(command) = self.cnc_rx.recv() => {
-                    self.handle_cnc(command);
+                    self.handle_cnc(command).await;
                 }
 
                 Some(result) = self.tx_worker_set.join_next_with_id() => {
@@ -977,7 +1055,7 @@ pub struct TokioQuicGatewaySession {
     /// Sink to send transaction to.
     /// If all reference to the sink are dropped, the underlying gateway runtime will stop too.
     ///
-    pub transaction_sink: mpsc::Sender<GatewayTransaction>,
+    pub gateway_tx_sink: mpsc::Sender<GatewayTransaction>,
 
     ///
     /// Source emitting gateway response.
@@ -1049,7 +1127,7 @@ impl TokioQuicGatewaySpawner {
         let jh = gateway_rt.spawn(gateway_runtime.run());
 
         TokioQuicGatewaySession {
-            transaction_sink: tx_inlet,
+            gateway_tx_sink: tx_inlet,
             gateway_identity_updater: GatewayIdentityUpdater {
                 cnc_tx: gateway_cnc_tx,
             },
@@ -1091,6 +1169,24 @@ impl GatewayIdentityUpdater {
             _this: self,
         };
         update_identity.await
+    }
+}
+
+#[async_trait::async_trait]
+impl JetIdentitySyncMember for GatewayIdentityUpdater {
+    async fn pause_for_identity_update(
+        &self,
+        new_identity: Keypair,
+        barrier: Arc<tokio::sync::Barrier>,
+    ) {
+        let cmd = MultiStepIdentitySynchronizationCommand {
+            new_identity,
+            barrier,
+        };
+        self.cnc_tx
+            .send(GatewayCommand::MultiStepIdentitySynchronization(cmd))
+            .await
+            .expect("disconnected");
     }
 }
 
@@ -1159,7 +1255,10 @@ mod test {
             let GatewayCommand::UpdateIdenttiy(UpdateGatewayIdentityCommand {
                 new_identity,
                 callback,
-            }) = cnc_rx.recv().await.unwrap();
+            }) = cnc_rx.recv().await.unwrap()
+            else {
+                panic!("Expected UpdateIdenttiy command");
+            };
             tokio::time::sleep(Duration::from_secs(2)).await;
             callback
                 .set
