@@ -1,15 +1,14 @@
 use {
-    crate::{solana::sanitize_transaction_support_check, transaction_handler::TransactionHandler},
+    crate::transaction_handler::TransactionHandler,
     anyhow::Context as _,
     futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
     hyper::{Request, Response, StatusCode},
     jsonrpsee::{
         core::http_helpers::Body,
-        server::{ServerBuilder, ServerHandle, middleware::rpc},
+        server::{ServerBuilder, ServerHandle},
         types::error::{ErrorObject, ErrorObjectOwned, INVALID_PARAMS_CODE},
     },
     rpc_admin::JetIdentityUpdater,
-    solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient,
     solana_sdk::pubkey::Pubkey,
     std::{
         error::Error,
@@ -117,7 +116,7 @@ impl RpcServer {
         })
     }
 
-    pub fn create_solana_like_rpc_server_impl(
+    pub const fn create_solana_like_rpc_server_impl(
         tx_handler: TransactionHandler,
     ) -> rpc_solana_like::RpcServerImpl {
         rpc_solana_like::RpcServerImpl { tx_handler }

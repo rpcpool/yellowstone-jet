@@ -76,7 +76,7 @@ async fn it_should_fanout_three_times() {
     const FANOUT_FACTOR: usize = 3;
     let (sink, source) = mpsc::unbounded_channel();
     let (gateway_tx, mut gateway_rx) = mpsc::channel(100);
-    let (gateway_response_tx, gateway_response_rx) = mpsc::unbounded_channel();
+    let (_gateway_response_tx, gateway_response_rx) = mpsc::unbounded_channel();
     let gateway_bidi = QuicGatewayBidi {
         sink: gateway_tx,
         source: gateway_response_rx,
@@ -98,7 +98,7 @@ async fn it_should_fanout_three_times() {
         gateway_bidi,
         FANOUT_FACTOR,
     );
-    let fanout_jh = tokio::spawn(async move {
+    let _fanout_jh = tokio::spawn(async move {
         fanout.run().await;
     });
 
@@ -107,10 +107,10 @@ async fn it_should_fanout_three_times() {
     sink.send(Arc::clone(&tx)).unwrap();
 
     let mut actual_tx_sent = vec![];
-    for i in 0..FANOUT_FACTOR {
+    for pubkey in my_schedule.iter().take(FANOUT_FACTOR) {
         let actual_tx = gateway_rx.recv().await.unwrap();
         assert_eq!(actual_tx.tx_sig, actual_tx.tx_sig);
-        assert_eq!(actual_tx.remote_peer, my_schedule[i]);
+        assert_eq!(actual_tx.remote_peer, *pubkey);
         actual_tx_sent.push(actual_tx);
     }
     assert_eq!(actual_tx_sent.len(), FANOUT_FACTOR);
@@ -121,7 +121,7 @@ async fn it_should_apply_shield_policies() {
     const FANOUT_FACTOR: usize = 3;
     let (sink, source) = mpsc::unbounded_channel();
     let (gateway_tx, mut gateway_rx) = mpsc::channel(100);
-    let (gateway_response_tx, gateway_response_rx) = mpsc::unbounded_channel();
+    let (_gateway_response_tx, gateway_response_rx) = mpsc::unbounded_channel();
     let gateway_bidi = QuicGatewayBidi {
         sink: gateway_tx,
         source: gateway_response_rx,
@@ -142,11 +142,7 @@ async fn it_should_apply_shield_policies() {
 
     impl TransactionPolicyStore for MyPolicy {
         fn is_allowed(&self, _policies: &[Pubkey], leader: &Pubkey) -> Result<bool, CheckError> {
-            if self.blacklist.contains(leader) {
-                return Ok(false);
-            } else {
-                Ok(true)
-            }
+            Ok(!self.blacklist.contains(leader))
         }
     }
     let policy = MyPolicy {
@@ -160,7 +156,7 @@ async fn it_should_apply_shield_policies() {
         gateway_bidi,
         FANOUT_FACTOR,
     );
-    let fanout_jh = tokio::spawn(async move {
+    let _fanout_jh = tokio::spawn(async move {
         fanout.run().await;
     });
 

@@ -206,7 +206,7 @@ async fn keep_stake_metrics_up_to_date_task(
     stake_info_map: StakeInfoMap,
 ) {
     loop {
-        let current_identy = stake_info_identity_observer.borrow_and_update().clone();
+        let current_identy = *stake_info_identity_observer.borrow_and_update();
 
         let (stake, total_stake) = stake_info_map
             .get_stake_info_with_total_stake(current_identy)
@@ -373,9 +373,11 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                     .send_transaction_service
                     .default_max_retries
                     .unwrap_or(config.send_transaction_service.service_max_retries),
+                ..Default::default()
             },
             Arc::new(blockhash_queue.clone()),
             Box::new(rooted_transactions_rx),
+            None,
         );
         (sink, source)
     } else {
@@ -560,7 +562,7 @@ async fn spawn_push_prometheus_metrics(
         loop {
             tokio::select! {
             _ = interval.tick() => {
-                let current_identity = jet_identity.borrow_and_update().clone();
+                let current_identity = *jet_identity.borrow_and_update();
 
                 if let Err(error) = client
                     .post(prometheus_url.clone())

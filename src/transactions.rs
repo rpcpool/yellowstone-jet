@@ -1,7 +1,7 @@
 use {
     crate::{
         blockhash_queue::BlockHeighService,
-        cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
+        cluster_tpu_info::ClusterTpuInfo,
         grpc_geyser::{GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived},
         metrics::jet as metrics,
         quic_gateway::{GatewayResponse, GatewayTransaction},
@@ -252,6 +252,15 @@ pub struct TransactionRetrySchedulerRuntime {
     retry_rate: tokio::time::Duration,
     stop_send_on_commitment: CommitmentLevel,
     max_retry: usize,
+    max_processing_age: u64,
+    dlq: Option<mpsc::UnboundedSender<TransactionRetrySchedulerDlqEvent>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionRetrySchedulerDlqEvent {
+    ReachedMaxProcessingAge(Signature),
+    ReachedMaxRetries(Signature),
+    AlreadyLanded(Signature),
 }
 
 impl TransactionRetrySchedulerRuntime {
@@ -266,7 +275,7 @@ impl TransactionRetrySchedulerRuntime {
                 }
                 source = self.transaction_source.recv() => {
                     match source {
-                        Some(newtx) => self.add_new_transaction(newtx).await,
+                        Some(newtx) => self.add_new_transaction(newtx, Instant::now()),
                         None => {
                             break;
                         }
@@ -287,7 +296,7 @@ impl TransactionRetrySchedulerRuntime {
     }
 
     fn resend_non_landed_tx(&mut self, now: Instant) {
-        while let Some(inserted_at) = self.insertion_order.front().map(|(t, _)| t.clone()) {
+        while let Some(inserted_at) = self.insertion_order.front().map(|(t, _)| *t) {
             if now.duration_since(inserted_at) < self.retry_rate {
                 break;
             }
@@ -295,10 +304,19 @@ impl TransactionRetrySchedulerRuntime {
             if let Some(rtx) = self.tx_pool.get_mut(&signature) {
                 if rtx.leftover_attempt > 0 {
                     rtx.leftover_attempt = rtx.leftover_attempt.saturating_sub(1);
+                    tracing::trace!(
+                        "resending tx {signature}, attempts left: {}",
+                        rtx.leftover_attempt
+                    );
                     let _ = self.response_sink.send(Arc::clone(&rtx.tx));
                     self.insertion_order.push_back((now, signature));
                 } else {
                     self.tx_pool.remove(&signature);
+                    if let Some(dlq) = &self.dlq {
+                        let _ = dlq.send(TransactionRetrySchedulerDlqEvent::ReachedMaxRetries(
+                            signature,
+                        ));
+                    }
                     tracing::trace!("tx {signature} reached max attempts, dropping it");
                 }
             }
@@ -308,29 +326,43 @@ impl TransactionRetrySchedulerRuntime {
     fn gc_deadline_map(&mut self) {
         let outdated_block_height = self
             .last_known_block_height
-            .saturating_sub(MAX_PROCESSING_AGE as u64);
+            .saturating_sub(self.max_processing_age);
         let right = self
             .block_height_deadline_map
             .split_off(&outdated_block_height);
 
         let deprecrated_tx = std::mem::replace(&mut self.block_height_deadline_map, right);
-
+        let deprecated_cnt = deprecrated_tx.values().map(|v| v.len()).sum::<usize>();
+        if deprecated_cnt > 0 {
+            tracing::debug!(
+                "cleaning up {} outdated transactions from the deadline map",
+                deprecated_cnt
+            );
+        }
         deprecrated_tx
             .into_iter()
             .flat_map(|(_, signatures)| signatures)
             .for_each(|signature| {
                 self.tx_pool.remove(&signature);
                 self.rooted_transactions.unsubscribe_signature(signature);
+                if let Some(dlq) = &self.dlq {
+                    let _ = dlq.send(TransactionRetrySchedulerDlqEvent::ReachedMaxProcessingAge(
+                        signature,
+                    ));
+                }
             });
     }
 
     fn handle_tx_commitment_update(&mut self, signature: Signature, commitment: CommitmentLevel) {
         if commitment == self.stop_send_on_commitment {
+            tracing::trace!(
+                "transaction {signature} landed on commitment {commitment:?}, removing from the pool"
+            );
             self.tx_pool.remove(&signature);
         }
     }
 
-    async fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>) {
+    fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>, now: Instant) {
         let max_retries = tx.max_retries.unwrap_or(0).min(self.max_retry);
 
         let current_block_height = self
@@ -341,11 +373,20 @@ impl TransactionRetrySchedulerRuntime {
         let last_valid_block_height = self
             .block_height_service
             .get_block_height(tx.transaction.message.recent_blockhash())
-            .map(|block_height| block_height + MAX_PROCESSING_AGE as u64)
-            .unwrap_or(current_block_height + MAX_PROCESSING_AGE as u64);
+            .map(|block_height| block_height + self.max_processing_age)
+            .unwrap_or(current_block_height + self.max_processing_age);
 
         let signature = tx.signature;
+        tracing::trace!(
+            "received new transaction {signature}, max_retries: {max_retries}, last_valid_block_height: {last_valid_block_height}, current_block_height: {current_block_height}"
+        );
+
         if last_valid_block_height < current_block_height {
+            if let Some(dlq) = &self.dlq {
+                let _ = dlq.send(TransactionRetrySchedulerDlqEvent::ReachedMaxProcessingAge(
+                    signature,
+                ));
+            }
             tracing::warn!(
                 %signature,
                 last_valid_block_height,
@@ -363,6 +404,9 @@ impl TransactionRetrySchedulerRuntime {
 
         if is_landed {
             tracing::debug!("skipping {signature}, transaction already landed");
+            if let Some(dlq) = &self.dlq {
+                let _ = dlq.send(TransactionRetrySchedulerDlqEvent::AlreadyLanded(signature));
+            }
             return;
         }
 
@@ -377,11 +421,16 @@ impl TransactionRetrySchedulerRuntime {
                 leftover_attempt,
             },
         );
+        tracing::trace!(
+            "added transaction {signature} to the pool, attempts left: {}",
+            leftover_attempt
+        );
         self.block_height_deadline_map
             .entry(last_valid_block_height)
             .or_default()
             .push(signature);
         let _ = self.response_sink.send(tx);
+        self.insertion_order.push_back((now, signature));
     }
 }
 
@@ -394,6 +443,8 @@ pub struct TransactionRetrySchedulerConfig {
     pub retry_rate: tokio::time::Duration,
     pub stop_send_on_commitment: CommitmentLevel,
     pub max_retry: usize,
+    /// The maximum age of a transaction in blocks a transaction can stay in the scheduler pool.
+    pub transaction_max_processing_age: u64,
 }
 
 impl Default for TransactionRetrySchedulerConfig {
@@ -402,6 +453,7 @@ impl Default for TransactionRetrySchedulerConfig {
             retry_rate: tokio::time::Duration::from_secs(1),
             stop_send_on_commitment: CommitmentLevel::Confirmed,
             max_retry: 3,
+            transaction_max_processing_age: MAX_PROCESSING_AGE as u64,
         }
     }
 }
@@ -449,10 +501,8 @@ impl TransactionNoRetryScheduler {
                 .unwrap_or(0)
                 + MAX_PROCESSING_AGE as u64;
 
-            if last_valid_block_height < current_block_height {
-                if response_sink.send(tx).is_err() {
-                    break;
-                }
+            if last_valid_block_height < current_block_height && response_sink.send(tx).is_err() {
+                break;
             }
         }
     }
@@ -463,11 +513,13 @@ impl TransactionRetryScheduler {
         config: TransactionRetrySchedulerConfig,
         block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
         rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
+        dlq: Option<mpsc::UnboundedSender<TransactionRetrySchedulerDlqEvent>>,
     ) -> Self {
         Self::new_on(
             config,
             block_height_service,
             rooted_transactions,
+            dlq,
             tokio::runtime::Handle::current(),
         )
     }
@@ -476,6 +528,7 @@ impl TransactionRetryScheduler {
         config: TransactionRetrySchedulerConfig,
         block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
         rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
+        dlq: Option<mpsc::UnboundedSender<TransactionRetrySchedulerDlqEvent>>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -493,6 +546,8 @@ impl TransactionRetryScheduler {
             stop_send_on_commitment: config.stop_send_on_commitment,
             max_retry: config.max_retry,
             response_sink: scheduler_resp_tx,
+            max_processing_age: config.transaction_max_processing_age,
+            dlq,
         };
         // Automatically close the runtime when all reference to `tx` are dropped.
         runtime.spawn(async move {
@@ -719,6 +774,10 @@ impl TransactionFanout {
         let ah = self.transaction_send_set.spawn(send_fut);
         self.transaction_send_set_meta.insert(ah.id(), signature);
     }
+}
+
+pub const fn module_path_for_test() -> &'static str {
+    module_path!()
 }
 
 pub mod testkit {

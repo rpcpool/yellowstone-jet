@@ -178,13 +178,12 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         }
     });
     let tx_sig_vec = (0..MAX_TX)
-        .into_iter()
         .map(|_| Signature::new_unique())
         .collect::<Vec<_>>();
     for (i, tx_sig) in tx_sig_vec.iter().enumerate() {
         transaction_sink
             .send(GatewayTransaction {
-                tx_sig: tx_sig.clone(),
+                tx_sig: *tx_sig,
                 wire: Bytes::from(format!("helloworld{i}").as_bytes().to_vec()),
                 remote_peer: rx_server_identity.pubkey(),
             })
