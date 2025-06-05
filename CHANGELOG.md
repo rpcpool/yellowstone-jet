@@ -16,6 +16,13 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [13.0.0]
+
+- Removed `ConnectionCache` to use `QuicGateway` that maximise each QUIC connection streaming capability instead of opening new connections.
+- Remove retry logic when `relay_mode` is set to `true`.
+- Removed `quic.rs` and `quic_solana` modules.
+- Refactored `transactions.rs` with simpler retry logic and sending logic.
+
 ## [12.0.1]
 
 - Updated to Cargo edition 2024 and 1.85 toolchain.
