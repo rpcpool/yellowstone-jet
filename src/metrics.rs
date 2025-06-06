@@ -118,6 +118,7 @@ pub mod jet {
             Opts::new("sts_tpu_send_total", "Number of transactions sent to TPU"),
             &["leaders"]
         ).unwrap();
+        // TODO we should rename this in another version of jet.
         static ref STS_TPU_DENIED_TOTAL: IntCounter = IntCounter::new("sts_tpu_denied_total", "Total number of denied TPUs by Shield policy").unwrap();
 
         static ref QUIC_IDENTITY: IntGaugeVec = IntGaugeVec::new(Opts::new("quic_identity", "Current QUIC identity"), &["identity"]).unwrap();

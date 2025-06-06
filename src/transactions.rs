@@ -351,11 +351,15 @@ impl TransactionRetrySchedulerRuntime {
             tracing::trace!(
                 "transaction {signature} landed on commitment {commitment:?}, removing from the pool"
             );
-            self.tx_pool.remove(&signature);
+            if self.tx_pool.remove(&signature).is_some() {
+                metrics::sts_landed_inc();
+            }
         }
     }
 
     fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>, now: Instant) {
+        // Make sure to not double count this metric elsewhere.
+        metrics::sts_received_inc();
         let max_retries = tx.max_retries.unwrap_or(0).min(self.max_retry);
 
         let current_block_height = self
@@ -397,6 +401,7 @@ impl TransactionRetrySchedulerRuntime {
 
         if is_landed {
             tracing::debug!("skipping {signature}, transaction already landed");
+            metrics::sts_landed_inc();
             if let Some(dlq) = &self.dlq {
                 let _ = dlq.send(TransactionRetrySchedulerDlqEvent::AlreadyLanded(signature));
             }
@@ -485,6 +490,8 @@ impl TransactionNoRetryScheduler {
                 tracing::trace!("incoming transaction channel is closed");
                 break;
             };
+            // Make sure to not double count this metric elsewhere.
+            metrics::sts_received_inc();
             let current_block_height = blockheight_service
                 .get_block_height_for_commitment(CommitmentLevel::Confirmed)
                 .unwrap_or(0);
@@ -508,7 +515,7 @@ impl TransactionNoRetryScheduler {
                 break;
             }
 
-            tracing::trace!("forwarding transaction {signature:.10}");
+            tracing::trace!("forwarding transaction {signature}");
         }
     }
 }
@@ -706,21 +713,22 @@ impl TransactionFanout {
                 // SO REMOVE MAY RETURN FALSE.
                 self.inflight_transactions.remove(&tx_sig);
                 tracing::trace!(
-                    "transaction {tx_sig:.10} forwarded to {} validator",
+                    "transaction {tx_sig} forwarded to {} validator",
                     gateway_tx_sent.remote_peer_identity
                 );
             }
             GatewayResponse::TxFailed(gateway_tx_failed) => {
                 let tx_sig = gateway_tx_failed.tx_sig;
-                tracing::trace!("transaction {tx_sig:.10} failed");
+                tracing::trace!("transaction {tx_sig} failed");
                 self.inflight_transactions.remove(&tx_sig);
             }
             GatewayResponse::TxDrop(tx_drop) => {
                 let tx_sig = tx_drop.tx_sig;
-                tracing::trace!("transaction {tx_sig:.10} dropped by QUIC gateway");
+                tracing::trace!("transaction {tx_sig} dropped by QUIC gateway");
                 self.inflight_transactions.remove(&tx_sig);
             }
         }
+        metrics::sts_inflight_set_size(self.inflight_transactions.len());
     }
 
     fn handle_transaction_sent_result(
@@ -765,6 +773,8 @@ impl TransactionFanout {
 
             for dest in next_leaders {
                 if !policy_store_service.is_allowed(&tx.policies, &dest)? {
+                    metrics::sts_tpu_denied_inc_by(1);
+                    tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
                     continue;
                 }
                 let gateway_tx = GatewayTransaction {
