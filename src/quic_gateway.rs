@@ -29,6 +29,7 @@
 use {
     crate::{
         cluster_tpu_info::ClusterTpuInfo,
+        config::ConfigQuicTpuPort,
         crypto_provider::crypto_provider,
         identity::JetIdentitySyncMember,
         metrics::{
@@ -95,7 +96,9 @@ pub(crate) enum ConnectingError {
 
 pub struct QuicGatewayConfig {
     pub port_range: PortRange,
+
     pub max_idle_timeout: Duration,
+
     // TODO check if we really need keep alive interval.
     // we could use `max_idle_timeout` to detect dead connections and naturally stopped tx sender workers.
     // pub keep_alive_interval: Option<Duration>,
@@ -113,6 +116,8 @@ pub struct QuicGatewayConfig {
     /// Timeout for establishing a connection to a remote peer.
     ///
     pub connecting_timeout: Duration,
+
+    pub tpu_port_kind: ConfigQuicTpuPort,
 }
 
 impl Default for QuicGatewayConfig {
@@ -124,6 +129,7 @@ impl Default for QuicGatewayConfig {
             max_connection_attempts: DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT,
             transaction_sender_worker_channel_capacity: DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE,
             connecting_timeout: DEFAULT_CONNECTION_TIMEOUT,
+            tpu_port_kind: ConfigQuicTpuPort::default(),
         }
     }
 }
@@ -249,14 +255,20 @@ pub(crate) struct TokioQuicGatewayRuntime {
 }
 
 pub trait LeaderTpuInfoService {
-    fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
+    fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
+    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
 }
 
 impl LeaderTpuInfoService for ClusterTpuInfo {
-    fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+    fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
         self.get_cluster_nodes()
             .get(&leader_pubkey)
             .and_then(|node| node.tpu_quic)
+    }
+    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+        self.get_cluster_nodes()
+            .get(&leader_pubkey)
+            .and_then(|node| node.tpu_forwards_quic)
     }
 }
 
@@ -331,14 +343,20 @@ struct ConnectingTask {
     cert: Arc<QuicClientCertificate>,
     max_idle_timeout: Duration,
     connection_timeout: Duration,
+    tpu_port_kind: ConfigQuicTpuPort,
 }
 
 impl ConnectingTask {
     async fn run(self) -> Result<Connection, ConnectingError> {
-        let remote_peer_addr = self
-            .service
-            .get_tpu_socket_addr(self.remote_peer_identity)
-            .ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
+        let remote_peer_addr = match self.tpu_port_kind {
+            ConfigQuicTpuPort::Normal => self
+                .service
+                .get_quic_tpu_socket_addr(self.remote_peer_identity),
+            ConfigQuicTpuPort::Forwards => self
+                .service
+                .get_quic_tpu_fwd_socket_addr(self.remote_peer_identity),
+        };
+        let remote_peer_addr = remote_peer_addr.ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
 
         let client_socket =
             solana_net_utils::bind_in_range(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.port_range)
@@ -684,6 +702,7 @@ impl TokioQuicGatewayRuntime {
             cert,
             max_idle_timeout,
             connection_timeout: self.config.connecting_timeout,
+            tpu_port_kind: self.config.tpu_port_kind,
         }
         .run();
         let meta = ConnectingMeta {
