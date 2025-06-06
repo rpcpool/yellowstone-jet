@@ -50,7 +50,10 @@ use {
     solana_quic_client::nonblocking::quic_client::{QuicClientCertificate, SkipServerVerification},
     solana_sdk::{
         pubkey::Pubkey,
-        quic::{QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS, QUIC_SEND_FAIRNESS},
+        quic::{
+            QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT, QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
+            QUIC_SEND_FAIRNESS,
+        },
         signature::{Keypair, Signature},
         signer::Signer,
     },
@@ -58,7 +61,7 @@ use {
         nonblocking::quic::ALPN_TPU_PROTOCOL_ID, tls_certificates::new_dummy_x509_certificate,
     },
     std::{
-        collections::{HashMap, VecDeque},
+        collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::{Arc, atomic::AtomicBool},
         task::Poll,
@@ -67,7 +70,7 @@ use {
     tokio::{
         runtime::Handle,
         sync::{
-            Barrier,
+            Barrier, Notify,
             mpsc::{self},
         },
         task::{self, Id, JoinError, JoinHandle, JoinSet},
@@ -78,6 +81,9 @@ pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DEFAULT_QUIC_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
 pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
+pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+
+const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
 
 pub(crate) struct InflightMeta {
     tx_sig: Signature,
@@ -86,6 +92,8 @@ pub(crate) struct InflightMeta {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ConnectingError {
+    #[error("No port available in the port range")]
+    NoPortAvailable,
     #[error(transparent)]
     ConnectError(#[from] quinn::ConnectError),
     #[error(transparent)]
@@ -118,17 +126,19 @@ pub struct QuicGatewayConfig {
     pub connecting_timeout: Duration,
 
     pub tpu_port_kind: ConfigQuicTpuPort,
+
+    pub max_concurrent_connections: usize,
 }
 
 impl Default for QuicGatewayConfig {
     fn default() -> Self {
         Self {
             port_range: VALIDATOR_PORT_RANGE,
-            max_idle_timeout: DEFAULT_QUIC_MAX_IDLE_TIMEOUT,
-            // keep_alive_interval: None,
+            max_idle_timeout: QUIC_MAX_TIMEOUT,
             max_connection_attempts: DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT,
             transaction_sender_worker_channel_capacity: DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE,
             connecting_timeout: DEFAULT_CONNECTION_TIMEOUT,
+            max_concurrent_connections: DEFAULT_MAX_CONCURRENT_CONNECTIONS,
             tpu_port_kind: ConfigQuicTpuPort::default(),
         }
     }
@@ -171,6 +181,11 @@ enum TokioGateawyTaskMeta {
     DropAllWorkers,
 }
 
+struct TxWorkerSenderHandle {
+    sender: mpsc::Sender<GatewayTransaction>,
+    cancel_notify: Arc<Notify>,
+}
+
 ///
 /// Tokio-based runtime to driver a QUIC gateway.
 pub(crate) struct TokioQuicGatewayRuntime {
@@ -182,12 +197,17 @@ pub(crate) struct TokioQuicGatewayRuntime {
     ///
     /// Holds on-going remote peer transaction sender workers.
     ///
-    tx_worker_sender_map: HashMap<Pubkey, mpsc::Sender<GatewayTransaction>>,
+    tx_worker_handle_map: HashMap<Pubkey, TxWorkerSenderHandle>,
+
+    ///
+    /// Maps active remote peer connection to their stake.
+    ///
+    active_staked_sorted_remote_peer: StakeSortedPeerSet,
 
     ///
     /// Map from tokio task id to the remote peer it refers too.
     ///
-    tx_worker_meta: HashMap<Id, Pubkey>,
+    tx_worker_task_meta_map: HashMap<Id, Pubkey>,
 
     ///
     /// JoinSet of all transaction sender workers.
@@ -252,6 +272,18 @@ pub(crate) struct TokioQuicGatewayRuntime {
 
     tasklet: JoinSet<()>,
     tasklet_meta: HashMap<Id, TokioGateawyTaskMeta>,
+
+    last_peer_activity: HashMap<Pubkey, Instant>,
+
+    ///
+    /// Sets of ongoing eviction of peers.
+    ///
+    being_evicted_peers: HashSet<Pubkey>,
+
+    ///
+    /// Eviction strategy to uses.
+    ///
+    eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
 }
 
 pub trait LeaderTpuInfoService {
@@ -317,6 +349,8 @@ pub enum TxDropReason {
     RemotePeerUnreachable,
     #[display("tx got drop by gateway")]
     DropByGateway,
+    #[display("remote peer is being evicted")]
+    RemotePeerBeingEvicted,
 }
 
 #[derive(Debug)]
@@ -358,10 +392,9 @@ impl ConnectingTask {
         };
         let remote_peer_addr = remote_peer_addr.ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
 
-        let client_socket =
+        let (_, client_socket) =
             solana_net_utils::bind_in_range(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.port_range)
-                .expect("create_endpoint bind_in_range")
-                .1;
+                .map_err(|_| ConnectingError::NoPortAvailable)?;
 
         let mut endpoint = Endpoint::new(
             quinn::EndpointConfig::default(),
@@ -391,8 +424,7 @@ impl ConnectingTask {
             let max_idle_timeout = IdleTimeout::try_from(self.max_idle_timeout)
                 .expect("Failed to set QUIC max idle timeout");
             res.max_idle_timeout(Some(max_idle_timeout));
-            // We don't want automatic keep-alive, since we want to use it to detect inactive connections.
-            res.keep_alive_interval(None);
+            res.keep_alive_interval(Some(QUIC_KEEP_ALIVE));
             // We don't want fairness : https://github.com/quinn-rs/quinn/pull/2002
             // Fairness use round-robin scheduling to write stream data into the next frame.
             // Disabling fairness makes that once a stream starts to write it won't be interrupted by round-robin.
@@ -435,6 +467,7 @@ struct QuicTxSenderWorker {
     incoming_rx: mpsc::Receiver<GatewayTransaction>,
     output_tx: mpsc::UnboundedSender<GatewayResponse>,
     tx_queue: VecDeque<GatewayTransaction>,
+    cancel_notify: Arc<Notify>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -448,6 +481,8 @@ enum TxSenderWorkerError {
 struct TxSenderWorkerCompleted {
     err: Option<TxSenderWorkerError>,
     rx: mpsc::Receiver<GatewayTransaction>,
+    pending_tx: VecDeque<GatewayTransaction>,
+    canceled: bool,
 }
 
 impl QuicTxSenderWorker {
@@ -611,6 +646,7 @@ impl QuicTxSenderWorker {
     }
 
     async fn run(mut self) -> TxSenderWorkerCompleted {
+        let mut canceled = false;
         let maybe_err = loop {
             while self.has_capacity() && !self.tx_queue.is_empty() {
                 if let Some(tx) = self.tx_queue.pop_front() {
@@ -630,6 +666,15 @@ impl QuicTxSenderWorker {
                         }
                     }
                 }
+                err = self.connection.closed() => {
+                    // Agave client do connection eviction and can close the connection for least used or lower staked peers.
+                    break Some(err.into())
+                }
+                _ = self.cancel_notify.notified() => {
+                    tracing::debug!("Transaction sender worker for remote peer: {:?} is canceled", self.remote_peer);
+                    canceled = true;
+                    break None;
+                }
 
                 Some(result) = self.inflight_send.join_next_with_id() => {
                     if let Err(e) = self.handle_tx_sent_result(result) {
@@ -646,7 +691,131 @@ impl QuicTxSenderWorker {
 
         TxSenderWorkerCompleted {
             err: maybe_err,
+            canceled,
             rx: self.incoming_rx,
+            pending_tx: self.tx_queue,
+        }
+    }
+}
+
+///
+/// Base trait for connection eviction strategy.
+///
+/// Connection eviction is called when the QUIC gateway does not local port available
+/// to use for new QUIC connections.
+///
+pub trait ConnectionEvictionStrategy {
+    ///
+    /// Plan up to `plan_ahead_size` [`quinn::Connection`] to evicts.
+    ///
+    /// Arguments:
+    ///
+    /// `ss_identites`: a sorted set of remote pubkeys currently connected to.
+    /// `usage_table`: A lookup table from remote peer identity to last time a transaction was routed to.
+    /// `evicting_masq` : a set of pubkey already schedule for evicting, may overlap with `ss_identities`.
+    /// The resulted plan should not include any of `already_evicting`.
+    /// `plan_ahead_size` : how far ahead should the strategy plan ahead future evictions.
+    ///
+    /// Returns:
+    ///
+    /// A list of [`quinn::Connection`] to evict in order of evicting priority.
+    ///
+    /// Post Conditions:
+    ///
+    /// 0 <= eviction plan length <= `plan_ahead_size`.  
+    ///
+    fn plan_eviction(
+        &self,
+        ss_identies: &StakeSortedPeerSet,
+        usage_table: &HashMap<Pubkey, Instant>,
+        evicting_masq: &HashSet<Pubkey>,
+        plan_ahead_size: usize,
+    ) -> Vec<Pubkey>;
+}
+
+#[derive(Debug, Default)]
+pub struct StakeSortedPeerSet {
+    peer_stake_map: HashMap<Pubkey, u64>,
+    sorted_map: BTreeMap<u64, HashSet<Pubkey>>,
+}
+
+impl StakeSortedPeerSet {
+    pub fn remove(&mut self, peer: &Pubkey) -> bool {
+        if let Some(old_stake) = self.peer_stake_map.remove(peer) {
+            let mut is_entry_empty = false;
+            if let Some(peers) = self.sorted_map.get_mut(&old_stake) {
+                peers.remove(peer);
+                is_entry_empty = true;
+            }
+
+            if is_entry_empty {
+                self.sorted_map.remove(&old_stake);
+            }
+
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn insert(&mut self, peer: Pubkey, stake: u64) -> bool {
+        let already_present = self.remove(&peer);
+        self.peer_stake_map.insert(peer, stake);
+        self.sorted_map.entry(stake).or_default().insert(peer);
+        already_present
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u64, Pubkey)> {
+        self.sorted_map
+            .iter()
+            .flat_map(|(stake, peers)| peers.iter().map(|peer| (*stake, *peer)))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.peer_stake_map.is_empty()
+    }
+}
+
+pub struct StakedBaseEvictionStrategy;
+
+impl ConnectionEvictionStrategy for StakedBaseEvictionStrategy {
+    fn plan_eviction(
+        &self,
+        ss_identies: &StakeSortedPeerSet,
+        usage_table: &HashMap<Pubkey, Instant>,
+        already_evicting: &HashSet<Pubkey>,
+        plan_ahead_size: usize,
+    ) -> Vec<Pubkey> {
+        tracing::debug!("Connection evicting requested");
+
+        if ss_identies.is_empty() {
+            tracing::warn!("No active connections to evict");
+            return Vec::new();
+        }
+
+        // We always evict to lowest staked remote peer first unless it has been used recently.
+        // However, if the there only one connection available to evict, we evict it regardless of its stake and last usage.
+        let plan = ss_identies
+            .iter()
+            .filter(|(_, peer)| !already_evicting.contains(peer))
+            .filter(|(_, peer)| {
+                let elapsed = usage_table.get(peer).expect("missing last activity");
+                elapsed.elapsed() >= DEFAULT_LEADER_DURATION
+            })
+            .take(plan_ahead_size)
+            .map(|(_, peer)| peer)
+            .collect::<Vec<_>>();
+
+        if plan.is_empty() {
+            // Or else we don't care, just evict the lowest-staked peer.
+            ss_identies
+                .iter()
+                .filter(|(_, peer)| !already_evicting.contains(peer))
+                .take(plan_ahead_size)
+                .map(|(_, peer)| peer)
+                .collect()
+        } else {
+            plan
         }
     }
 }
@@ -691,6 +860,26 @@ impl TokioQuicGatewayRuntime {
     /// this is called when a transaction is received for a remote peer which does not have a worker installed yet.
     ///
     fn spawn_connecting(&mut self, remote_peer_identity: Pubkey, attempt: usize) {
+        if self.being_evicted_peers.contains(&remote_peer_identity) {
+            tracing::warn!(
+                "Skipping connection attempt to remote peer: {} since it is being evicted",
+                remote_peer_identity
+            );
+            self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::RemotePeerBeingEvicted);
+            return;
+        }
+
+        let remote_peer_stake = self
+            .stake_info_map
+            .get_stake_info(remote_peer_identity)
+            .unwrap_or(0);
+        if !self.has_connection_capacity() {
+            self.do_staked_base_eviction();
+        }
+
+        self.active_staked_sorted_remote_peer
+            .insert(remote_peer_identity, remote_peer_stake);
+
         let service = Arc::clone(&self.leader_tpu_info_service);
         let port_range = self.config.port_range;
         let cert = Arc::clone(&self.client_certificate);
@@ -749,6 +938,42 @@ impl TokioQuicGatewayRuntime {
         limits.max_streams
     }
 
+    const fn port_range_size(&self) -> usize {
+        let (from_port, to_port) = self.config.port_range;
+        (to_port - from_port + 1) as usize
+    }
+
+    fn has_connection_capacity(&self) -> bool {
+        self.tx_worker_handle_map.len() < self.max_concurrent_connection()
+    }
+
+    fn max_concurrent_connection(&self) -> usize {
+        self.port_range_size()
+            .min(self.config.max_concurrent_connections)
+    }
+
+    ///
+    /// Evicts a remote peer connection based on the stake and last activity.
+    ///
+    /// Since highly staked remote peers are more likely to be re-used in the future,
+    /// we evict the lowest staked remote peer connection first, unless it has been used recently.
+    ///
+    fn do_staked_base_eviction(&mut self) {
+        let eviction_plan = self.eviction_strategy.plan_eviction(
+            &self.active_staked_sorted_remote_peer,
+            &self.last_peer_activity,
+            &self.being_evicted_peers,
+            4,
+        );
+        for peer in eviction_plan {
+            if let Some(handle) = self.tx_worker_handle_map.get(&peer) {
+                // Notify the worker to gracefully drop the connection.
+                handle.cancel_notify.notify_one();
+                self.being_evicted_peers.insert(peer);
+            }
+        }
+    }
+
     ///
     /// Installs a transaction sender worker for a remote peer with the given connection.
     ///
@@ -758,6 +983,8 @@ impl TokioQuicGatewayRuntime {
         let connection = Arc::new(connection);
         let output_tx = self.response_outlet.clone();
         let max_stream_capacity = self.current_max_stream_limit();
+        let cancel_notify = Arc::new(Notify::new());
+
         let worker = QuicTxSenderWorker {
             remote_peer: remote_peer_identity,
             max_stream_limit: max_stream_capacity,
@@ -770,16 +997,22 @@ impl TokioQuicGatewayRuntime {
                 .tx_queues
                 .remove(&remote_peer_identity)
                 .unwrap_or_default(),
+            cancel_notify: Arc::clone(&cancel_notify),
         };
 
         let worker_fut = worker.run();
         let ah = self.tx_worker_set.spawn_on(worker_fut, &self.tx_worker_rt);
+        let handle = TxWorkerSenderHandle {
+            sender: tx,
+            cancel_notify,
+        };
         assert!(
-            self.tx_worker_sender_map
-                .insert(remote_peer_identity, tx)
+            self.tx_worker_handle_map
+                .insert(remote_peer_identity, handle)
                 .is_none()
         );
-        self.tx_worker_meta.insert(ah.id(), remote_peer_identity);
+        self.tx_worker_task_meta_map
+            .insert(ah.id(), remote_peer_identity);
         tracing::debug!(
             "Installed tx worker for remote peer: {remote_peer_identity} with max stream limit: {max_stream_capacity}"
         );
@@ -807,6 +1040,9 @@ impl TokioQuicGatewayRuntime {
                         self.install_worker(remote_peer_identity, conn);
                     }
                     Err(connect_err) => match connect_err {
+                        ConnectingError::NoPortAvailable => {
+                            self.do_staked_base_eviction();
+                        }
                         ConnectingError::ConnectError(connect_error) => {
                             tracing::error!(
                                 "Failed to connect to remote peer: {remote_peer_identity}: {connect_error:?}"
@@ -854,11 +1090,13 @@ impl TokioQuicGatewayRuntime {
     ///
     fn accept_tx(&mut self, tx: GatewayTransaction) {
         let remote_peer_identity = tx.remote_peer;
+        self.last_peer_activity
+            .insert(remote_peer_identity, Instant::now());
         let tx_id = tx.tx_sig;
         // Do I have a transaction sender worker for this remote peer?
-        if let Some(sender) = self.tx_worker_sender_map.get(&remote_peer_identity) {
+        if let Some(handle) = self.tx_worker_handle_map.get(&remote_peer_identity) {
             // If we have an active transaction sender worker for the remote peer,
-            match sender.try_send(tx) {
+            match handle.sender.try_send(tx) {
                 Ok(_) => {
                     tracing::trace!("{tx_id} sent to worker");
                 }
@@ -911,11 +1149,18 @@ impl TokioQuicGatewayRuntime {
     fn handle_worker_result(&mut self, result: Result<(Id, TxSenderWorkerCompleted), JoinError>) {
         match result {
             Ok((id, mut worker_completed)) => {
-                let remote_peer_identity = self.tx_worker_meta.remove(&id).expect("tx worker meta");
+                let remote_peer_identity = self
+                    .tx_worker_task_meta_map
+                    .remove(&id)
+                    .expect("tx worker meta");
+                self.active_staked_sorted_remote_peer
+                    .remove(&remote_peer_identity);
+                self.being_evicted_peers.remove(&remote_peer_identity);
                 let worker_tx = self
-                    .tx_worker_sender_map
+                    .tx_worker_handle_map
                     .remove(&remote_peer_identity)
                     .expect("tx worker sender");
+                self.last_peer_activity.remove(&remote_peer_identity);
                 drop(worker_tx);
                 tracing::trace!(
                     "Tx worker for remote peer: {:?} completed",
@@ -923,6 +1168,9 @@ impl TokioQuicGatewayRuntime {
                 );
                 let tx_to_rescue = self.tx_queues.entry(remote_peer_identity).or_default();
                 while let Ok(tx) = worker_completed.rx.try_recv() {
+                    tx_to_rescue.push_back(tx);
+                }
+                while let Some(tx) = worker_completed.pending_tx.pop_front() {
                     tx_to_rescue.push_back(tx);
                 }
 
@@ -938,21 +1186,36 @@ impl TokioQuicGatewayRuntime {
 
                 if is_peer_unreachable {
                     self.unreachable_peer(remote_peer_identity);
+                } else if worker_completed.canceled {
+                    tracing::trace!(
+                        "Remote peer: {} tx worker was canceled, will not reconnect",
+                        remote_peer_identity
+                    );
+                    self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DropByGateway);
                 } else if !tx_to_rescue.is_empty() {
                     tracing::trace!(
                         "Remote peer: {} has queued tx, wil reconnect",
                         remote_peer_identity
                     );
+                    self.last_peer_activity
+                        .insert(remote_peer_identity, Instant::now());
                     self.spawn_connecting(remote_peer_identity, 1);
                 }
             }
             Err(join_err) => {
                 let id = join_err.id();
-                let remote_peer_identity = self.tx_worker_meta.remove(&id).expect("tx worker meta");
+                let remote_peer_identity = self
+                    .tx_worker_task_meta_map
+                    .remove(&id)
+                    .expect("tx worker meta");
+                self.being_evicted_peers.remove(&remote_peer_identity);
+                self.active_staked_sorted_remote_peer
+                    .remove(&remote_peer_identity);
                 let worker_tx = self
-                    .tx_worker_sender_map
+                    .tx_worker_handle_map
                     .remove(&remote_peer_identity)
                     .expect("tx worker sender");
+                self.last_peer_activity.remove(&remote_peer_identity);
                 drop(worker_tx);
                 self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DropByGateway);
                 tracing::error!("Tx sender worker join error: {:?}", join_err);
@@ -969,8 +1232,8 @@ impl TokioQuicGatewayRuntime {
     ///
     fn schedule_graceful_drop_all_worker(&mut self) {
         tracing::trace!("Scheduling graceful drop of all transaction workers");
-        let mut tx_worker_meta = std::mem::take(&mut self.tx_worker_meta);
-        let tx_worker_sender_map = std::mem::take(&mut self.tx_worker_sender_map);
+        let mut tx_worker_meta = std::mem::take(&mut self.tx_worker_task_meta_map);
+        let tx_worker_sender_map = std::mem::take(&mut self.tx_worker_handle_map);
         let mut tx_worker_set = std::mem::take(&mut self.tx_worker_set);
 
         let fut = async move {
@@ -1183,17 +1446,32 @@ pub struct TokioQuicGatewaySpawner {
 
 impl TokioQuicGatewaySpawner {
     pub fn spawn_with_default(&self, identity: Keypair) -> TokioQuicGatewaySession {
-        self.spawn(identity, Default::default())
+        self.spawn(
+            identity,
+            Default::default(),
+            Arc::new(StakedBaseEvictionStrategy),
+        )
     }
 
-    pub fn spawn(&self, identity: Keypair, config: QuicGatewayConfig) -> TokioQuicGatewaySession {
-        self.spawn_on(identity, config, tokio::runtime::Handle::current())
+    pub fn spawn(
+        &self,
+        identity: Keypair,
+        config: QuicGatewayConfig,
+        eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
+    ) -> TokioQuicGatewaySession {
+        self.spawn_on(
+            identity,
+            config,
+            eviction_strategy,
+            tokio::runtime::Handle::current(),
+        )
     }
 
     pub fn spawn_on(
         &self,
         identity: Keypair,
         config: QuicGatewayConfig,
+        eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
         gateway_rt: Handle,
     ) -> TokioQuicGatewaySession {
         let (tx_inlet, tx_outlet) = mpsc::channel(self.gateway_tx_channel_capacity);
@@ -1208,9 +1486,10 @@ impl TokioQuicGatewaySpawner {
 
         let gateway_runtime = TokioQuicGatewayRuntime {
             stake_info_map: self.stake_info_map.clone(),
-            tx_worker_sender_map: Default::default(),
-            tx_worker_meta: Default::default(),
+            tx_worker_handle_map: Default::default(),
+            tx_worker_task_meta_map: Default::default(),
             tx_worker_set: Default::default(),
+            active_staked_sorted_remote_peer: Default::default(),
             tx_queues: Default::default(),
             tx_worker_rt: gateway_rt.clone(),
             identity,
@@ -1225,6 +1504,9 @@ impl TokioQuicGatewaySpawner {
             cnc_rx: gateway_cnc_rx,
             tasklet: Default::default(),
             tasklet_meta: Default::default(),
+            last_peer_activity: Default::default(),
+            being_evicted_peers: Default::default(),
+            eviction_strategy,
         };
 
         let jh = gateway_rt.spawn(gateway_runtime.run());
@@ -1342,9 +1624,10 @@ pub const fn module_path_for_test() -> &'static str {
 mod test {
     use {
         crate::quic_gateway::{
-            GatewayCommand, GatewayIdentityUpdater, UpdateGatewayIdentityCommand,
+            GatewayCommand, GatewayIdentityUpdater, StakeSortedPeerSet,
+            UpdateGatewayIdentityCommand,
         },
-        solana_sdk::signature::Keypair,
+        solana_sdk::{pubkey::Pubkey, signature::Keypair},
         std::time::Duration,
         tokio::sync::mpsc,
     };
@@ -1375,5 +1658,30 @@ mod test {
 
         let actual = jh.await.unwrap();
         assert_eq!(actual, identity)
+    }
+
+    #[test]
+    fn test_stake_sorted_peer() {
+        let mut set = StakeSortedPeerSet::default();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let pk3 = Pubkey::new_unique();
+        assert!(!set.insert(pk3, 100));
+        assert!(!set.insert(pk2, 10));
+        assert!(!set.insert(pk1, 1));
+
+        let actual = set.iter().map(|(_, pk)| pk).collect::<Vec<_>>();
+
+        assert_eq!(actual, vec![pk1, pk2, pk3]);
+
+        assert!(set.remove(&pk1));
+        assert!(set.remove(&pk2));
+        assert!(set.remove(&pk3));
+
+        assert!(!set.remove(&pk3));
+
+        let actual = set.iter().count();
+        assert_eq!(actual, 0);
     }
 }

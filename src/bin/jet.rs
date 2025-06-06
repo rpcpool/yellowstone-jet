@@ -11,6 +11,7 @@ use {
     solana_sdk::{
         commitment_config::CommitmentConfig,
         pubkey::Pubkey,
+        quic::QUIC_MAX_TIMEOUT,
         signature::{Keypair, read_keypair},
     },
     std::{
@@ -36,7 +37,10 @@ use {
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         jet_gateway::spawn_jet_gw_listener,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
-        quic_gateway::{QuicGatewayConfig, TokioQuicGatewaySession, TokioQuicGatewaySpawner},
+        quic_gateway::{
+            QuicGatewayConfig, StakedBaseEvictionStrategy, TokioQuicGatewaySession,
+            TokioQuicGatewaySpawner,
+        },
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
         solana::sanitize_transaction_support_check,
@@ -345,7 +349,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     };
     let quic_gateway_config = QuicGatewayConfig {
         port_range: config.quic.endpoint_port_range,
-        max_idle_timeout: config.quic.max_idle_timeout,
+        max_idle_timeout: config.quic.max_idle_timeout.min(QUIC_MAX_TIMEOUT),
         connecting_timeout: config.quic.connection_handshake_timeout,
         ..Default::default()
     };
@@ -354,7 +358,11 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         gateway_tx_sink,
         gateway_response_source,
         gateway_join_handle,
-    } = quic_gateway_spawner.spawn(initial_identity.insecure_clone(), quic_gateway_config);
+    } = quic_gateway_spawner.spawn(
+        initial_identity.insecure_clone(),
+        quic_gateway_config,
+        Arc::new(StakedBaseEvictionStrategy),
+    );
 
     tg.spawn_cancelable("gateway", async move {
         gateway_join_handle.await.expect("quic gateway join handle");

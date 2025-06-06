@@ -18,7 +18,8 @@ use {
     yellowstone_jet::{
         quic_gateway::{
             GatewayResponse, GatewayTransaction, LeaderTpuInfoService, QuicGatewayConfig,
-            TokioQuicGatewaySession, TokioQuicGatewaySpawner, TxDropReason,
+            StakedBaseEvictionStrategy, TokioQuicGatewaySession, TokioQuicGatewaySpawner,
+            TxDropReason,
         },
         stake::StakeInfoMap,
     },
@@ -242,7 +243,11 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         gateway_tx_sink: transaction_sink,
         mut gateway_response_source,
         gateway_join_handle: _,
-    } = gateway_spawner.spawn(gateway_kp.insecure_clone(), gateway_config);
+    } = gateway_spawner.spawn(
+        gateway_kp.insecure_clone(),
+        gateway_config,
+        Arc::new(StakedBaseEvictionStrategy),
+    );
 
     let rx_server_handle = tokio::spawn(async move {
         let connecting = rx_server_endpoint.accept().await.expect("accept");
@@ -304,7 +309,11 @@ async fn it_should_update_gatway_identity() {
         gateway_tx_sink: transaction_sink,
         gateway_response_source: _,
         gateway_join_handle: _,
-    } = gateway_spawner.spawn(gateway_kp.insecure_clone(), gateway_config);
+    } = gateway_spawner.spawn(
+        gateway_kp.insecure_clone(),
+        gateway_config,
+        Arc::new(StakedBaseEvictionStrategy),
+    );
 
     let (client_tx, mut client_rx) = mpsc::channel(100);
     let _rx_server_handle = tokio::spawn(async move {

@@ -509,6 +509,7 @@ impl TransactionNoRetryScheduler {
                 );
                 continue;
             }
+
             let signature = tx.signature;
             if response_sink.send(tx).is_err() {
                 tracing::trace!("response sink is closed, stopping transaction forwarding");
