@@ -1,3 +1,31 @@
+//!
+//! This module replaces the legacy `ConnectionCache` from Agave, which was known to over-create connections.
+//!
+//! Following discussions with Anza, it was concluded that the previous implementation led to excessive fragmentation and increased ping overhead on the network.
+//!
+//! For a summary of the issues in the old implementation, see: https://gist.github.com/lvboudre/86e965389338758391f72834def72d9b
+//!
+//! Rather than maintaining a "pool of connection pools" to remote peers, this module optimizes the use of QUIC connections
+//! by opening multiple streams over a single connection and multiplexing transactions across them.
+//!
+//! The number of streams is limited based on the gateway's stake.
+//!
+//! This design also decouples transaction sending from connection establishment. Since connections can drop during active streams,
+//! embedding reconnection logic directly into the sending path would introduce unnecessary complexity and responsibility creep.
+//!
+//! Connection lifecycle management—including establishment and failure recovery—is handled by `TokioQuicGatewayRuntime`.
+//! Meanwhile, transaction sending is delegated to `QuicTxSenderWorker`.
+//!
+//! `TokioQuicGatewayRuntime` spawns a `QuicTxSenderWorker` for each remote peer. If a connection to a peer is lost,
+//! the corresponding worker will terminate and can be restarted by the runtime.
+//!
+//! Whether or not to re-establish a connection depends on the nature of the error encountered.
+//!
+//! Compared to the old `ConnectionCache`, this module includes significantly more robust error handling.
+//! QUIC connections can fail for a wide variety of reasons, so it’s important to distinguish between recoverable and unrecoverable errors.
+//!
+//! Note that this module does not implement retry logic beyond attempting to reconnect when appropriate and safe to do so.
+//!
 use {
     crate::{
         cluster_tpu_info::ClusterTpuInfo,
@@ -338,7 +366,10 @@ impl ConnectingTask {
             res.max_idle_timeout(Some(max_idle_timeout));
             // We don't want automatic keep-alive, since we want to use it to detect inactive connections.
             res.keep_alive_interval(None);
-            // We don't want fairness.
+            // We don't want fairness : https://github.com/quinn-rs/quinn/pull/2002
+            // Fairness use round-robin scheduling to write stream data into the next frame.
+            // Disabling fairness makes that once a stream starts to write it won't be interrupted by round-robin.
+            // This reduce the time the receive the (fin) "end" of a transaction, thus reducing latency.
             res.send_fairness(QUIC_SEND_FAIRNESS);
             res
         };
@@ -584,9 +615,44 @@ impl QuicTxSenderWorker {
     }
 }
 
+/// Here's the simplified flow of a transaction through the QUIC gateway:
+///
+///  ┌────────────┐      ┌────────────┐       ┌───────────────┐                           
+///  │Transaction │      │  QUIC      │       │ TxSenderWorker│        (Remote Validator)
+///  │ Source     ┼──1──►│ Gateway    ┼──2────►               ┼──3────►                   
+///  └────────────┘      └────▲───────┘       └─────┬─────────┘                           
+///                           │                     │                                     
+///                           │                     │                                     
+///                           └───────4*─Failure────┘
+///
+///
+/// Lazy connection establishment:
+///                                                        
+///  ┌───────────────┐                                     
+///  │New Transaction│                                     
+///  │  for Peer "X" │                                     
+///  └───────┬───────┘                                     
+///          forward                                        
+///          │                                             
+///   ┌──────▼─────────┐           ┌─────────────────────┐
+///   │ Do I have a    │           │    Send it to       │
+///   │a TxSenderWorker┼───Yes─────►TxSenderWork(#peer X)│
+///   │ for Peer "X"?  │           └─────────────────────┘
+///   └──────┬─────────┘                                   
+///          No                                            
+///          │                                             
+///   ┌──────▼────────────┐                                
+///   │  Queue the        │                                
+///   │ transaction       │                                
+///   │  and schedule     │                                
+///   │ connection attempt│                                
+///   │  to peer "X"      │                                
+///   └───────────────────┘                     
+///
 impl TokioQuicGatewayRuntime {
     ///
-    /// Spawn a new connection attempt to a remote peer.
+    /// Spawns a "connecting" task to a remote peer.
+    /// this is called when a transaction is received for a remote peer which does not have a worker installed yet.
     ///
     fn spawn_connecting(&mut self, remote_peer_identity: Pubkey, attempt: usize) {
         let service = Arc::clone(&self.leader_tpu_info_service);
@@ -747,9 +813,13 @@ impl TokioQuicGatewayRuntime {
     ///
     /// Accepts a transaction and determines how to handle it based on the remote peer's status.
     ///
+    /// If a transaction sender worker exists for the remote peer, it is fowarded to it.
+    /// If not, the transaction is queued for later processing and a connection attempt is scheduled.
+    ///
     fn accept_tx(&mut self, tx: GatewayTransaction) {
         let remote_peer_identity = tx.remote_peer;
         let tx_id = tx.tx_sig;
+        // Do I have a transaction sender worker for this remote peer?
         if let Some(sender) = self.tx_worker_sender_map.get(&remote_peer_identity) {
             // If we have an active transaction sender worker for the remote peer,
             match sender.try_send(tx) {
@@ -898,6 +968,9 @@ impl TokioQuicGatewayRuntime {
             .insert(ah.id(), TokioGateawyTaskMeta::DropAllWorkers);
     }
 
+    ///
+    /// Updates the gateway identity and reconnects to all remote peers with the new identity.
+    ///
     fn update_identity(&mut self, update_identity_cmd: UpdateGatewayIdentityCommand) {
         let UpdateGatewayIdentityCommand {
             new_identity,
@@ -937,6 +1010,10 @@ impl TokioQuicGatewayRuntime {
         tracing::trace!("Updated gateway identity to: {}", self.identity.pubkey());
     }
 
+    ///
+    /// Similar to [`TokioQuicGatewayRuntime::update_identity`], but await a synchronization barrier
+    /// before resuming gateway operations.
+    ///
     async fn update_identity_sync(&mut self, command: MultiStepIdentitySynchronizationCommand) {
         let MultiStepIdentitySynchronizationCommand {
             new_identity,
