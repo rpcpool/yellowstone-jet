@@ -63,6 +63,10 @@ pub fn spawn_jet_gw_listener(
                     );
                     future::pending().boxed()
                 } else {
+                    tracing::info!(
+                        "JetGatewayIdentityUpdater: starting grpc server with identity: {}",
+                        current_identity.pubkey()
+                    );
                     GrpcServer::run_with(
                         Arc::new(current_identity.insecure_clone()),
                         stake_info2,
@@ -73,6 +77,10 @@ pub fn spawn_jet_gw_listener(
                     .boxed()
                 }
             } else {
+                tracing::info!(
+                    "JetGatewayIdentityUpdater: starting grpc server with identity: {}",
+                    current_identity.pubkey()
+                );
                 GrpcServer::run_with(
                     Arc::new(current_identity.insecure_clone()),
                     stake_info2,

@@ -344,6 +344,9 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         leader_tpu_info_service: Arc::new(cluster_tpu_info.clone()),
     };
     let quic_gateway_config = QuicGatewayConfig {
+        port_range: config.quic.endpoint_port_range,
+        max_idle_timeout: config.quic.max_idle_timeout,
+        connecting_timeout: config.quic.connection_handshake_timeout,
         ..Default::default()
     };
     let TokioQuicGatewaySession {

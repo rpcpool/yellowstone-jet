@@ -25,7 +25,7 @@ use {
         task::{self, JoinSet},
         time::Instant,
     },
-    tracing::{debug, error},
+    tracing::error,
     yellowstone_shield_store::{CheckError, PolicyStoreTrait},
 };
 
@@ -151,7 +151,6 @@ impl GrpcRootedTxReceiver {
                 watch_signatures,
                 ..
             } = locked.deref_mut();
-            let ts = Instant::now();
 
             // Update slot commitment
             let entry = slots.entry(slot_update.slot).or_default();
@@ -195,7 +194,6 @@ impl GrpcRootedTxReceiver {
             }
 
             // Add transactions
-            let bulk_size = transactions_bulk.len();
             for TransactionReceived { slot, signature } in transactions_bulk.drain(..) {
                 let entry = slots.entry(slot).or_default();
                 if entry.transactions.insert(signature) {
@@ -214,11 +212,6 @@ impl GrpcRootedTxReceiver {
             }
 
             metrics::rooted_transactions_pool_set_size(transactions.len());
-            debug!(
-                bulk_size,
-                elapsed_ms = ts.elapsed().as_millis(),
-                "rooted transactions updated"
-            )
         }
     }
 }
@@ -492,7 +485,6 @@ impl TransactionNoRetryScheduler {
                 tracing::trace!("incoming transaction channel is closed");
                 break;
             };
-
             let current_block_height = blockheight_service
                 .get_block_height_for_commitment(CommitmentLevel::Confirmed)
                 .unwrap_or(0);
@@ -501,9 +493,22 @@ impl TransactionNoRetryScheduler {
                 .unwrap_or(0)
                 + MAX_PROCESSING_AGE as u64;
 
-            if last_valid_block_height < current_block_height && response_sink.send(tx).is_err() {
+            if last_valid_block_height < current_block_height {
+                tracing::trace!(
+                    "transaction {} last valid block height {} is less than current block height {}, dropping transaction",
+                    tx.signature,
+                    last_valid_block_height,
+                    current_block_height
+                );
+                continue;
+            }
+            let signature = tx.signature;
+            if response_sink.send(tx).is_err() {
+                tracing::trace!("response sink is closed, stopping transaction forwarding");
                 break;
             }
+
+            tracing::trace!("forwarding transaction {signature:.10}");
         }
     }
 }
@@ -697,19 +702,23 @@ impl TransactionFanout {
         match response {
             GatewayResponse::TxSent(gateway_tx_sent) => {
                 let tx_sig = gateway_tx_sent.tx_sig;
-                assert!(self.inflight_transactions.remove(&tx_sig));
+                // BECAREFUL: THE SAME TRANSACTION CAN BE SENT TO MULTIPLE LEADERS,
+                // SO REMOVE MAY RETURN FALSE.
+                self.inflight_transactions.remove(&tx_sig);
                 tracing::trace!(
-                    "transaction {tx_sig} forwarded to {} validator",
+                    "transaction {tx_sig:.10} forwarded to {} validator",
                     gateway_tx_sent.remote_peer_identity
                 );
             }
             GatewayResponse::TxFailed(gateway_tx_failed) => {
                 let tx_sig = gateway_tx_failed.tx_sig;
-                assert!(self.inflight_transactions.remove(&tx_sig));
+                tracing::trace!("transaction {tx_sig:.10} failed");
+                self.inflight_transactions.remove(&tx_sig);
             }
             GatewayResponse::TxDrop(tx_drop) => {
                 let tx_sig = tx_drop.tx_sig;
-                assert!(self.inflight_transactions.remove(&tx_sig));
+                tracing::trace!("transaction {tx_sig:.10} dropped by QUIC gateway");
+                self.inflight_transactions.remove(&tx_sig);
             }
         }
     }
@@ -739,7 +748,7 @@ impl TransactionFanout {
 
     fn fwd_tx(&mut self, tx: Arc<SendTransactionRequest>) {
         if self.inflight_transactions.contains(&tx.signature) {
-            tracing::debug!(
+            tracing::trace!(
                 "transaction {} is already in flight, skipping",
                 tx.signature
             );

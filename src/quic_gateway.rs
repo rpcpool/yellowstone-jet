@@ -73,6 +73,7 @@ use {
     },
 };
 
+pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DEFAULT_QUIC_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
 pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
@@ -107,6 +108,11 @@ pub struct QuicGatewayConfig {
     /// Capacity of the transaction sender worker channel per remote peer.
     ///
     pub transaction_sender_worker_channel_capacity: usize,
+
+    ///
+    /// Timeout for establishing a connection to a remote peer.
+    ///
+    pub connecting_timeout: Duration,
 }
 
 impl Default for QuicGatewayConfig {
@@ -117,6 +123,7 @@ impl Default for QuicGatewayConfig {
             // keep_alive_interval: None,
             max_connection_attempts: DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT,
             transaction_sender_worker_channel_capacity: DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE,
+            connecting_timeout: DEFAULT_CONNECTION_TIMEOUT,
         }
     }
 }
@@ -249,7 +256,7 @@ impl LeaderTpuInfoService for ClusterTpuInfo {
     fn get_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
         self.get_cluster_nodes()
             .get(&leader_pubkey)
-            .and_then(|node| node.tpu)
+            .and_then(|node| node.tpu_quic)
     }
 }
 
@@ -323,6 +330,7 @@ struct ConnectingTask {
     port_range: PortRange,
     cert: Arc<QuicClientCertificate>,
     max_idle_timeout: Duration,
+    connection_timeout: Duration,
 }
 
 impl ConnectingTask {
@@ -345,6 +353,7 @@ impl ConnectingTask {
         )
         .expect("QuicNewConnection::create_endpoint quinn::Endpoint::new");
 
+        tracing::trace!("Created Endpoint for remote peer {remote_peer_addr:?}");
         let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
             .with_safe_default_protocol_versions()
             .expect("Failed to set QUIC client protocol versions")
@@ -379,10 +388,19 @@ impl ConnectingTask {
 
         endpoint.set_default_client_config(config);
 
+        tracing::trace!("Connecting endpoint: {}", endpoint.local_addr().unwrap(),);
         let connecting = endpoint
             .connect(remote_peer_addr, "connect")
             .map_err(ConnectingError::ConnectError)?;
-        let conn = connecting.await?;
+        tracing::trace!(
+            "Connecting to remote peer: {} at address: {}",
+            self.remote_peer_identity,
+            remote_peer_addr,
+        );
+        let conn = tokio::time::timeout(self.connection_timeout, connecting)
+            .await
+            .map_err(|_| ConnectingError::ConnectionError(ConnectionError::TimedOut))??;
+
         Ok(conn)
     }
 }
@@ -448,7 +466,7 @@ impl QuicTxSenderWorker {
 
         let abort_handle = self.inflight_send.spawn(fut);
         tracing::debug!(
-            "Sent tx: {:?} to remote peer: {:?}",
+            "Sent tx: {:.10} to remote peer: {:?}",
             tx.tx_sig,
             remote_peer_identity,
         );
@@ -522,7 +540,7 @@ impl QuicTxSenderWorker {
                             }
                             SendTxError::StreamStopped(_) | SendTxError::StreamClosed => {
                                 tracing::trace!(
-                                    "Stream stopped or closed for tx: {:?} to remote peer: {:?}",
+                                    "Stream stopped or closed for tx: {:.10} to remote peer: {:?}",
                                     tx_sig,
                                     self.remote_peer
                                 );
@@ -530,7 +548,7 @@ impl QuicTxSenderWorker {
                             }
                             SendTxError::ZeroRttRejected => {
                                 tracing::warn!(
-                                    "0-RTT rejected by remote peer: {:?} for tx: {:?}",
+                                    "0-RTT rejected by remote peer: {:?} for tx: {:.10}",
                                     self.remote_peer,
                                     tx_sig
                                 );
@@ -550,7 +568,7 @@ impl QuicTxSenderWorker {
                     prior_inflight_load: _,
                 } = inflight_meta;
                 tracing::error!(
-                    "Join error during sending tx to {:?}: {:?} for tx_id: {}",
+                    "Join error during sending tx to {:?}: {:?} for tx_id: {:.10}",
                     self.remote_peer,
                     join_err,
                     tx_sig
@@ -665,6 +683,7 @@ impl TokioQuicGatewayRuntime {
             port_range,
             cert,
             max_idle_timeout,
+            connection_timeout: self.config.connecting_timeout,
         }
         .run();
         let meta = ConnectingMeta {
@@ -673,9 +692,7 @@ impl TokioQuicGatewayRuntime {
         };
         let abort_handle = self.connecting_tasks.spawn(fut);
         tracing::trace!(
-            "Spawning connection for remote peer: {:?}, attempt: {}",
-            remote_peer_identity,
-            attempt
+            "Spawning connection for remote peer: {remote_peer_identity}, attempt: {attempt}"
         );
         self.connecting_remote_peers
             .insert(remote_peer_identity, abort_handle.id());
@@ -824,11 +841,7 @@ impl TokioQuicGatewayRuntime {
             // If we have an active transaction sender worker for the remote peer,
             match sender.try_send(tx) {
                 Ok(_) => {
-                    tracing::trace!(
-                        "Queued tx: {:?} for remote peer: {:?}",
-                        tx_id,
-                        remote_peer_identity
-                    );
+                    tracing::trace!("{tx_id} sent to worker");
                 }
                 Err(e) => match e {
                     mpsc::error::TrySendError::Full(tx) => {
@@ -845,11 +858,7 @@ impl TokioQuicGatewayRuntime {
                         let _ = self.response_outlet.send(GatewayResponse::TxDrop(txdrop));
                     }
                     mpsc::error::TrySendError::Closed(tx) => {
-                        tracing::debug!(
-                            "Remote peer: {:?} tx worker is closed, enqueuing tx: {:?}",
-                            remote_peer_identity,
-                            tx_id
-                        );
+                        tracing::debug!("Enqueuing tx: {tx_id:.10}",);
                         self.tx_queues
                             .entry(remote_peer_identity)
                             .or_default()
@@ -864,6 +873,7 @@ impl TokioQuicGatewayRuntime {
                 .entry(remote_peer_identity)
                 .or_default()
                 .push_back(tx);
+            tracing::trace!("queuing tx: {:?}", tx_id);
 
             // Check if we are not already connecting to this remote peer.
             if !self
@@ -871,10 +881,6 @@ impl TokioQuicGatewayRuntime {
                 .contains_key(&remote_peer_identity)
             {
                 // If the remote peer is already being connected, just queue the tx.
-                tracing::debug!(
-                    "Spawning connection for remote peer: {:?}",
-                    remote_peer_identity
-                );
                 self.spawn_connecting(remote_peer_identity, 1);
             }
         }

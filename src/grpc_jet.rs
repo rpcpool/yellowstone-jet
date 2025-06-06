@@ -327,7 +327,7 @@ impl GrpcServer {
         let mut tasks = JoinSet::<anyhow::Result<()>>::new();
         let mut quick_disconnects = 0;
         let mut last_connect_time = std::time::Instant::now();
-
+        let mut consecutive_failed_connects = 0;
         loop {
             backoff.maybe_tick().await;
 
@@ -348,11 +348,15 @@ impl GrpcServer {
                 Ok((sink, stream)) => {
                     backoff.reset();
                     last_connect_time = std::time::Instant::now();
+                    consecutive_failed_connects = 0;
                     (sink, stream)
                 }
                 Err(error) => {
                     error!(?error, "failed to connect to gRPC jet-gateway");
-
+                    consecutive_failed_connects += 1;
+                    if consecutive_failed_connects >= 3 {
+                        panic!("Too many consecutive failed connects. Exiting...");
+                    }
                     // If error mentions feature flags, exit completely
                     if error.to_string().contains("features")
                         || error.to_string().contains("Feature")
@@ -362,7 +366,7 @@ impl GrpcServer {
                         );
                         // Wait a bit before exiting to allow log to flush
                         tokio::time::sleep(Duration::from_secs(1)).await;
-                        std::process::exit(1);
+                        panic!("Exiting due to feature flag incompatibility");
                     }
 
                     backoff.init();
