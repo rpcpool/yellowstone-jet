@@ -8,7 +8,10 @@ use {
     solana_sdk::{pubkey::Pubkey, quic::QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS},
     solana_streamer::nonblocking::quic::{ConnectionPeerType, compute_max_allowed_uni_streams},
     std::{
-        collections::HashMap, future::Future, str::FromStr, sync::Arc, sync::RwLock as StdRwLock,
+        collections::HashMap,
+        future::Future,
+        str::FromStr,
+        sync::{Arc, RwLock as StdRwLock},
     },
     tokio::{
         sync::{mpsc, oneshot},

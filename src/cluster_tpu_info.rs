@@ -15,9 +15,14 @@ use {
         epoch_schedule::EpochSchedule,
         pubkey::Pubkey,
     },
-    std::{collections::HashMap, future::Future, net::SocketAddr, sync::Arc},
+    std::{
+        collections::HashMap,
+        future::Future,
+        net::SocketAddr,
+        sync::{Arc, RwLock as StdRwLock},
+    },
     tokio::{
-        sync::{RwLock, broadcast},
+        sync::broadcast,
         time::{Duration, Instant, sleep},
     },
     tracing::{info, warn},
@@ -106,7 +111,7 @@ impl ClusterTpuInfoInner {
 
 #[derive(Clone)]
 pub struct ClusterTpuInfo {
-    inner: Arc<RwLock<ClusterTpuInfoInner>>,
+    inner: Arc<StdRwLock<ClusterTpuInfoInner>>,
     shutdown_update: broadcast::Sender<()>,
 }
 
@@ -119,7 +124,7 @@ impl ClusterTpuInfo {
         assert_eq!(NUM_CONSECUTIVE_LEADER_SLOTS, 4);
 
         let (tx, mut rx) = broadcast::channel(1);
-        let inner = Arc::new(RwLock::new(ClusterTpuInfoInner {
+        let inner = Arc::new(StdRwLock::new(ClusterTpuInfoInner {
             epoch_schedule: ClusterTpuInfoInner::get_epoch_schedule(Arc::clone(&rpc)).await,
             ..Default::default()
         }));
@@ -146,25 +151,42 @@ impl ClusterTpuInfo {
         )
     }
 
-    pub async fn processed_slot(&self) -> Slot {
-        self.inner.read().await.processed_slot
+    pub fn processed_slot(&self) -> Slot {
+        self.inner
+            .read()
+            .expect("rwlock schedule poisoned")
+            .processed_slot
     }
 
-    pub async fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
-        self.inner.read().await.cluster_nodes.clone()
+    pub fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
+        self.inner
+            .read()
+            .expect("rwlock schedule poisoned")
+            .cluster_nodes
+            .clone()
     }
 
-    pub async fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey> {
-        self.inner.read().await.leader_schedule.clone()
+    pub fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey> {
+        self.inner
+            .read()
+            .expect("rwlock schedule poisoned")
+            .leader_schedule
+            .clone()
     }
 
     async fn update_cluster_nodes(
-        inner: Arc<RwLock<ClusterTpuInfoInner>>,
+        inner: Arc<StdRwLock<ClusterTpuInfoInner>>,
         rpc: Arc<dyn ClusterTpuRpcClient + Send + Sync + 'static>,
         cluster_nodes_update_interval: Duration,
     ) -> anyhow::Result<()> {
         let mut backoff = IncrementalBackoff::default();
-        let mut old_cluster = { inner.read().await.cluster_nodes.clone() };
+        let mut old_cluster = {
+            inner
+                .read()
+                .expect("rwlock schedule poisoned")
+                .cluster_nodes
+                .clone()
+        };
         loop {
             tokio::select! {
                 _ = backoff.maybe_tick() => {}
@@ -205,7 +227,7 @@ impl ClusterTpuInfo {
                         "update total number of cluster nodes",
                     );
                 }
-                let mut inner = inner.write().await;
+                let mut inner = inner.write().expect("rwlock schedule poisoned");
                 inner.cluster_nodes = nodes.clone();
                 old_cluster = nodes;
                 drop(inner);
@@ -218,13 +240,19 @@ impl ClusterTpuInfo {
     }
 
     async fn update_leader_schedule(
-        inner: Arc<RwLock<ClusterTpuInfoInner>>,
+        inner: Arc<StdRwLock<ClusterTpuInfoInner>>,
         rpc: Arc<dyn ClusterTpuRpcClient + Send + Sync + 'static>,
         mut slots_rx: broadcast::Receiver<SlotUpdateInfoWithCommitment>,
     ) -> anyhow::Result<()> {
         let mut backoff = IncrementalBackoff::default();
 
-        let epoch_schedule = { inner.read().await.epoch_schedule.clone() };
+        let epoch_schedule = {
+            inner
+                .read()
+                .expect("rwlock schedule poisoned")
+                .epoch_schedule
+                .clone()
+        };
 
         loop {
             let mut slot_processed = None;
@@ -267,8 +295,9 @@ impl ClusterTpuInfo {
             }
 
             if let Some(slot) = slot_processed {
-                let mut locked = inner.write().await;
+                let mut locked = inner.write().expect("rwlock epoch schedule poisoned");
                 locked.processed_slot = slot;
+                drop(locked);
             }
 
             let Some(slot) = slot_schedule else {
@@ -276,11 +305,13 @@ impl ClusterTpuInfo {
             };
 
             // check that leader schedule exists for received slot
-            let locked = inner.read().await;
-            if locked.leader_schedule.contains_key(&slot) {
+            let contains_key = {
+                let lock = inner.read().expect("rwlock epoch schedule poisoned");
+                lock.leader_schedule.contains_key(&slot)
+            };
+            if contains_key {
                 continue;
             }
-            drop(locked);
 
             // update leader schedule
             backoff.reset();
@@ -294,7 +325,7 @@ impl ClusterTpuInfo {
                 let ts = Instant::now();
                 match rpc.get_leader_schedule(Some(slot)).await {
                     Ok(Some(leader_schedule)) => {
-                        let mut locked = inner.write().await;
+                        let mut locked = inner.write().expect("rwlock epoch schedule is poisoned");
 
                         locked
                             .leader_schedule
@@ -330,7 +361,7 @@ impl ClusterTpuInfo {
                             elapsed_ms = ts.elapsed().as_millis(),
                             "update leader schedule"
                         );
-
+                        drop(locked);
                         break;
                     }
                     Ok(None) => {
@@ -354,8 +385,11 @@ impl ClusterTpuInfo {
         let _ = self.shutdown_update.send(());
     }
 
-    pub async fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo> {
-        let inner = self.inner.read().await;
+    pub fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo> {
+        let inner = self
+            .inner
+            .read()
+            .expect("rwlock epoch schedule is poisoned");
 
         (0..=leader_forward_count as u64)
             .filter_map(|i| {
