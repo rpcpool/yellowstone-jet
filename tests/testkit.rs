@@ -76,6 +76,7 @@ pub const fn default_config_quic() -> ConfigQuic {
         endpoint_port_range: ConfigQuic::default_endpoint_port_range(),
         send_max_concurrent_streams: ConfigQuic::default_send_max_concurrent_streams(),
         extra_tpu_forward: vec![],
+        endpoint_count: ConfigQuic::default_num_endpoints(),
     }
 }
 
@@ -105,5 +106,6 @@ pub const fn default_config_quic_client() -> ConfigQuic {
         endpoint_port_range: (8000, 10000),
         send_max_concurrent_streams: 128,
         extra_tpu_forward: vec![],
+        endpoint_count: NonZeroUsize::new(1).unwrap(),
     }
 }

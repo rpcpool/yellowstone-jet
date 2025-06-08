@@ -1,5 +1,8 @@
 use {
-    crate::{feature_flags::FeatureSet, util::CommitmentLevel},
+    crate::{
+        feature_flags::FeatureSet, quic_gateway::DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT,
+        util::CommitmentLevel,
+    },
     anyhow::Context,
     serde::{
         Deserialize,
@@ -363,6 +366,20 @@ pub struct ConfigQuic {
     /// Extra TPU forward (transactions would be always sent to these nodes)
     #[serde(default)]
     pub extra_tpu_forward: Vec<ConfigExtraTpuForward>,
+
+    ///
+    /// How many endpoints to create for the QUIC gateway.
+    /// Each endpoint will be bound to a different port in the port range.
+    /// Each endpoint has its own "event loop" and can handle multiple connections concurrently.
+    ///
+    /// The number of endpoints should not be greater than the numbe of CPU cores dedicated to jet.
+    ///
+    /// The number of endpoints depends on the stake of the gateway as lower stake gateway should require less endpoints.
+    ///
+    /// Recommanded try 1 endpoint per 8 CPU cores dedicated to jet.
+    ///
+    #[serde(default = "ConfigQuic::default_num_endpoints")]
+    pub endpoint_count: NonZeroUsize,
 }
 
 impl ConfigQuic {
@@ -414,6 +431,10 @@ impl ConfigQuic {
         D: Deserializer<'de>,
     {
         Range::deserialize(deserializer).map(|range| (range.start, range.end))
+    }
+
+    pub const fn default_num_endpoints() -> NonZeroUsize {
+        DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT
     }
 }
 

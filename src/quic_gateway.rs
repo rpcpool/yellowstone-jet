@@ -26,7 +26,6 @@
 //! Added error handlings includes:
 //!  1. Fatal errors like incompatible protocol versions or unsupported ALPN protocols will not trigger a reconnection.
 //!  2. Non-fatal errors like stream limit exceeded or connection closed will trigger a reconnection.
-//!  3. Port availability issues will trigger a reconnection attempt with a different port.
 //!
 //! Unlike the deprecated `ConnectionCache`, the QUIC gateway manage connections eviction which is an important
 //! part of the QUIC gateway design as it allows to evict lesser staked connections in favor of higher staked connections in
@@ -34,6 +33,11 @@
 //!
 //! The [`ConnectionEvictionStrategy`] trait is used to define the eviction strategy.
 //! The default eviction strategy is [`StakedBaseEvictionStrategy`], which evicts the lowest staked connections first AND least recently used peer.
+//!
+//!
+//! Finally, QUIC-Gateway reuses the same [`quinn::Endpoint`] for multiple remote peers. Unlike `ConnectionCache`, which created a new endpoint for each remote peer,
+//! this should considerably reduce overhead as each [`quinn::Endpoint`] has its own event loop.
+//!
 //!
 //! Note that this module does not implement retry logic beyond attempting to reconnect when appropriate and safe to do so.
 //!
@@ -74,6 +78,7 @@ use {
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        num::NonZeroUsize,
         sync::{Arc, atomic::AtomicBool},
         task::Poll,
         time::{Duration, Instant},
@@ -88,6 +93,8 @@ use {
     },
 };
 
+pub const DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT: NonZeroUsize =
+    NonZeroUsize::new(1).expect("default endpoint count must be non-zero");
 pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DEFAULT_QUIC_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
@@ -103,8 +110,6 @@ pub(crate) struct InflightMeta {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ConnectingError {
-    #[error("No port available in the port range")]
-    NoPortAvailable,
     #[error(transparent)]
     ConnectError(#[from] quinn::ConnectError),
     #[error(transparent)]
@@ -144,6 +149,19 @@ pub struct QuicGatewayConfig {
     /// Maximum number of attempts to bind a local port to a remote peer.
     ///
     pub max_local_port_binding_attempts: usize,
+
+    ///
+    /// How many endpoints to create for the QUIC gateway.
+    /// Each endpoint will be bound to a different port in the port range.
+    /// Each endpoint has its own "event loop" and can handle multiple connections concurrently.
+    ///
+    /// The number of endpoints should not be greater than the numbe of CPU cores dedicated to jet.
+    ///
+    /// The number of endpoints depends on the stake of the gateway as lower stake gateway should require less endpoints.
+    ///
+    /// Recommanded try 1 endpoint per 8 CPU cores dedicated to jet.
+    ///
+    pub num_endpoints: NonZeroUsize,
 }
 
 impl Default for QuicGatewayConfig {
@@ -157,6 +175,7 @@ impl Default for QuicGatewayConfig {
             max_concurrent_connections: DEFAULT_MAX_CONCURRENT_CONNECTIONS,
             max_local_port_binding_attempts: DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS,
             tpu_port_kind: ConfigQuicTpuPort::default(),
+            num_endpoints: DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT,
         }
     }
 }
@@ -171,6 +190,7 @@ pub struct SentOk {
 struct ConnectingMeta {
     remote_peer_identity: Pubkey,
     connection_attempt: usize,
+    endpoint_idx: usize,
 }
 
 ///
@@ -206,6 +226,11 @@ struct TxWorkerSenderHandle {
 struct WaitingEviction {
     remote_peer_identity: Pubkey,
     notify: Arc<Notify>,
+}
+
+#[derive(Debug, Default)]
+struct EndpointUsage {
+    connected_remote_peers: HashSet<Pubkey>,
 }
 
 ///
@@ -244,6 +269,9 @@ pub(crate) struct TokioQuicGatewayRuntime {
     ///
     /// The runtime to spawn transation sender worker on.
     tx_worker_rt: tokio::runtime::Handle,
+
+    endpoints: Vec<Endpoint>,
+    endpoints_usage: Vec<EndpointUsage>,
 
     ///
     /// JoinSet of inflight connection attempt
@@ -397,13 +425,12 @@ pub enum GatewayResponse {
 struct ConnectingTask {
     service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     remote_peer_identity: Pubkey,
-    port_range: PortRange,
     cert: Arc<QuicClientCertificate>,
     max_idle_timeout: Duration,
     connection_timeout: Duration,
     tpu_port_kind: ConfigQuicTpuPort,
-    max_local_port_binding_attempts: usize,
     wait_for_eviction: Option<Arc<Notify>>,
+    endpoint: Endpoint,
 }
 
 impl ConnectingTask {
@@ -425,28 +452,6 @@ impl ConnectingTask {
                 .get_quic_tpu_fwd_socket_addr(self.remote_peer_identity),
         };
         let remote_peer_addr = remote_peer_addr.ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
-        assert!(
-            self.max_local_port_binding_attempts > 0,
-            "max_port_binding_attempt must be greater than 0"
-        );
-        let mut endpoint = (0..self.max_local_port_binding_attempts)
-            .find_map(|_| {
-                let (_, client_socket) = solana_net_utils::bind_in_range(
-                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                    self.port_range,
-                )
-                .ok()?;
-                Endpoint::new(
-                    quinn::EndpointConfig::default(),
-                    None,
-                    client_socket,
-                    Arc::new(quinn::TokioRuntime),
-                )
-                .ok()
-            })
-            .ok_or(ConnectingError::NoPortAvailable)?;
-
-        tracing::trace!("Created Endpoint for remote peer {remote_peer_addr:?}");
         let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
             .with_safe_default_protocol_versions()
             .expect("Failed to set QUIC client protocol versions")
@@ -478,11 +483,9 @@ impl ConnectingTask {
         let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
         config.transport_config(Arc::new(transport_config));
 
-        endpoint.set_default_client_config(config);
-
-        tracing::trace!("Connecting endpoint: {}", endpoint.local_addr().unwrap(),);
-        let connecting = endpoint
-            .connect(remote_peer_addr, "connect")
+        let connecting = self
+            .endpoint
+            .connect_with(config, remote_peer_addr, "connect")
             .map_err(ConnectingError::ConnectError)?;
         tracing::trace!(
             "Connecting to remote peer: {} at address: {}",
@@ -894,12 +897,34 @@ impl TokioQuicGatewayRuntime {
     /// this is called when a transaction is received for a remote peer which does not have a worker installed yet.
     ///
     fn spawn_connecting(&mut self, remote_peer_identity: Pubkey, attempt: usize) {
+        if self
+            .connecting_remote_peers
+            .contains_key(&remote_peer_identity)
+        {
+            tracing::warn!(
+                "Skipping connection attempt to remote peer: {} since it is already connecting",
+                remote_peer_identity
+            );
+            return;
+        }
+
         if self.being_evicted_peers.contains(&remote_peer_identity) {
             tracing::warn!(
                 "Skipping connection attempt to remote peer: {} since it is being evicted",
                 remote_peer_identity
             );
             self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::RemotePeerBeingEvicted);
+            return;
+        }
+
+        if self
+            .tx_worker_handle_map
+            .contains_key(&remote_peer_identity)
+        {
+            tracing::warn!(
+                "Skipping connection attempt to remote peer: {} since it already has a worker",
+                remote_peer_identity
+            );
             return;
         }
 
@@ -919,25 +944,28 @@ impl TokioQuicGatewayRuntime {
         };
 
         let service = Arc::clone(&self.leader_tpu_info_service);
-        let port_range = self.config.port_range;
+        let endpoint_idx = self.get_least_used_endpoint();
         let cert = Arc::clone(&self.client_certificate);
         let max_idle_timeout = self.config.max_idle_timeout;
         let fut = ConnectingTask {
             service,
             remote_peer_identity,
-            port_range,
             cert,
             max_idle_timeout,
             connection_timeout: self.config.connecting_timeout,
             tpu_port_kind: self.config.tpu_port_kind,
-            max_local_port_binding_attempts: self.config.max_local_port_binding_attempts,
             wait_for_eviction: maybe_wait_for_eviction,
+            endpoint: self.endpoints[endpoint_idx].clone(),
         }
         .run();
         let meta = ConnectingMeta {
             remote_peer_identity,
             connection_attempt: attempt,
+            endpoint_idx,
         };
+        self.endpoints_usage[endpoint_idx]
+            .connected_remote_peers
+            .insert(remote_peer_identity);
         let abort_handle = self.connecting_tasks.spawn(fut);
         tracing::trace!(
             "Spawning connection for remote peer: {remote_peer_identity}, attempt: {attempt}"
@@ -945,6 +973,15 @@ impl TokioQuicGatewayRuntime {
         self.connecting_remote_peers
             .insert(remote_peer_identity, abort_handle.id());
         self.connecting_meta.insert(abort_handle.id(), meta);
+    }
+
+    fn get_least_used_endpoint(&mut self) -> usize {
+        self.endpoints_usage
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, usage)| usage.connected_remote_peers.len())
+            .map(|(idx, _)| idx)
+            .expect("At least one endpoint should be available")
     }
 
     ///
@@ -978,19 +1015,12 @@ impl TokioQuicGatewayRuntime {
         limits.max_streams
     }
 
-    const fn port_range_size(&self) -> usize {
-        let (from_port, to_port) = self.config.port_range;
-        // PORT RANGE IS EXCLUSIVE
-        (to_port - from_port) as usize
-    }
-
     fn has_connection_capacity(&self) -> bool {
         self.tx_worker_handle_map.len() < self.max_concurrent_connection()
     }
 
-    fn max_concurrent_connection(&self) -> usize {
-        self.port_range_size()
-            .min(self.config.max_concurrent_connections)
+    const fn max_concurrent_connection(&self) -> usize {
+        self.config.max_concurrent_connections
     }
 
     ///
@@ -1083,7 +1113,11 @@ impl TokioQuicGatewayRuntime {
                 let ConnectingMeta {
                     remote_peer_identity,
                     connection_attempt,
+                    endpoint_idx,
                 } = self.connecting_meta.remove(&task_id).unwrap();
+                self.endpoints_usage[endpoint_idx]
+                    .connected_remote_peers
+                    .remove(&remote_peer_identity);
                 let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
                 match result {
                     Ok(conn) => {
@@ -1097,21 +1131,20 @@ impl TokioQuicGatewayRuntime {
                         self.install_worker(remote_peer_identity, conn);
                     }
                     Err(connect_err) => match connect_err {
-                        ConnectingError::NoPortAvailable => {
-                            self.do_eviction_if_required();
-                            if connection_attempt >= self.config.max_connection_attempts {
-                                self.drop_peer_queued_tx(
-                                    remote_peer_identity,
-                                    TxDropReason::DropByGateway,
-                                );
-                            } else {
-                                self.spawn_connecting(remote_peer_identity, connection_attempt + 1);
-                            }
-                        }
                         ConnectingError::ConnectError(connect_error) => {
                             tracing::error!(
                                 "Failed to connect to remote peer: {remote_peer_identity}: {connect_error:?}"
                             );
+                            match connect_error {
+                                // THIS SHOULD NEVER HAPPEN.
+                                // quinn should only stop an endpoint when no reference to the underlying driver exists.
+                                // This is impossible to happen in the current implementation because the quic gateway runtime always holds a reference to the endpoint.
+                                // The only other way of stopping an endpoint is to call `quinn::Endpoint::stop()`, which is not used in the current implementation.
+                                quinn::ConnectError::EndpointStopping => panic!(
+                                    "Endpoint is stopping, cannot connect to remote peer: {remote_peer_identity}"
+                                ),
+                                _ => self.unreachable_peer(remote_peer_identity),
+                            }
                             self.unreachable_peer(remote_peer_identity);
                         }
                         ConnectingError::ConnectionError(connection_error) => {
@@ -1133,11 +1166,15 @@ impl TokioQuicGatewayRuntime {
                 let ConnectingMeta {
                     remote_peer_identity,
                     connection_attempt: _,
+                    endpoint_idx,
                 } = self
                     .connecting_meta
                     .remove(&join_err.id())
                     .expect("connecting_meta");
 
+                self.endpoints_usage[endpoint_idx]
+                    .connected_remote_peers
+                    .remove(&remote_peer_identity);
                 let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
                 tracing::error!(
                     "Join error during connecting to {remote_peer_identity:?}: {:?}",
@@ -1585,6 +1622,30 @@ impl TokioQuicGatewaySpawner {
             key: privkey,
         });
 
+        let mut endpoints = vec![];
+        let mut endpoints_usage = vec![];
+        for _ in 0..config.num_endpoints.get() {
+            let endpoint = (0..config.max_local_port_binding_attempts)
+                .find_map(|_| {
+                    let (_, client_socket) = solana_net_utils::bind_in_range(
+                        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                        config.port_range,
+                    )
+                    .ok()?;
+                    Endpoint::new(
+                        quinn::EndpointConfig::default(),
+                        None,
+                        client_socket,
+                        Arc::new(quinn::TokioRuntime),
+                    )
+                    .ok()
+                })
+                .expect("Failed to create QUIC endpoint");
+
+            endpoints.push(endpoint);
+            endpoints_usage.push(EndpointUsage::default());
+        }
+
         let gateway_runtime = TokioQuicGatewayRuntime {
             stake_info_map: self.stake_info_map.clone(),
             tx_worker_handle_map: Default::default(),
@@ -1609,6 +1670,8 @@ impl TokioQuicGatewaySpawner {
             being_evicted_peers: Default::default(),
             eviction_strategy,
             connecting_blocked_by_eviction_list: Default::default(),
+            endpoints,
+            endpoints_usage,
         };
 
         let jh = gateway_rt.spawn(gateway_runtime.run());
