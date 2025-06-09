@@ -1321,6 +1321,10 @@ impl TokioQuicGatewayRuntime {
                     "Tx worker for remote peer: {:?} completed",
                     remote_peer_identity
                 );
+
+                // It's possible that the worker failed while having pending transactions.
+                // We need to "rescue" those transactions if any and if the worker didn't fail due to fatal errors.
+
                 let tx_to_rescue = self.tx_queues.entry(remote_peer_identity).or_default();
                 while let Ok(tx) = worker_completed.rx.try_recv() {
                     tx_to_rescue.push_back(tx);
@@ -1340,9 +1344,13 @@ impl TokioQuicGatewayRuntime {
                     .is_some();
 
                 if is_peer_unreachable {
+                    // If the peer is unreachable, we drop all queued transactions for it.
                     self.unreachable_peer(remote_peer_identity);
                     metrics::jet::incr_quic_gw_connection_close_cnt();
                 } else if worker_completed.canceled {
+                    // If the worker was canceled, we drop all queued transactions for it,
+                    // because canceled workers are not expected to reconnect soon since they have been
+                    // chosen to be eviction strategy.
                     metrics::jet::incr_quic_gw_connection_close_cnt();
                     tracing::trace!(
                         "Remote peer: {} tx worker was canceled, will not reconnect",
@@ -1350,6 +1358,10 @@ impl TokioQuicGatewayRuntime {
                     );
                     self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DropByGateway);
                 } else if !tx_to_rescue.is_empty() {
+                    // If the worker didn't have a fatal error and was not evicted and still has queued transactions,
+                    // we can safely reattempt to connect to the remote peer.
+                    // This can happen to transient network errors or remote peer being temporarily unavailable.
+                    // We can safely resume connection and try to send the queued transactions.
                     tracing::trace!(
                         "Remote peer: {} has queued tx, wil reconnect",
                         remote_peer_identity
