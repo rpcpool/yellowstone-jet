@@ -24,7 +24,7 @@ use {
     yellowstone_jet::{
         quic_gateway::{
             GatewayResponse, GatewayTransaction, LeaderTpuInfoService, QuicGatewayConfig,
-            StakedBaseEvictionStrategy, TokioQuicGatewaySession, TokioQuicGatewaySpawner,
+            StakeBasedEvictionStrategy, TokioQuicGatewaySession, TokioQuicGatewaySpawner,
             TxDropReason,
         },
         stake::StakeInfoMap,
@@ -305,7 +305,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
-        Arc::new(StakedBaseEvictionStrategy),
+        Arc::new(StakeBasedEvictionStrategy::default()),
     );
 
     let rx_server_handle = tokio::spawn(async move {
@@ -369,7 +369,7 @@ async fn it_should_update_gatway_identity() {
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
-        Arc::new(StakedBaseEvictionStrategy),
+        Arc::new(StakeBasedEvictionStrategy::default()),
     );
 
     let (mut client_rx, _, _rx_server_handle) =
@@ -440,7 +440,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
-        Arc::new(StakedBaseEvictionStrategy),
+        Arc::new(StakeBasedEvictionStrategy::default()),
     );
 
     let (validator_rx1, _, _) =
@@ -533,7 +533,7 @@ async fn it_should_evict_connection() {
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
-        Arc::new(StakedBaseEvictionStrategy),
+        Arc::new(StakeBasedEvictionStrategy::default()),
     );
 
     let (validator_rx1, mut validator_conn_spy1, _) =

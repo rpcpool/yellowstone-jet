@@ -101,7 +101,7 @@ pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
 pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 pub const DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS: usize = 3;
-const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
+pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
 
 pub(crate) struct InflightMeta {
     tx_sig: Signature,
@@ -751,6 +751,7 @@ pub trait ConnectionEvictionStrategy {
     ///
     /// Arguments:
     ///
+    /// `now`: the current time, can be used by the strategy to apply grace period if it supports it.
     /// `ss_identites`: a sorted set of remote pubkeys currently connected to.
     /// `usage_table`: A lookup table from remote peer identity to last time a transaction was routed to.
     /// `evicting_masq` : a set of pubkey already schedule for evicting, may overlap with `ss_identities`.
@@ -767,6 +768,7 @@ pub trait ConnectionEvictionStrategy {
     ///
     fn plan_eviction(
         &self,
+        now: Instant,
         ss_identies: &StakeSortedPeerSet,
         usage_table: &HashMap<Pubkey, Instant>,
         evicting_masq: &HashSet<Pubkey>,
@@ -817,11 +819,26 @@ impl StakeSortedPeerSet {
     }
 }
 
-pub struct StakedBaseEvictionStrategy;
+#[derive(Debug)]
+pub struct StakeBasedEvictionStrategy {
+    ///
+    /// The duration of inactivity after which a remote peer is considered elligible for eviction.
+    ///
+    pub peer_idle_eviction_grace_period: Duration,
+}
 
-impl ConnectionEvictionStrategy for StakedBaseEvictionStrategy {
+impl Default for StakeBasedEvictionStrategy {
+    fn default() -> Self {
+        Self {
+            peer_idle_eviction_grace_period: DEFAULT_LEADER_DURATION,
+        }
+    }
+}
+
+impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
     fn plan_eviction(
         &self,
+        now: Instant,
         ss_identies: &StakeSortedPeerSet,
         usage_table: &HashMap<Pubkey, Instant>,
         already_evicting: &HashSet<Pubkey>,
@@ -838,8 +855,9 @@ impl ConnectionEvictionStrategy for StakedBaseEvictionStrategy {
             .iter()
             .filter(|(_, peer)| !already_evicting.contains(peer))
             .filter(|(_, peer)| {
-                let elapsed = usage_table.get(peer).expect("missing last activity");
-                elapsed.elapsed() >= DEFAULT_LEADER_DURATION
+                let last_usage = usage_table.get(peer).expect("missing last activity");
+                let elapsed = now.saturating_duration_since(*last_usage);
+                elapsed >= self.peer_idle_eviction_grace_period
             })
             .take(plan_ahead_size)
             .map(|(_, peer)| peer)
@@ -1042,6 +1060,7 @@ impl TokioQuicGatewayRuntime {
             return;
         }
         let eviction_plan = self.eviction_strategy.plan_eviction(
+            Instant::now(),
             &self.active_staked_sorted_remote_peer,
             &self.last_peer_activity,
             &self.being_evicted_peers,
@@ -1275,7 +1294,7 @@ impl TokioQuicGatewayRuntime {
     }
 
     ///
-    /// One of the transaction sender worker has completed its work.
+    /// One of the transaction sender worker has completed its work or failed.
     ///
     fn handle_worker_result(&mut self, result: Result<(Id, TxSenderWorkerCompleted), JoinError>) {
         match result {
@@ -1297,6 +1316,7 @@ impl TokioQuicGatewayRuntime {
                     .expect("tx worker sender");
                 self.last_peer_activity.remove(&remote_peer_identity);
                 drop(worker_tx);
+
                 tracing::trace!(
                     "Tx worker for remote peer: {:?} completed",
                     remote_peer_identity
@@ -1604,7 +1624,7 @@ impl TokioQuicGatewaySpawner {
         self.spawn(
             identity,
             Default::default(),
-            Arc::new(StakedBaseEvictionStrategy),
+            Arc::new(StakeBasedEvictionStrategy::default()),
         )
     }
 
@@ -1865,5 +1885,125 @@ mod test {
 
         let actual = set.iter().count();
         assert_eq!(actual, 0);
+    }
+}
+
+#[cfg(test)]
+mod stake_based_eviction_strategy_test {
+    use {
+        crate::quic_gateway::{ConnectionEvictionStrategy, StakeSortedPeerSet},
+        solana_sdk::pubkey::Pubkey,
+        std::time::{Duration, Instant},
+    };
+
+    #[test]
+    fn it_should_evict_lowest_stake_peer() {
+        let strategy = super::StakeBasedEvictionStrategy {
+            // We put no grace period for this test.
+            peer_idle_eviction_grace_period: Duration::ZERO,
+        };
+
+        let mut active_staked_sorted_remote_peer = StakeSortedPeerSet::default();
+        let mut last_peer_activity = std::collections::HashMap::new();
+
+        let peer1 = Pubkey::new_unique();
+        let peer2 = Pubkey::new_unique();
+        let peer3 = Pubkey::new_unique();
+
+        active_staked_sorted_remote_peer.insert(peer1, 100);
+        active_staked_sorted_remote_peer.insert(peer2, 50);
+        active_staked_sorted_remote_peer.insert(peer3, 10);
+
+        last_peer_activity.insert(peer1, std::time::Instant::now());
+        last_peer_activity.insert(peer2, std::time::Instant::now());
+        last_peer_activity.insert(peer3, std::time::Instant::now());
+
+        let eviction_plan = strategy.plan_eviction(
+            Instant::now(),
+            &active_staked_sorted_remote_peer,
+            &last_peer_activity,
+            &Default::default(), // max connections to evict
+            1,
+        );
+        // It should propose to evict the lowest staked peer
+        assert_eq!(eviction_plan.len(), 1);
+        assert!(eviction_plan.contains(&peer3));
+    }
+
+    #[test]
+    fn it_should_take_into_account_usage_grace_period() {
+        let now = Instant::now();
+        let grace_period = Duration::from_secs(1);
+        let strategy = super::StakeBasedEvictionStrategy {
+            // We put no grace period for this test.
+            peer_idle_eviction_grace_period: grace_period,
+        };
+
+        let mut active_staked_sorted_remote_peer = StakeSortedPeerSet::default();
+        let mut last_peer_activity = std::collections::HashMap::new();
+
+        let peer1 = Pubkey::new_unique();
+        let peer2 = Pubkey::new_unique();
+        let peer3 = Pubkey::new_unique();
+
+        active_staked_sorted_remote_peer.insert(peer1, 100);
+        active_staked_sorted_remote_peer.insert(peer2, 50);
+        active_staked_sorted_remote_peer.insert(peer3, 10);
+
+        last_peer_activity.insert(peer1, now - grace_period);
+        last_peer_activity.insert(peer2, now - grace_period);
+        // Lets make the lowest staked peer seems recently active.
+        // this should prevent it from being evicted.
+        last_peer_activity.insert(peer3, now);
+
+        let eviction_plan = strategy.plan_eviction(
+            now,
+            &active_staked_sorted_remote_peer,
+            &last_peer_activity,
+            &Default::default(), // max connections to evict
+            1,
+        );
+        // It should propose to evict the 2nd lowest staked peer
+        // Since the `peer3` has been used recently.
+        tracing::trace!("Eviction plan: {:?}", eviction_plan);
+        assert_eq!(eviction_plan.len(), 1);
+        assert!(eviction_plan.contains(&peer2));
+    }
+
+    #[test]
+    fn it_should_pick_lowest_stake_peer_if_all_peers_have_been_recently_used() {
+        let now = Instant::now();
+        let grace_period = Duration::from_secs(100);
+        let strategy = super::StakeBasedEvictionStrategy {
+            // We put no grace period for this test.
+            peer_idle_eviction_grace_period: grace_period,
+        };
+
+        let mut active_staked_sorted_remote_peer = StakeSortedPeerSet::default();
+        let mut last_peer_activity = std::collections::HashMap::new();
+
+        let peer1 = Pubkey::new_unique();
+        let peer2 = Pubkey::new_unique();
+        let peer3 = Pubkey::new_unique();
+
+        active_staked_sorted_remote_peer.insert(peer1, 100);
+        active_staked_sorted_remote_peer.insert(peer2, 50);
+        active_staked_sorted_remote_peer.insert(peer3, 10);
+
+        // Sets all peers as recently used
+        last_peer_activity.insert(peer1, now);
+        last_peer_activity.insert(peer2, now);
+        last_peer_activity.insert(peer3, now);
+
+        let eviction_plan = strategy.plan_eviction(
+            Instant::now(),
+            &active_staked_sorted_remote_peer,
+            &last_peer_activity,
+            &Default::default(), // max connections to evict
+            1,
+        );
+        // It should propose to evict the lowest staked peer
+        assert_eq!(eviction_plan.len(), 1);
+        assert!(eviction_plan.contains(&peer3));
     }
 }
