@@ -1,3 +1,6 @@
+// main.rs
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
@@ -57,6 +60,10 @@ use {
     },
     yellowstone_shield_store::{BuiltPolicyStore, PolicyStoreBuilder},
 };
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Debug, Parser)]
 #[clap(author, version, about)]

@@ -191,6 +191,7 @@ struct ConnectingMeta {
     remote_peer_identity: Pubkey,
     connection_attempt: usize,
     endpoint_idx: usize,
+    created_at: Instant,
 }
 
 ///
@@ -219,6 +220,7 @@ enum TokioGateawyTaskMeta {
 }
 
 struct TxWorkerSenderHandle {
+    remote_peer_identity: Pubkey,
     sender: mpsc::Sender<GatewayTransaction>,
     cancel_notify: Arc<Notify>,
 }
@@ -962,6 +964,7 @@ impl TokioQuicGatewayRuntime {
             remote_peer_identity,
             connection_attempt: attempt,
             endpoint_idx,
+            created_at: Instant::now(),
         };
         self.endpoints_usage[endpoint_idx]
             .connected_remote_peers
@@ -1038,7 +1041,6 @@ impl TokioQuicGatewayRuntime {
         if eviction_count_required == 0 {
             return;
         }
-
         let eviction_plan = self.eviction_strategy.plan_eviction(
             &self.active_staked_sorted_remote_peer,
             &self.last_peer_activity,
@@ -1046,13 +1048,14 @@ impl TokioQuicGatewayRuntime {
             eviction_count_required,
         );
         tracing::trace!("Planned {} evictions", eviction_plan.len());
-        for peer in eviction_plan {
-            if let Some(handle) = self.tx_worker_handle_map.get(&peer) {
-                // Notify the worker to gracefully drop the connection.
+        eviction_plan
+            .into_iter()
+            .flat_map(|peer| self.tx_worker_handle_map.get(&peer))
+            .for_each(|handle| {
                 handle.cancel_notify.notify_one();
-                self.being_evicted_peers.insert(peer);
-            }
-        }
+                metrics::jet::incr_quic_gw_total_connection_evictions_cnt(1);
+                self.being_evicted_peers.insert(handle.remote_peer_identity);
+            });
     }
 
     ///
@@ -1084,6 +1087,7 @@ impl TokioQuicGatewayRuntime {
         let worker_fut = worker.run();
         let ah = self.tx_worker_set.spawn_on(worker_fut, &self.tx_worker_rt);
         let handle = TxWorkerSenderHandle {
+            remote_peer_identity,
             sender: tx,
             cancel_notify,
         };
@@ -1114,7 +1118,9 @@ impl TokioQuicGatewayRuntime {
                     remote_peer_identity,
                     connection_attempt,
                     endpoint_idx,
+                    created_at,
                 } = self.connecting_meta.remove(&task_id).unwrap();
+                metrics::jet::observe_quic_gw_connection_time(created_at.elapsed());
                 self.endpoints_usage[endpoint_idx]
                     .connected_remote_peers
                     .remove(&remote_peer_identity);
@@ -1129,44 +1135,42 @@ impl TokioQuicGatewayRuntime {
                         self.active_staked_sorted_remote_peer
                             .insert(remote_peer_identity, remote_peer_stake);
                         self.install_worker(remote_peer_identity, conn);
+                        metrics::jet::incr_quic_gw_connection_success_cnt();
                     }
-                    Err(connect_err) => match connect_err {
-                        ConnectingError::ConnectError(connect_error) => {
-                            tracing::error!(
-                                "Failed to connect to remote peer: {remote_peer_identity}: {connect_error:?}"
-                            );
-                            match connect_error {
-                                // THIS SHOULD NEVER HAPPEN.
-                                // quinn should only stop an endpoint when no reference to the underlying driver exists.
-                                // This is impossible to happen in the current implementation because the quic gateway runtime always holds a reference to the endpoint.
-                                // The only other way of stopping an endpoint is to call `quinn::Endpoint::stop()`, which is not used in the current implementation.
-                                quinn::ConnectError::EndpointStopping => panic!(
+                    Err(connect_err) => {
+                        metrics::jet::incr_quic_gw_connection_failure_cnt();
+                        match connect_err {
+                            ConnectingError::ConnectError(
+                                quinn::ConnectError::EndpointStopping,
+                            ) => {
+                                // This should never happen, but if it does, we panic.
+                                // The endpoint is stopping, so we cannot connect to the remote peer.
+                                panic!(
                                     "Endpoint is stopping, cannot connect to remote peer: {remote_peer_identity}"
-                                ),
-                                _ => self.unreachable_peer(remote_peer_identity),
+                                );
                             }
-                            self.unreachable_peer(remote_peer_identity);
-                        }
-                        ConnectingError::ConnectionError(connection_error) => {
-                            tracing::error!("Connection error: {:?}", connection_error);
-                            if connection_attempt < self.config.max_connection_attempts {
+                            ConnectingError::ConnectionError(_)
+                                if connection_attempt < self.config.max_connection_attempts =>
+                            {
                                 self.spawn_connecting(remote_peer_identity, connection_attempt + 1);
-                            } else {
+                            }
+                            whatever => {
+                                tracing::error!(
+                                    "Failed to connect to remote peer: {remote_peer_identity}: {whatever:?}"
+                                );
                                 self.unreachable_peer(remote_peer_identity);
                             }
                         }
-                        ConnectingError::PeerNotInLeaderSchedule => {
-                            tracing::warn!("Connection to remote peer not in leader schedule");
-                            self.unreachable_peer(remote_peer_identity);
-                        }
-                    },
+                    }
                 }
             }
             Err(join_err) => {
+                metrics::jet::incr_quic_gw_connection_failure_cnt();
                 let ConnectingMeta {
                     remote_peer_identity,
                     connection_attempt: _,
                     endpoint_idx,
+                    created_at: _,
                 } = self
                     .connecting_meta
                     .remove(&join_err.id())
@@ -1198,6 +1202,7 @@ impl TokioQuicGatewayRuntime {
         // Do I have a transaction sender worker for this remote peer?
         if let Some(handle) = self.tx_worker_handle_map.get(&remote_peer_identity) {
             // If we have an active transaction sender worker for the remote peer,
+            metrics::jet::incr_quic_gw_tx_connection_cache_hit_cnt();
             match handle.sender.try_send(tx) {
                 Ok(_) => {
                     tracing::trace!("{tx_id} sent to worker");
@@ -1226,6 +1231,7 @@ impl TokioQuicGatewayRuntime {
                 },
             }
         } else {
+            metrics::jet::incr_quic_gw_tx_connection_cache_miss_cnt();
             // We don't have any active transaction sender worker for the remote peer,
             // we need to queue the transaction and try to spawn a new connection.
             self.tx_queues
@@ -1246,20 +1252,17 @@ impl TokioQuicGatewayRuntime {
     }
 
     fn unblock_eviction_waiting_connection(&mut self) {
-        loop {
-            let Some(we) = self.connecting_blocked_by_eviction_list.pop_front() else {
-                break;
-            };
-            let WaitingEviction {
-                remote_peer_identity,
-                notify,
-            } = we;
+        while let Some(WaitingEviction {
+            remote_peer_identity,
+            notify,
+        }) = self.connecting_blocked_by_eviction_list.pop_front()
+        {
             notify.notify_one();
-            // If for some reason we are not connecting to this remote peer anymore,
-            // we can do another loop and unblock another waiting connection.
+
+            // If we are still trying to connect to this peer, stop unblocking more.
             if self
                 .connecting_remote_peers
-                .contains_key(&we.remote_peer_identity)
+                .contains_key(&remote_peer_identity)
             {
                 tracing::trace!(
                     "Unblocked waiting connection for remote peer: {}",
@@ -1267,6 +1270,7 @@ impl TokioQuicGatewayRuntime {
                 );
                 break;
             }
+            // Else continue the loop to unblock the next waiting connection.
         }
     }
 
@@ -1317,7 +1321,9 @@ impl TokioQuicGatewayRuntime {
 
                 if is_peer_unreachable {
                     self.unreachable_peer(remote_peer_identity);
+                    metrics::jet::incr_quic_gw_connection_close_cnt();
                 } else if worker_completed.canceled {
+                    metrics::jet::incr_quic_gw_connection_close_cnt();
                     tracing::trace!(
                         "Remote peer: {} tx worker was canceled, will not reconnect",
                         remote_peer_identity
@@ -1342,6 +1348,7 @@ impl TokioQuicGatewayRuntime {
                 if self.being_evicted_peers.remove(&remote_peer_identity) {
                     self.unblock_eviction_waiting_connection();
                 }
+                metrics::jet::incr_quic_gw_connection_close_cnt();
                 self.active_staked_sorted_remote_peer
                     .remove(&remote_peer_identity);
                 let worker_tx = self
@@ -1506,11 +1513,21 @@ impl TokioQuicGatewayRuntime {
         }
     }
 
+    fn update_prom_metrics(&self) {
+        let num_active_workers = self.tx_worker_handle_map.len();
+        let num_connecting_tasks = self.connecting_tasks.len();
+        let num_queued_tx = self.tx_queues.values().map(|q| q.len()).sum::<usize>();
+        metrics::jet::set_quic_gw_active_connection_cnt(num_active_workers);
+        metrics::jet::set_quic_gw_connecting_cnt(num_connecting_tasks);
+        metrics::jet::set_quic_gw_ongoing_evictions_cnt(self.being_evicted_peers.len());
+        metrics::jet::set_quic_gw_tx_blocked_by_connecting_cnt(num_queued_tx);
+    }
+
     pub async fn run(mut self) {
         metrics::jet::quic_set_identity(self.identity.pubkey());
         loop {
             self.do_eviction_if_required();
-
+            self.update_prom_metrics();
             tokio::select! {
                 maybe = self.tx_inlet.recv() => {
                     match maybe {

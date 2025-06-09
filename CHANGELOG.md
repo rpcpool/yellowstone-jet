@@ -22,6 +22,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 - Remove retry logic when `relay_mode` is set to `true`.
 - Removed `quic.rs` and `quic_solana` modules.
 - Refactored `transactions.rs` with simpler retry logic and sending logic.
+- Switched to Jemalloc for Global memory allocator
 
 ## [12.0.1]
 
