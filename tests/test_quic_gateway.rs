@@ -3,7 +3,7 @@ mod testkit;
 use {
     crate::testkit::find_available_port,
     bytes::Bytes,
-    quinn::ConnectionError,
+    quinn::{ConnectionError, VarInt},
     solana_sdk::{
         pubkey::Pubkey,
         signature::{Keypair, Signature},
@@ -610,4 +610,79 @@ async fn it_should_evict_connection() {
 
     assert!(conn_end.result.is_err(), "connection should be evicted");
     assert_eq!(conn_end.remote_pubkey, gateway_kp.pubkey());
+}
+
+#[tokio::test]
+async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
+    let rx_server_addr = generate_random_local_addr();
+    let rx_server_identity = Keypair::new();
+
+    // Here's the challenging when testing network error with quinn:
+    // Writing to a uni-stream returns success if the the write has been flushed to the internal quinn buffer,
+    // not the actual wire.
+    // Also, even if you write it to the wire, it does not guarantee that the remote peer has received it, if for example,
+    // the remote peer closed the uni stream right after it opened it.
+    // If we send a too little payload, even if the remote peer closed the uni stream, it will not trigger a connection lost,
+    // because quinn will be so fast that it will send the payload before the remote peer closes the stream.
+    let huge_payload = Bytes::from(vec![0u8; 1024 * 1024 * 100]); // 100MB payload 
+    let gateway_kp = Keypair::new();
+    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let fake_tpu_info_service =
+        FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+
+    let gateway_spawner = TokioQuicGatewaySpawner {
+        stake_info_map,
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        gateway_tx_channel_capacity: 100,
+    };
+    const MAX_CONN_ATTEMPT: usize = 3;
+    let gateway_config = QuicGatewayConfig {
+        max_connection_attempts: 1,
+        max_send_attempt: MAX_CONN_ATTEMPT,
+        ..Default::default()
+    };
+    let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
+
+    let TokioQuicGatewaySession {
+        gateway_identity_updater: _,
+        gateway_tx_sink: transaction_sink,
+        mut gateway_response_source,
+        gateway_join_handle: _,
+    } = gateway_spawner.spawn(
+        gateway_kp.insecure_clone(),
+        gateway_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+    );
+
+    let rx_server_handle = tokio::spawn(async move {
+        let connecting = rx_server_endpoint.accept().await.expect("accept");
+        let conn = connecting.await.expect("quinn connection");
+        for _ in 0..MAX_CONN_ATTEMPT {
+            // Simulate a connection lost by dropping the connection
+            let mut uni = conn.accept_uni().await.expect("accept uni");
+            let _ = uni.stop(VarInt::from_u32(0));
+            drop(uni);
+        }
+    });
+
+    let tx_sig = Signature::new_unique();
+    transaction_sink
+        .send(GatewayTransaction {
+            tx_sig,
+            wire: huge_payload,
+            remote_peer: rx_server_identity.pubkey(),
+        })
+        .await
+        .expect("send tx");
+
+    // This handle should return after MAX_CONN_ATTEMPT attempts
+    let _ = rx_server_handle.await;
+
+    let resp = gateway_response_source.recv().await.expect("recv response");
+
+    let GatewayResponse::TxFailed(actual_resp) = resp else {
+        panic!("Expected GatewayResponse::TxSent, got something {resp:?}");
+    };
+
+    assert_eq!(actual_resp.tx_sig, tx_sig);
 }

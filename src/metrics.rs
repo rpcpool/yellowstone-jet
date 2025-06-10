@@ -120,7 +120,7 @@ pub mod jet {
         static ref QUIC_IDENTITY_EXPECTED: IntGaugeVec = IntGaugeVec::new(Opts::new("quic_identity_expected", "Expected QUIC identity"), &["identity"]).unwrap();
         static ref QUIC_SEND_ATTEMPTS: IntCounterVec = IntCounterVec::new(
             Opts::new("quic_send_attempts", "Status of sending transactions with QUIC"),
-            &["leader", "address", "status", "failure_message"]
+            &["leader", "address", "status"]
         ).unwrap();
 
         static ref QUIC_IDENTITY_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);

@@ -105,10 +105,11 @@ pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 pub const DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS: usize = 3;
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
+pub const DEFAULT_MAX_SEND_ATTEMPT: usize = 3;
 
 pub(crate) struct InflightMeta {
-    tx_sig: Signature,
     prior_inflight_load: usize,
+    tx: GatewayTransaction,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -165,6 +166,13 @@ pub struct QuicGatewayConfig {
     /// Recommanded try 1 endpoint per 8 CPU cores dedicated to jet.
     ///
     pub num_endpoints: NonZeroUsize,
+
+    ///
+    /// Maximum number of consecutive transaction sending attempts to a remote peer.
+    /// Attempt may fail due to connection losts, stream limit exceeded, etc.
+    /// It might be useful to retry sending a transaction at least 2-3 times before giving up.
+    ///
+    pub max_send_attempt: usize,
 }
 
 impl Default for QuicGatewayConfig {
@@ -179,6 +187,7 @@ impl Default for QuicGatewayConfig {
             max_local_port_binding_attempts: DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS,
             tpu_port_kind: ConfigQuicTpuPort::default(),
             num_endpoints: DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT,
+            max_send_attempt: DEFAULT_MAX_SEND_ATTEMPT,
         }
     }
 }
@@ -364,7 +373,7 @@ impl LeaderTpuInfoService for ClusterTpuInfo {
 ///
 /// A transaction with destination details to be sent to a remote peer.
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GatewayTransaction {
     /// Id set by the sender to identify the transaction. Only meaningful to the sender.
     pub tx_sig: Signature,
@@ -518,6 +527,8 @@ struct QuicTxSenderWorker {
     output_tx: mpsc::UnboundedSender<GatewayResponse>,
     tx_queue: VecDeque<GatewayTransaction>,
     cancel_notify: Arc<Notify>,
+    tx_attempt_map: HashMap<Signature, usize>,
+    max_tx_attempt: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -538,13 +549,20 @@ struct TxSenderWorkerCompleted {
 impl QuicTxSenderWorker {
     fn spawn_tx(&mut self, tx: GatewayTransaction) {
         let total_inflight_before = self.inflight_send.len();
+        let attempt = *self
+            .tx_attempt_map
+            .entry(tx.tx_sig)
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        tracing::trace!("Spawning tx: {} attempt: {}", tx.tx_sig, attempt);
+
         assert!(
             self.inflight_send.len() < self.max_stream_limit as usize,
             "inflight_send limit reached"
         );
         let remote_peer_identity = tx.remote_peer;
-        let tx_sig = tx.tx_sig;
         let conn = Arc::clone(&self.connection);
+        let tx_clone = tx.clone();
         metrics::jet::incr_send_tx_attempt(remote_peer_identity);
         let fut = async move {
             let t = Instant::now();
@@ -574,8 +592,8 @@ impl QuicTxSenderWorker {
             remote_peer_identity,
         );
         let meta = InflightMeta {
-            tx_sig,
             prior_inflight_load: total_inflight_before,
+            tx: tx_clone,
         };
         self.inflight_send_meta.insert(abort_handle.id(), meta);
     }
@@ -587,9 +605,15 @@ impl QuicTxSenderWorker {
         match result {
             Ok((task_id, result)) => {
                 let InflightMeta {
-                    tx_sig,
                     prior_inflight_load,
+                    tx,
                 } = self.inflight_send_meta.remove(&task_id).unwrap();
+                let tx_sig = tx.tx_sig;
+                let attempt = self
+                    .tx_attempt_map
+                    .get(&tx_sig)
+                    .cloned()
+                    .expect("tx attempt map should have entry for tx_sig");
                 match result {
                     Ok(sent_ok) => {
                         tracing::debug!(
@@ -601,6 +625,7 @@ impl QuicTxSenderWorker {
                             remote_peer_identity: self.remote_peer,
                             tx_sig,
                         };
+                        self.tx_attempt_map.remove(&tx_sig);
                         let _ = self.output_tx.send(GatewayResponse::TxSent(resp));
                         observe_send_transaction_e2e_latency(self.remote_peer, sent_ok.e2e_time);
                         let path_stats = self.connection.stats().path;
@@ -616,10 +641,9 @@ impl QuicTxSenderWorker {
                             remote_peer_identity: self.remote_peer,
                             tx_sig,
                         };
-                        let _ = self.output_tx.send(GatewayResponse::TxFailed(resp));
                         let remote_addr = self.connection.remote_address();
                         quic_send_attempts_inc(self.remote_peer, remote_addr, "error");
-                        match send_err {
+                        let result = match send_err {
                             SendTxError::ConnectionError(connection_error) => {
                                 if let ConnectionError::TransportError(TransportError {
                                     code,
@@ -646,7 +670,7 @@ impl QuicTxSenderWorker {
                             }
                             SendTxError::StreamStopped(_) | SendTxError::StreamClosed => {
                                 tracing::trace!(
-                                    "Stream stopped or closed for tx: {:.10} to remote peer: {:?}",
+                                    "Stream stopped or closed for tx: {} to remote peer: {}",
                                     tx_sig,
                                     self.remote_peer
                                 );
@@ -654,13 +678,21 @@ impl QuicTxSenderWorker {
                             }
                             SendTxError::ZeroRttRejected => {
                                 tracing::warn!(
-                                    "0-RTT rejected by remote peer: {:?} for tx: {:.10}",
+                                    "0-RTT rejected by remote peer: {} for tx: {}",
                                     self.remote_peer,
                                     tx_sig
                                 );
                                 Err(TxSenderWorkerError::ZeroRttRejected)
                             }
+                        };
+
+                        if attempt >= self.max_tx_attempt {
+                            let _ = self.output_tx.send(GatewayResponse::TxFailed(resp));
+                            self.tx_attempt_map.remove(&tx_sig);
+                        } else {
+                            self.tx_queue.push_back(tx);
                         }
+                        result
                     }
                 }
             }
@@ -672,10 +704,11 @@ impl QuicTxSenderWorker {
                     .remove(&join_err.id())
                     .expect("inflight_meta");
                 let InflightMeta {
-                    tx_sig,
                     prior_inflight_load: _,
+                    tx,
                 } = inflight_meta;
-
+                let tx_sig = tx.tx_sig;
+                self.tx_attempt_map.remove(&tx_sig);
                 let resp = GatewayTxFailed {
                     remote_peer_identity: self.remote_peer,
                     tx_sig,
@@ -1109,6 +1142,8 @@ impl TokioQuicGatewayRuntime {
                 .remove(&remote_peer_identity)
                 .unwrap_or_default(),
             cancel_notify: Arc::clone(&cancel_notify),
+            tx_attempt_map: Default::default(),
+            max_tx_attempt: self.config.max_send_attempt,
         };
 
         let worker_fut = worker.run();
