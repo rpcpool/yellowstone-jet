@@ -49,7 +49,10 @@ use {
         identity::JetIdentitySyncMember,
         metrics::{
             self,
-            jet::{observe_leader_rtt, observe_send_transaction_e2e_latency, set_leader_mtu},
+            jet::{
+                observe_leader_rtt, observe_send_transaction_e2e_latency, quic_send_attempts_inc,
+                set_leader_mtu,
+            },
         },
         stake::StakeInfoMap,
     },
@@ -599,12 +602,13 @@ impl QuicTxSenderWorker {
                             tx_sig,
                         };
                         let _ = self.output_tx.send(GatewayResponse::TxSent(resp));
-                        metrics::jet::sts_tpu_send_inc(self.remote_peer);
                         observe_send_transaction_e2e_latency(self.remote_peer, sent_ok.e2e_time);
                         let path_stats = self.connection.stats().path;
                         let current_mut = path_stats.current_mtu;
                         set_leader_mtu(self.remote_peer, current_mut);
                         observe_leader_rtt(self.remote_peer, path_stats.rtt);
+                        let remote_addr = self.connection.remote_address();
+                        quic_send_attempts_inc(self.remote_peer, remote_addr, "success");
                         Ok(())
                     }
                     Err(send_err) => {
@@ -613,6 +617,8 @@ impl QuicTxSenderWorker {
                             tx_sig,
                         };
                         let _ = self.output_tx.send(GatewayResponse::TxFailed(resp));
+                        let remote_addr = self.connection.remote_address();
+                        quic_send_attempts_inc(self.remote_peer, remote_addr, "error");
                         match send_err {
                             SendTxError::ConnectionError(connection_error) => {
                                 if let ConnectionError::TransportError(TransportError {
@@ -659,6 +665,8 @@ impl QuicTxSenderWorker {
                 }
             }
             Err(join_err) => {
+                let remote_addr = self.connection.remote_address();
+                quic_send_attempts_inc(self.remote_peer, remote_addr, "error");
                 let inflight_meta = self
                     .inflight_send_meta
                     .remove(&join_err.id())

@@ -113,12 +113,6 @@ pub mod jet {
         static ref STS_INFLIGHT_SIZE: IntGauge = IntGauge::new("sts_inflight_size", "Number of transactions sending right now").unwrap();
         static ref STS_RECEIVED_TOTAL: IntCounter = IntCounter::new("sts_received_total", "Total number of received transactions").unwrap();
         static ref STS_LANDED_TOTAL: IntCounter = IntCounter::new("sts_landed_total", "Total number of landed transactions").unwrap();
-        // TODO we should rename this to "tpu_send_total" since STS was an syntax error in the first place and we don't have a send-transaction-pool anymore.
-        // But we can't do it now since it will break the metrics dashboard.
-        static ref STS_TPU_SEND: IntCounterVec = IntCounterVec::new(
-            Opts::new("sts_tpu_send_total", "Number of transactions sent to TPU"),
-            &["leaders"]
-        ).unwrap();
         // TODO we should rename this in another version of jet.
         static ref STS_TPU_DENIED_TOTAL: IntCounter = IntCounter::new("sts_tpu_denied_total", "Total number of denied TPUs by Shield policy").unwrap();
 
@@ -333,7 +327,6 @@ pub mod jet {
             register!(STS_POOL_SIZE);
             register!(STS_RECEIVED_TOTAL);
             register!(STS_TPU_DENIED_TOTAL);
-            register!(STS_TPU_SEND);
             register!(TRANSACTION_DECODE_ERRORS);
             register!(TRANSACTION_DESERIALIZE_ERRORS);
 
@@ -501,12 +494,6 @@ pub mod jet {
         STS_LANDED_TOTAL.inc();
     }
 
-    pub fn sts_tpu_send_inc(leader: Pubkey) {
-        STS_TPU_SEND
-            .with_label_values(&[leader.to_string().as_str()])
-            .inc();
-    }
-
     pub fn sts_tpu_denied_inc_by(denied: usize) {
         STS_TPU_DENIED_TOTAL.inc_by(denied as u64);
     }
@@ -531,20 +518,9 @@ pub mod jet {
         *QUIC_IDENTITY_EXPECTED_VALUE.lock().unwrap() = Some(identity);
     }
 
-    #[deprecated]
-    pub fn quic_send_attempts_inc(
-        leader: &Pubkey,
-        address: &SocketAddr,
-        status: &str,
-        failure_message: &str,
-    ) {
+    pub fn quic_send_attempts_inc(leader: Pubkey, address: SocketAddr, status: &str) {
         QUIC_SEND_ATTEMPTS
-            .with_label_values(&[
-                &leader.to_string(),
-                &address.to_string(),
-                status,
-                failure_message,
-            ])
+            .with_label_values(&[&leader.to_string(), &address.to_string(), status])
             .inc();
     }
 
