@@ -1,7 +1,7 @@
 mod testkit;
 
 use {
-    crate::testkit::find_available_port,
+    crate::testkit::{build_validator_quic_tpu_endpoint, find_available_port},
     bytes::Bytes,
     quinn::{ConnectionError, VarInt},
     solana_sdk::{
@@ -14,6 +14,7 @@ use {
         collections::HashMap,
         net::SocketAddr,
         sync::{Arc, RwLock as StdRwLock},
+        time::Duration,
     },
     testkit::{build_random_endpoint, generate_random_local_addr},
     tokio::{
@@ -43,6 +44,11 @@ impl FakeLeaderTpuInfoService {
     {
         let shared = Arc::new(StdRwLock::new(HashMap::from_iter(it)));
         Self { shared }
+    }
+
+    fn update_addr(&self, leader_pubkey: Pubkey, addr: SocketAddr) {
+        let mut shared = self.shared.write().expect("write lock");
+        shared.insert(leader_pubkey, addr);
     }
 }
 
@@ -81,14 +87,14 @@ struct MockConnectionEnd {
 
 impl MockedRemoteValidator {
     fn spawn(
-        _pubkey: Pubkey,
+        kp: Keypair,
         addr: SocketAddr,
     ) -> (
         mpsc::Receiver<MockReceipt>,
         mpsc::Receiver<MockConnectionEnd>,
         JoinHandle<()>,
     ) {
-        let endpoint = build_random_endpoint(addr).0;
+        let endpoint = build_validator_quic_tpu_endpoint(&kp, addr);
         let (client_tx, client_rx) = mpsc::channel(100);
         let (connection_spy_tx, connection_spy_rx) = mpsc::channel(100);
         let client_tx2 = client_tx.clone();
@@ -185,7 +191,7 @@ async fn send_buffer_should_land_properly() {
     } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
 
     let (mut client_rx, _, _rx_server_handle) =
-        MockedRemoteValidator::spawn(rx_server_identity.pubkey(), rx_server_addr);
+        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), rx_server_addr);
     let tx_sig = Signature::new_unique();
     transaction_sink
         .send(GatewayTransaction {
@@ -240,7 +246,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
     const MAX_TX: u64 = 5;
 
     let (mut client_rx, _, _rx_server_handle) =
-        MockedRemoteValidator::spawn(rx_server_identity.pubkey(), rx_server_addr);
+        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), rx_server_addr);
 
     let tx_sig_vec = (0..MAX_TX)
         .map(|_| Signature::new_unique())
@@ -373,7 +379,7 @@ async fn it_should_update_gatway_identity() {
     );
 
     let (mut client_rx, _, _rx_server_handle) =
-        MockedRemoteValidator::spawn(rx_server_identity.pubkey(), rx_server_addr);
+        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), rx_server_addr);
 
     transaction_sink
         .send(GatewayTransaction {
@@ -443,11 +449,15 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         Arc::new(StakeBasedEvictionStrategy::default()),
     );
 
-    let (validator_rx1, _, _) =
-        MockedRemoteValidator::spawn(remote_validator_identity1.pubkey(), remote_validator_addr1);
+    let (validator_rx1, _, _) = MockedRemoteValidator::spawn(
+        remote_validator_identity1.insecure_clone(),
+        remote_validator_addr1,
+    );
 
-    let (validator_rx2, _, _) =
-        MockedRemoteValidator::spawn(remote_validator_identity2.pubkey(), remote_validator_addr2);
+    let (validator_rx2, _, _) = MockedRemoteValidator::spawn(
+        remote_validator_identity2.insecure_clone(),
+        remote_validator_addr2,
+    );
 
     let mut stream_map = StreamMap::new();
 
@@ -536,11 +546,15 @@ async fn it_should_evict_connection() {
         Arc::new(StakeBasedEvictionStrategy::default()),
     );
 
-    let (validator_rx1, mut validator_conn_spy1, _) =
-        MockedRemoteValidator::spawn(remote_validator_identity1.pubkey(), remote_validator_addr1);
+    let (validator_rx1, mut validator_conn_spy1, _) = MockedRemoteValidator::spawn(
+        remote_validator_identity1.insecure_clone(),
+        remote_validator_addr1,
+    );
 
-    let (validator_rx2, mut validator_conn_spy2, _) =
-        MockedRemoteValidator::spawn(remote_validator_identity2.pubkey(), remote_validator_addr2);
+    let (validator_rx2, mut validator_conn_spy2, _) = MockedRemoteValidator::spawn(
+        remote_validator_identity2.insecure_clone(),
+        remote_validator_addr2,
+    );
 
     let mut stream_map = StreamMap::new();
 
@@ -685,4 +699,91 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     };
 
     assert_eq!(actual_resp.tx_sig, tx_sig);
+}
+
+#[tokio::test]
+async fn it_should_detect_remote_peer_address_change() {
+    let rx_server_addr = generate_random_local_addr();
+    let rx_server_identity = Keypair::new();
+
+    let gateway_kp = Keypair::new();
+    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let fake_tpu_info_service =
+        FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+
+    let gateway_spawner = TokioQuicGatewaySpawner {
+        stake_info_map,
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        gateway_tx_channel_capacity: 100,
+    };
+
+    let gateway_config = QuicGatewayConfig {
+        // Keep it small so test runs fast.
+        remote_peer_addr_watch_interval: Duration::from_millis(10),
+        ..Default::default()
+    };
+
+    let TokioQuicGatewaySession {
+        gateway_identity_updater: _,
+        gateway_tx_sink: transaction_sink,
+        mut gateway_response_source,
+        gateway_join_handle: _,
+    } = gateway_spawner.spawn(
+        gateway_kp.insecure_clone(),
+        gateway_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+    );
+
+    let (mut client_rx1, mut conn_spy_rx1, _rx_server_handle) =
+        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), rx_server_addr);
+    let tx_sig = Signature::new_unique();
+    transaction_sink
+        .send(GatewayTransaction {
+            tx_sig,
+            wire: Bytes::from("helloworld".as_bytes()),
+            remote_peer: rx_server_identity.pubkey(),
+        })
+        .await
+        .expect("send tx");
+
+    let _ = client_rx1.recv().await.expect("recv");
+
+    let GatewayResponse::TxSent(actual_resp) =
+        gateway_response_source.recv().await.expect("recv response")
+    else {
+        panic!("Expected GatewayResponse::TxSent, got something else");
+    };
+
+    assert_eq!(actual_resp.tx_sig, tx_sig);
+
+    // Now we change the remote peer address
+    let new_rx_server_addr = generate_random_local_addr();
+    // keep the same pubkey, but change the address
+    let (mut client_rx2, _, _) =
+        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), new_rx_server_addr);
+
+    fake_tpu_info_service.update_addr(rx_server_identity.pubkey(), new_rx_server_addr);
+
+    // rx_server_handle2.await.expect("rx server handle");
+    // Wait for the connection to be evicted
+    let conn_ended = conn_spy_rx1.recv().await.expect("recv");
+    assert!(conn_ended.result.is_err(), "connection should be evicted");
+    // Send a new transaction to the new address
+    let tx_sig2 = Signature::new_unique();
+    transaction_sink
+        .send(GatewayTransaction {
+            tx_sig: tx_sig2,
+            wire: Bytes::from("helloworld2".as_bytes()),
+            remote_peer: rx_server_identity.pubkey(),
+        })
+        .await
+        .expect("send tx");
+
+    let _ = client_rx2.recv().await.expect("recv");
+    let GatewayResponse::TxSent(actual_resp) =
+        gateway_response_source.recv().await.expect("recv response")
+    else {
+        panic!("Expected GatewayResponse::TxSent, got something else");
+    };
+    assert_eq!(actual_resp.tx_sig, tx_sig2);
 }

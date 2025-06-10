@@ -40,7 +40,15 @@ pub fn generate_random_local_addr() -> SocketAddr {
 #[allow(dead_code)]
 pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
     let kp = Keypair::new();
-    let (cert, priv_key) = new_dummy_x509_certificate(&kp);
+
+    let endpoint = build_validator_quic_tpu_endpoint(&kp, addr);
+
+    (endpoint, kp)
+}
+
+#[allow(dead_code)]
+pub fn build_validator_quic_tpu_endpoint(kp: &Keypair, addr: SocketAddr) -> quinn::Endpoint {
+    let (cert, priv_key) = new_dummy_x509_certificate(kp);
     let mut crypto = rustls::ServerConfig::builder_with_provider(Arc::new(crypto_provider()))
         .with_safe_default_protocol_versions()
         .expect("server config build")
@@ -51,7 +59,5 @@ pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
 
     let quic_server_config = QuicServerConfig::try_from(crypto).expect("quic server config");
     let config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
-    let endpoint = quinn::Endpoint::server(config, addr).expect("quinn server endpoint");
-
-    (endpoint, kp)
+    quinn::Endpoint::server(config, addr).expect("quinn server endpoint")
 }

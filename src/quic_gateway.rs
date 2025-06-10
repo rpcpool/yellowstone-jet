@@ -82,7 +82,7 @@ use {
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroUsize,
-        sync::{Arc, atomic::AtomicBool},
+        sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
         task::Poll,
         time::{Duration, Instant},
     },
@@ -93,6 +93,7 @@ use {
             mpsc::{self},
         },
         task::{self, Id, JoinError, JoinHandle, JoinSet},
+        time::interval,
     },
 };
 
@@ -106,6 +107,7 @@ pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 pub const DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS: usize = 3;
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
 pub const DEFAULT_MAX_SEND_ATTEMPT: usize = 3;
+pub const DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(crate) struct InflightMeta {
     prior_inflight_load: usize,
@@ -173,6 +175,11 @@ pub struct QuicGatewayConfig {
     /// It might be useful to retry sending a transaction at least 2-3 times before giving up.
     ///
     pub max_send_attempt: usize,
+
+    ///
+    /// Interval to watch remote peer address changes.
+    ///
+    pub remote_peer_addr_watch_interval: Duration,
 }
 
 impl Default for QuicGatewayConfig {
@@ -188,6 +195,7 @@ impl Default for QuicGatewayConfig {
             tpu_port_kind: ConfigQuicTpuPort::default(),
             num_endpoints: DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT,
             max_send_attempt: DEFAULT_MAX_SEND_ATTEMPT,
+            remote_peer_addr_watch_interval: DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL,
         }
     }
 }
@@ -233,6 +241,7 @@ enum TokioGateawyTaskMeta {
 
 struct TxWorkerSenderHandle {
     remote_peer_identity: Pubkey,
+    remote_peer_addr: SocketAddr,
     sender: mpsc::Sender<GatewayTransaction>,
     cancel_notify: Arc<Notify>,
 }
@@ -350,11 +359,23 @@ pub(crate) struct TokioQuicGatewayRuntime {
     eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
 
     connecting_blocked_by_eviction_list: VecDeque<WaitingEviction>,
+
+    remote_peer_addr_watcher: RemotePeerAddrWatcher,
 }
 
 pub trait LeaderTpuInfoService {
     fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
     fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
+    fn get_quic_dest_addr(
+        &self,
+        leader_pubkey: Pubkey,
+        tpu_port_kind: ConfigQuicTpuPort,
+    ) -> Option<SocketAddr> {
+        match tpu_port_kind {
+            ConfigQuicTpuPort::Normal => self.get_quic_tpu_socket_addr(leader_pubkey),
+            ConfigQuicTpuPort::Forwards => self.get_quic_tpu_fwd_socket_addr(leader_pubkey),
+        }
+    }
 }
 
 impl LeaderTpuInfoService for ClusterTpuInfo {
@@ -457,14 +478,9 @@ impl ConnectingTask {
             signal.notified().await;
         }
 
-        let remote_peer_addr = match self.tpu_port_kind {
-            ConfigQuicTpuPort::Normal => self
-                .service
-                .get_quic_tpu_socket_addr(self.remote_peer_identity),
-            ConfigQuicTpuPort::Forwards => self
-                .service
-                .get_quic_tpu_fwd_socket_addr(self.remote_peer_identity),
-        };
+        let remote_peer_addr = self
+            .service
+            .get_quic_dest_addr(self.remote_peer_identity, self.tpu_port_kind);
         let remote_peer_addr = remote_peer_addr.ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
         let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
             .with_safe_default_protocol_versions()
@@ -1125,6 +1141,7 @@ impl TokioQuicGatewayRuntime {
         let (tx, rx) = mpsc::channel(self.config.transaction_sender_worker_channel_capacity);
 
         let connection = Arc::new(connection);
+        let remote_peer_addr = connection.remote_address();
         let output_tx = self.response_outlet.clone();
         let max_stream_capacity = self.current_max_stream_limit();
         let cancel_notify = Arc::new(Notify::new());
@@ -1150,6 +1167,7 @@ impl TokioQuicGatewayRuntime {
         let ah = self.tx_worker_set.spawn_on(worker_fut, &self.tx_worker_rt);
         let handle = TxWorkerSenderHandle {
             remote_peer_identity,
+            remote_peer_addr,
             sender: tx,
             cancel_notify,
         };
@@ -1196,6 +1214,10 @@ impl TokioQuicGatewayRuntime {
                             .unwrap_or(0);
                         self.active_staked_sorted_remote_peer
                             .insert(remote_peer_identity, remote_peer_stake);
+
+                        self.remote_peer_addr_watcher
+                            .register_watch(remote_peer_identity, conn.remote_address());
+
                         self.install_worker(remote_peer_identity, conn);
                         metrics::jet::incr_quic_gw_connection_success_cnt();
                     }
@@ -1348,11 +1370,10 @@ impl TokioQuicGatewayRuntime {
                     .expect("tx worker meta");
                 self.active_staked_sorted_remote_peer
                     .remove(&remote_peer_identity);
-                if self.being_evicted_peers.remove(&remote_peer_identity)
-                    || worker_completed.err.is_some()
-                {
-                    self.unblock_eviction_waiting_connection();
-                }
+                self.remote_peer_addr_watcher.forget(remote_peer_identity);
+
+                self.unblock_eviction_waiting_connection();
+                let is_evicted_conn = self.being_evicted_peers.remove(&remote_peer_identity);
                 let worker_tx = self
                     .tx_worker_handle_map
                     .remove(&remote_peer_identity)
@@ -1386,14 +1407,20 @@ impl TokioQuicGatewayRuntime {
                     })
                     .is_some();
 
+                if worker_completed.canceled {
+                    tracing::trace!("Remote peer: {remote_peer_identity} tx worker was canceled");
+                }
+
                 if is_peer_unreachable {
                     // If the peer is unreachable, we drop all queued transactions for it.
                     self.unreachable_peer(remote_peer_identity);
                     metrics::jet::incr_quic_gw_connection_close_cnt();
-                } else if worker_completed.canceled {
-                    // If the worker was canceled, we drop all queued transactions for it,
-                    // because canceled workers are not expected to reconnect soon since they have been
-                    // chosen to be eviction strategy.
+                } else if is_evicted_conn {
+                    // If the worker was schedule for eviction, we simply drop all queued transactions
+                    // because evicted workers are not expected to reconnect soon since they have been
+                    // chosen to be eviction strategy. We don't want to be stuck in a loop
+                    // where we keep evicting the same peer, so we drop the queued transactions.
+                    // and start from a clean slate.
                     metrics::jet::incr_quic_gw_connection_close_cnt();
                     tracing::trace!(
                         "Remote peer: {} tx worker was canceled, will not reconnect",
@@ -1415,28 +1442,7 @@ impl TokioQuicGatewayRuntime {
                 }
             }
             Err(join_err) => {
-                let id = join_err.id();
-                let remote_peer_identity = self
-                    .tx_worker_task_meta_map
-                    .remove(&id)
-                    .expect("tx worker meta");
-                if self.being_evicted_peers.remove(&remote_peer_identity) {
-                    self.unblock_eviction_waiting_connection();
-                }
-                metrics::jet::incr_quic_gw_connection_close_cnt();
-                self.active_staked_sorted_remote_peer
-                    .remove(&remote_peer_identity);
-                let worker_tx = self
-                    .tx_worker_handle_map
-                    .remove(&remote_peer_identity)
-                    .expect("tx worker sender");
-                self.last_peer_activity.remove(&remote_peer_identity);
-                drop(worker_tx);
-                self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DropByGateway);
-                panic!(
-                    "Join error during tx sender worker for remote peer: {:?}: {:?}",
-                    remote_peer_identity, join_err
-                );
+                panic!("Join error during tx sender worker ended: {:?}", join_err);
             }
         }
     }
@@ -1598,6 +1604,37 @@ impl TokioQuicGatewayRuntime {
         metrics::jet::set_quic_gw_tx_blocked_by_connecting_cnt(num_queued_tx);
     }
 
+    fn handle_remote_peer_addr_change(&mut self, remote_peers_changed: HashSet<Pubkey>) {
+        for remote_peer in remote_peers_changed {
+            if let Some(handle) = self.tx_worker_handle_map.get(&remote_peer) {
+                // If we have a worker for the remote peer, we need to update its address.
+                let maybe_new_addr = self
+                    .leader_tpu_info_service
+                    .get_quic_dest_addr(remote_peer, self.config.tpu_port_kind);
+                match maybe_new_addr {
+                    Some(new_addr) => {
+                        if new_addr != handle.remote_peer_addr {
+                            tracing::debug!(
+                                "Remote peer address changed: {} from {:?} to {:?}, will cancel worker...",
+                                remote_peer,
+                                handle.remote_peer_addr,
+                                new_addr
+                            );
+                            // Update the worker's remote address.
+                            handle.cancel_notify.notify_one();
+                            metrics::jet::incr_quic_gw_remote_peer_addr_changes_detected();
+                        }
+                    }
+                    None => {
+                        // If we don't have a new address, we need to drop the worker.
+                        handle.cancel_notify.notify_one();
+                        metrics::jet::incr_quic_gw_remote_peer_addr_changes_detected();
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn run(mut self) {
         metrics::jet::quic_set_identity(self.identity.pubkey());
         loop {
@@ -1631,12 +1668,182 @@ impl TokioQuicGatewayRuntime {
                 Some(result) = self.tasklet.join_next_with_id() => {
                     self.handle_tasklet_result(result);
                 }
+                changes = self.remote_peer_addr_watcher.notified() => {
+                    self.handle_remote_peer_addr_change(changes);
+                }
             }
         }
 
         self.schedule_graceful_drop_all_worker();
         while let Some(result) = self.tasklet.join_next_with_id().await {
             self.handle_tasklet_result(result);
+        }
+    }
+}
+
+struct RemotePeerAddrWatcher {
+    changes: Arc<StdMutex<HashSet<Pubkey>>>,
+    cnc_tx: mpsc::UnboundedSender<RemotePeerAddrWatcherCommand>,
+    notify: Arc<Notify>,
+}
+
+impl RemotePeerAddrWatcher {
+    fn new(
+        refresh_interval: Duration,
+        tpu_port_kind: ConfigQuicTpuPort,
+        leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
+    ) -> Self {
+        let shared = Default::default();
+        let (cnc_tx, cnc_rx) = mpsc::unbounded_channel();
+        let notify = Arc::new(Notify::new());
+
+        // The event loop closes when the watcher is dropped.
+        let ev_loop = RemotePeerAddrWatcherEvLoop {
+            changes: Arc::clone(&shared),
+            leader_tpu_info_service,
+            cnc_rx,
+            peers_to_watch_map: HashMap::new(),
+            tpu_port_kind,
+            interval: refresh_interval,
+            notify: Arc::clone(&notify),
+        };
+
+        tokio::spawn(async move {
+            ev_loop.run().await;
+        });
+
+        RemotePeerAddrWatcher {
+            changes: shared,
+            cnc_tx,
+            notify,
+        }
+    }
+
+    ///
+    /// Registers a watch for a remote peer's address.
+    ///
+    /// If the remote peer's address changes, it will be notified through the `notified` method.
+    /// Note that remote peer address watches are only good for one address change. That means if the remote peer address changes again,
+    /// you need to register a new watch in order to be notified about the next change.
+    ///
+    fn register_watch(&self, remote_peer: Pubkey, addr: SocketAddr) {
+        self.cnc_tx
+            .send(RemotePeerAddrWatcherCommand::RegisterWatch(
+                remote_peer,
+                addr,
+            ))
+            .expect("Remote peer address watcher command channel is closed");
+    }
+
+    ///
+    /// Deregisters a watch for a remote peer's address.
+    ///
+    fn forget(&self, remote_peer: Pubkey) {
+        self.cnc_tx
+            .send(RemotePeerAddrWatcherCommand::DeregisterWatch(remote_peer))
+            .expect("Remote peer address watcher command channel is closed");
+    }
+
+    ///
+    /// Waits for a remote peer address change notification.
+    /// Returns a set of remote peers whose addresses have changed since the last notification.
+    ///
+    /// Cancel-Sefety:
+    ///
+    /// This method is cancel-safe and won't lose notifications.
+    async fn notified(&mut self) -> HashSet<Pubkey> {
+        self.notify.notified().await;
+        let mut guard = self.changes.lock().expect("Mutex is poisoned");
+        std::mem::take(&mut *guard)
+    }
+}
+
+enum RemotePeerAddrWatcherCommand {
+    RegisterWatch(Pubkey, SocketAddr),
+    DeregisterWatch(Pubkey),
+}
+
+struct RemotePeerAddrWatcherEvLoop {
+    changes: Arc<StdMutex<HashSet<Pubkey>>>,
+    leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
+    cnc_rx: mpsc::UnboundedReceiver<RemotePeerAddrWatcherCommand>,
+    peers_to_watch_map: HashMap<Pubkey, SocketAddr>,
+    tpu_port_kind: ConfigQuicTpuPort,
+    interval: Duration,
+    notify: Arc<Notify>,
+}
+
+impl RemotePeerAddrWatcherEvLoop {
+    fn handle_cnc(&mut self, command: RemotePeerAddrWatcherCommand) {
+        match command {
+            RemotePeerAddrWatcherCommand::RegisterWatch(pubkey, initial_addr) => {
+                self.peers_to_watch_map
+                    .entry(pubkey)
+                    .or_insert(initial_addr);
+            }
+            RemotePeerAddrWatcherCommand::DeregisterWatch(pubkey) => {
+                self.peers_to_watch_map.remove(&pubkey);
+            }
+        }
+    }
+
+    fn update_peers_to_watch(&mut self) {
+        let diff = self
+            .peers_to_watch_map
+            .iter()
+            .filter_map(|(pubkey, last_known_addr)| {
+                let new_addr = self
+                    .leader_tpu_info_service
+                    .get_quic_dest_addr(*pubkey, self.tpu_port_kind);
+                match new_addr {
+                    Some(new_addr) => {
+                        if new_addr != *last_known_addr {
+                            Some(*pubkey)
+                        } else {
+                            None
+                        }
+                    }
+                    None => Some(*pubkey),
+                }
+            })
+            .collect::<Vec<_>>();
+        if diff.is_empty() {
+            return;
+        }
+        {
+            let mut guard = self.changes.lock().expect("Mutex is poisoned");
+            for pubkey in diff {
+                let old = self.peers_to_watch_map.remove(&pubkey).unwrap();
+                tracing::trace!(
+                    "Remote peer address changed: {}, used to be advertised on {:?}",
+                    pubkey,
+                    old,
+                );
+                guard.insert(pubkey);
+            }
+            self.notify.notify_one();
+        }
+    }
+
+    async fn run(mut self) {
+        let mut interval = interval(self.interval);
+        loop {
+            tokio::select! {
+                _  = interval.tick() => {
+                    self.update_peers_to_watch();
+                },
+                maybe = self.cnc_rx.recv() => {
+                    match maybe {
+                        Some(command) => {
+                            self.handle_cnc(command);
+                        }
+                        None => {
+                            tracing::debug!("Remote peer address watcher inlet closed");
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1738,6 +1945,12 @@ impl TokioQuicGatewaySpawner {
             endpoints_usage.push(EndpointUsage::default());
         }
 
+        let remote_peer_addr_watcher = RemotePeerAddrWatcher::new(
+            config.remote_peer_addr_watch_interval,
+            config.tpu_port_kind,
+            Arc::clone(&self.leader_tpu_info_service),
+        );
+
         let gateway_runtime = TokioQuicGatewayRuntime {
             stake_info_map: self.stake_info_map.clone(),
             tx_worker_handle_map: Default::default(),
@@ -1764,6 +1977,7 @@ impl TokioQuicGatewaySpawner {
             connecting_blocked_by_eviction_list: Default::default(),
             endpoints,
             endpoints_usage,
+            remote_peer_addr_watcher,
         };
 
         let jh = gateway_rt.spawn(gateway_runtime.run());

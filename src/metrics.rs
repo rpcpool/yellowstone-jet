@@ -241,6 +241,15 @@ pub mod jet {
             )
             .buckets(vec![1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0, 144.0, 233.0, 377.0, 610.0, 987.0, 1597.0, 2584.0, f64::INFINITY])
         ).unwrap();
+
+        static ref QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED: IntCounter = IntCounter::new(
+            "quic_gw_remote_peer_addr_changes_detected",
+            "Number of detected changes in remote peer address"
+        ).unwrap();
+    }
+
+    pub fn incr_quic_gw_remote_peer_addr_changes_detected() {
+        QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED.inc();
     }
 
     pub fn observe_quic_gw_connection_time(duration: Duration) {
@@ -341,6 +350,7 @@ pub mod jet {
             register!(QUIC_GW_TX_CONNECTION_CACHE_MISS_CNT);
             register!(QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE);
             register!(QUIC_GW_CONNECTION_TIME_HIST);
+            register!(QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED);
         });
     }
 
