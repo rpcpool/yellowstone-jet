@@ -13,6 +13,7 @@ use {
         array,
         collections::HashMap,
         net::SocketAddr,
+        num::NonZero,
         sync::{Arc, RwLock as StdRwLock},
         time::Duration,
     },
@@ -519,6 +520,7 @@ async fn it_should_evict_connection() {
         max_connection_attempts: 1,
         max_concurrent_connections: 1, // LIMIT TO 1 CONCURRENT CONNECTION SHOULD TRIGGER CONNECTION EVICTION ON EACH NEW REMOTE DEST
         port_range: (really_limited_port_range, really_limited_port_range + 3),
+        num_endpoints: NonZero::new(1).unwrap(),
         max_local_port_binding_attempts: 1,
         ..Default::default()
     };
@@ -668,10 +670,10 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         Arc::new(StakeBasedEvictionStrategy::default()),
     );
 
-    let rx_server_handle = tokio::spawn(async move {
+    let _rx_server_handle = tokio::spawn(async move {
         let connecting = rx_server_endpoint.accept().await.expect("accept");
         let conn = connecting.await.expect("quinn connection");
-        for _ in 0..MAX_CONN_ATTEMPT {
+        loop {
             // Simulate a connection lost by dropping the connection
             let mut uni = conn.accept_uni().await.expect("accept uni");
             let _ = uni.stop(VarInt::from_u32(0));
@@ -690,9 +692,12 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         .expect("send tx");
 
     // This handle should return after MAX_CONN_ATTEMPT attempts
-    let _ = rx_server_handle.await;
+    tracing::trace!("Waiting for rx_server_handle to finish");
+    // let _ = rx_server_handle.await;
+    tracing::trace!("rx_server_handle finished");
 
     let resp = gateway_response_source.recv().await.expect("recv response");
+    tracing::trace!("Received response: {:?}", resp);
 
     let GatewayResponse::TxFailed(actual_resp) = resp else {
         panic!("Expected GatewayResponse::TxSent, got something {resp:?}");

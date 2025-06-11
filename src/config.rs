@@ -376,15 +376,20 @@ pub struct ConfigQuic {
 
     ///
     /// How many endpoints to create for the QUIC gateway.
-    /// Each endpoint will be bound to a different port in the port range.
-    /// Each endpoint has its own "event loop" and can handle multiple connections concurrently.
     ///
-    /// The number of endpoints should not be greater than the numbe of CPU cores dedicated to jet.
+    /// Each [`quinn::Endpoint`] has its own event-loop.
+    /// Each endpoint can manage thousands of connections concurrently.
+    /// HOWEVER, each [`quinn::Endpoint`] has a state mutex lock.
     ///
-    /// The number of endpoints depends on the stake of the gateway as lower stake gateway should require less endpoints.
+    /// Quickly looking at quinn's source code, it seems that each lock acquisition is quite short live.
     ///
-    /// Recommanded try 1 endpoint per 8 CPU cores dedicated to jet.
+    /// If we have too many connections over a single endpoint, we might end up with a lot of contention on the endpoint mutex.
     ///
+    /// At the same time, if we have too many endpoints, we might end up with too many event loops running concurrently.
+    ///
+    /// Talking with Anza, we should not open more than 5 endpoints to host QUIC connections.
+    /// Still, Anza told us that using multiple Endpoints yield marginal performance improvements.
+    /// Perhaps, multi-endpoints are more useful for the validator sides, where the number of connections is much higher.
     #[serde(default = "ConfigQuic::default_num_endpoints")]
     pub endpoint_count: NonZeroUsize,
 
