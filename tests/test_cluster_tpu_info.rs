@@ -65,7 +65,7 @@ async fn test_processed_slot_update() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_slot_processed = cluster_tpu.processed_slot().await;
+    let cluster_slot_processed = cluster_tpu.processed_slot();
 
     assert_eq!(slot_proccessed.slot, cluster_slot_processed);
 
@@ -76,7 +76,7 @@ async fn test_processed_slot_update() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_slot_processed = cluster_tpu.processed_slot().await;
+    let cluster_slot_processed = cluster_tpu.processed_slot();
 
     assert_eq!(slot_proccessed2.slot, cluster_slot_processed);
 
@@ -106,7 +106,7 @@ async fn test_update_cluster_nodes() {
     let h = tokio::spawn(cluster_futs);
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_nodes = cluster_tpu.get_cluster_nodes().await;
+    let cluster_nodes = cluster_tpu.get_cluster_nodes();
 
     assert_eq!(cluster_nodes, cluster_compare);
 
@@ -114,7 +114,7 @@ async fn test_update_cluster_nodes() {
     rpc.insert_cluster_nodes(node2).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_nodes = cluster_tpu.get_cluster_nodes().await;
+    let cluster_nodes = cluster_tpu.get_cluster_nodes();
     assert_eq!(cluster_nodes, cluster_compare);
 
     cluster_tpu.shutdown().await;
@@ -145,7 +145,7 @@ async fn test_leader_schedule_doesnot_update_before_slot_confirmed() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_schedule = cluster_tpu.get_leader_schedule().await;
+    let cluster_schedule = cluster_tpu.get_leader_schedule();
     // Because we haven't sent a confirmed slot, then cluster_schedule has to be empty
     assert!(cluster_schedule == HashMap::new());
 
@@ -192,7 +192,7 @@ async fn test_leader_schedule_update_after_slot_confirmed() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_schedule = cluster_tpu.get_leader_schedule().await;
+    let cluster_schedule = cluster_tpu.get_leader_schedule();
     // Cluster schedule has to be updated by now
     assert!(cluster_schedule == schedule_compare);
 
@@ -240,7 +240,7 @@ async fn deletes_old_slots() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_schedule = cluster_tpu.get_leader_schedule().await;
+    let cluster_schedule = cluster_tpu.get_leader_schedule();
     // Cluster schedule has to be updated by now
     assert!(cluster_schedule == schedule_compare1);
 
@@ -274,7 +274,7 @@ async fn deletes_old_slots() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_schedule = cluster_tpu.get_leader_schedule().await;
+    let cluster_schedule = cluster_tpu.get_leader_schedule();
     println!("{cluster_schedule:?}");
     println!("{schedule_compare2:?}");
     // Cluster schedule has to be updated by now
@@ -325,7 +325,7 @@ async fn test_get_tpus_in_cluster() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let tpus = cluster_tpu.get_leader_tpus(2).await;
+    let tpus = cluster_tpu.get_leader_tpus(2);
 
     assert_eq!(tpus.len(), 2);
     assert_eq!(tpus[0].leader, key1);

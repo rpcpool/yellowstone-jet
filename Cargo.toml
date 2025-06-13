@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "12.0.1"
+version = "13.0.0"
 authors = ["Triton One"]
 edition = "2024"
 description = "Yellowstone Jet"
@@ -18,6 +18,7 @@ borsh = "1.5.1"
 bytes = "1.10.0"
 clap = { version = "4.5.2", features = ["cargo", "derive", "env"] }
 derivative = "2.2.0"
+derive_more = { version = "2.0.1", features = ["display"] }
 etcd-client = "0.14.0"
 futures = "0.3.30"
 hostname = "0.4.0"
@@ -103,6 +104,10 @@ solana-feature-set = { git = "https://github.com/rpcpool/solana-public.git", tag
 solana-pubkey = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
 solana-account-decoder-client-types = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.1.11-triton-public" }
 
+
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
 
 # https://github.com/anza-xyz/agave/blob/v2.0.4/Cargo.toml#L502-L533
 # [patch.crates-io.curve25519-dalek]

@@ -2,6 +2,7 @@ use {
     crate::{metrics, rpc::invalid_params},
     base64::{Engine, prelude::BASE64_STANDARD},
     bincode::config::Options,
+    bytes::Bytes,
     jsonrpsee::core::RpcResult,
     solana_client::{
         client_error::{ClientError, ClientErrorKind},
@@ -27,7 +28,7 @@ const MAX_BASE64_SIZE: usize = 1644; // Golden, bump if PACKET_DATA_SIZE changes
 pub fn decode_and_deserialize<T>(
     encoded: String,
     encoding: TransactionBinaryEncoding,
-) -> RpcResult<(Vec<u8>, T)>
+) -> RpcResult<(Bytes, T)>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -86,7 +87,7 @@ where
         .allow_trailing_bytes()
         .deserialize_from(&wire_output[..])
     {
-        Ok(output) => Ok((wire_output, output)),
+        Ok(output) => Ok((Bytes::from(wire_output), output)),
         Err(err) => {
             metrics::jet::increment_transaction_deserialize_error("bincode");
             Err(invalid_params(format!(

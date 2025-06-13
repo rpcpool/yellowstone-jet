@@ -7,15 +7,9 @@ use {
     },
     std::{
         net::{SocketAddr, TcpListener},
-        num::NonZeroUsize,
         sync::Arc,
-        time::Duration,
     },
-    yellowstone_jet::{
-        config::{ConfigQuic, ConfigQuicTpuPort, ConfigSendTransactionService},
-        crypto_provider::crypto_provider,
-        util::CommitmentLevel,
-    },
+    yellowstone_jet::{config::ConfigQuic, crypto_provider::crypto_provider},
 };
 
 #[allow(dead_code)]
@@ -46,7 +40,15 @@ pub fn generate_random_local_addr() -> SocketAddr {
 #[allow(dead_code)]
 pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
     let kp = Keypair::new();
-    let (cert, priv_key) = new_dummy_x509_certificate(&kp);
+
+    let endpoint = build_validator_quic_tpu_endpoint(&kp, addr);
+
+    (endpoint, kp)
+}
+
+#[allow(dead_code)]
+pub fn build_validator_quic_tpu_endpoint(kp: &Keypair, addr: SocketAddr) -> quinn::Endpoint {
+    let (cert, priv_key) = new_dummy_x509_certificate(kp);
     let mut crypto = rustls::ServerConfig::builder_with_provider(Arc::new(crypto_provider()))
         .with_safe_default_protocol_versions()
         .expect("server config build")
@@ -57,53 +59,5 @@ pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
 
     let quic_server_config = QuicServerConfig::try_from(crypto).expect("quic server config");
     let config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
-    let endpoint = quinn::Endpoint::server(config, addr).expect("quinn server endpoint");
-
-    (endpoint, kp)
-}
-
-#[allow(dead_code)]
-pub const fn default_config_quic() -> ConfigQuic {
-    ConfigQuic {
-        connection_max_pools: ConfigQuic::default_connection_max_pools(),
-        connection_pool_size: ConfigQuic::default_connection_pool_size(),
-        send_retry_count: ConfigQuic::default_send_retry_count(),
-        tpu_port: ConfigQuicTpuPort::Normal,
-        connection_handshake_timeout: ConfigQuic::default_connection_handshake_timeout(),
-        max_idle_timeout: ConfigQuic::default_max_idle_timeout(),
-        keep_alive_interval: ConfigQuic::default_keep_alive_interval(),
-        send_timeout: ConfigQuic::default_send_timeout(),
-        endpoint_port_range: ConfigQuic::default_endpoint_port_range(),
-        send_max_concurrent_streams: ConfigQuic::default_send_max_concurrent_streams(),
-        extra_tpu_forward: vec![],
-    }
-}
-
-#[allow(dead_code)]
-pub const fn default_config_transaction() -> ConfigSendTransactionService {
-    ConfigSendTransactionService {
-        default_max_retries: Some(1),
-        leader_forward_count: 1,
-        relay_only_mode: true,
-        retry_rate: Duration::from_secs(1),
-        service_max_retries: 2,
-        stop_send_on_commitment: CommitmentLevel::Finalized,
-    }
-}
-
-#[allow(dead_code)]
-pub const fn default_config_quic_client() -> ConfigQuic {
-    ConfigQuic {
-        connection_max_pools: NonZeroUsize::new(256).unwrap(),
-        connection_pool_size: 1,
-        send_retry_count: 1,
-        tpu_port: ConfigQuicTpuPort::Normal,
-        connection_handshake_timeout: Duration::from_secs(2),
-        max_idle_timeout: Duration::from_secs(2),
-        keep_alive_interval: Duration::from_secs(1),
-        send_timeout: Duration::from_secs(10),
-        endpoint_port_range: (8000, 10000),
-        send_max_concurrent_streams: 128,
-        extra_tpu_forward: vec![],
-    }
+    quinn::Endpoint::server(config, addr).expect("quinn server endpoint")
 }
