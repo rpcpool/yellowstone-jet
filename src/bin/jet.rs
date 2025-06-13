@@ -384,9 +384,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         source: gateway_response_source,
     };
 
-    let (scheduler_in, scheduler_out) = if config.send_transaction_service.relay_only_mode {
-        info!("Running in relay-only mode, transactions retry will be enabled");
-        warn!("disabling relay-only mode should be used only by unstaked jet instance");
+    let (scheduler_in, scheduler_out) = if !config.send_transaction_service.relay_only_mode {
+        info!(
+            "Disabled relay-only mode, transactions retry will be enabled -- this should be used only by unstaked jet instance"
+        );
         let TransactionRetryScheduler { sink, source } = TransactionRetryScheduler::new(
             TransactionRetrySchedulerConfig {
                 retry_rate: config.send_transaction_service.retry_rate,
@@ -403,7 +404,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         );
         (sink, source)
     } else {
-        tracing::info!("Running in non-relay mode, transactions retry will be disabled");
+        tracing::info!("Running in relay-only mode, transactions retry will be disabled");
         let TransactionNoRetryScheduler { sink, source } =
             TransactionNoRetryScheduler::new(Arc::new(blockhash_queue.clone()));
         (sink, source)
