@@ -298,7 +298,6 @@ impl ConfigSendTransactionService {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigQuic {
     /// Total number of pools (one pool per remote address, i.e. one per leader).
     /// Deprecated, use `max_concurrent_connection` instead.
@@ -313,6 +312,7 @@ pub struct ConfigQuic {
 
     /// TPU connection pool size per remote address
     /// Default is `solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE` (1 from 1.17.33 / 1.18.12, previous value is 4)
+    /// DEPRECATED
     #[serde(
         default = "ConfigQuic::default_connection_pool_size",
         deserialize_with = "ConfigQuic::deserialize_connection_pool_size"
@@ -348,15 +348,19 @@ pub struct ConfigQuic {
     /// Period of inactivity before sending a keep-alive packet
     /// https://docs.rs/quinn/0.10.2/quinn/struct.TransportConfig.html#method.keep_alive_interval
     /// Default is `solana_sdk::quic::QUIC_KEEP_ALIVE` -- 1s
+    /// DEPRECATED, this is a constant that should not be changed, always 1s
     #[serde(
         default = "ConfigQuic::default_keep_alive_interval",
         with = "humantime_serde"
     )]
+    #[deprecated]
     pub keep_alive_interval: Duration,
 
     /// Send tx timeout, for batches value multipled by number of transactions in the batch
     /// Solana default value is 10 seconds
+    /// DEPRECATED
     #[serde(default = "ConfigQuic::default_send_timeout", with = "humantime_serde")]
+    #[deprecated]
     pub send_timeout: Duration,
 
     /// Ports used by QUIC endpoints
@@ -372,11 +376,15 @@ pub struct ConfigQuic {
     /// https://github.com/anza-xyz/agave/blob/v1.17.31/streamer/src/nonblocking/quic.rs#L244-L279
     /// Minumum value is `QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS` -- for unstaked nodes, 128
     /// Value for staked calculated from total stake, but maximum is `QUIC_MAX_STAKED_CONCURRENT_STREAMS`
+    /// DEPRECATED, this is based of stake
     #[serde(default = "ConfigQuic::default_send_max_concurrent_streams")]
+    #[deprecated]
     pub send_max_concurrent_streams: usize,
 
     /// Extra TPU forward (transactions would be always sent to these nodes)
+    /// DEPRECATED
     #[serde(default)]
+    #[deprecated]
     pub extra_tpu_forward: Vec<ConfigExtraTpuForward>,
 
     ///

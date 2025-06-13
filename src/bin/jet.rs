@@ -359,6 +359,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         max_idle_timeout: config.quic.max_idle_timeout.min(QUIC_MAX_TIMEOUT),
         connecting_timeout: config.quic.connection_handshake_timeout,
         num_endpoints: config.quic.endpoint_count,
+        max_send_attempt: config.quic.send_retry_count,
         ..Default::default()
     };
     let TokioQuicGatewaySession {
