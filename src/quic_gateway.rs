@@ -112,6 +112,7 @@ pub const DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS: usize = 3;
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
 pub const DEFAULT_MAX_SEND_ATTEMPT: usize = 3;
 pub const DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL: Duration = Duration::from_secs(5);
+pub const DEFAULT_TX_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ConnectingError {
@@ -179,6 +180,11 @@ pub struct QuicGatewayConfig {
     /// Interval to watch remote peer address changes.
     ///
     pub remote_peer_addr_watch_interval: Duration,
+
+    ///
+    /// Timeout for sending a transaction to a remote peer.
+    ///
+    pub send_timeout: Duration,
 }
 
 impl Default for QuicGatewayConfig {
@@ -195,6 +201,7 @@ impl Default for QuicGatewayConfig {
             num_endpoints: DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT,
             max_send_attempt: DEFAULT_MAX_SEND_ATTEMPT,
             remote_peer_addr_watch_interval: DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL,
+            send_timeout: DEFAULT_TX_SEND_TIMEOUT,
         }
     }
 }
@@ -552,6 +559,11 @@ struct QuicTxSenderWorker {
     cancel_notify: Arc<Notify>,
     tx_map: HashMap<Signature, GatewayTransaction>,
     max_tx_attempt: usize,
+    // TODO: Check if this is necessary, since there is already flow control in QUIC
+    // Moreover, most QUIC API are instantaneous and do not block
+    // and if a connection is idle for 2s it will be closed anyway, moreover remote validator could technically decide to kick us off
+    #[allow(dead_code)]
+    tx_send_timeout: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1101,6 +1113,7 @@ impl TokioQuicGatewayRuntime {
                 .unwrap_or_default(),
             cancel_notify: Arc::clone(&cancel_notify),
             max_tx_attempt: self.config.max_send_attempt,
+            tx_send_timeout: self.config.send_timeout,
             tx_map: Default::default(),
         };
 
