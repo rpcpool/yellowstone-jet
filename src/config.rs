@@ -22,7 +22,7 @@ use {
     std::{
         collections::HashSet,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-        num::NonZeroUsize,
+        num::{NonZeroU64, NonZeroUsize},
         ops::Range,
         path::{Path, PathBuf},
     },
@@ -216,6 +216,11 @@ pub struct ConfigJetGatewayClient {
 
     /// Access token
     pub x_token: Option<String>,
+
+    /// Maximum number of permit that can be received from jet-gateway, overrides staked-based stream computation.
+    /// If set to `None`, then stream size would be computed based on stake.
+    /// It is clipped to the maximum staked-based stream size.
+    pub max_streams: Option<NonZeroU64>,
 }
 
 #[derive(Debug, Deserialize)]

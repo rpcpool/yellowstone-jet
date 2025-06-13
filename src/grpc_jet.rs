@@ -378,13 +378,17 @@ impl GrpcServer {
 
             let my_identity = signer.pubkey();
 
+            let configured_max_messages_per100ms = config.max_streams;
             let loop_result = async {
                 loop {
                     if let Err(error) = async {
                         tokio::select! {
                             _ = limit_interval.tick() => {
                                 let limits = stake_info.get_stake_limits(my_identity);
-                                let messages_per100ms = limits.per100ms_limit;
+                                let messages_per100ms = configured_max_messages_per100ms
+                                    .map(|proposed| proposed.get())
+                                    .filter(|proposed| proposed <= &limits.per100ms_limit)
+                                    .unwrap_or(limits.per100ms_limit);
                                 let message = SubscribeRequest {
                                     message: Some(SubscribeRequestMessage::UpdateLimit(SubscribeUpdateLimit { messages_per100ms }))
                                 };
