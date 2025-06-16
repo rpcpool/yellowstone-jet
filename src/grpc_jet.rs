@@ -328,6 +328,10 @@ impl GrpcServer {
         let mut quick_disconnects = 0;
         let mut last_connect_time = std::time::Instant::now();
         let mut consecutive_failed_connects = 0;
+        let max_resubscribe_attempts = config
+            .maximum_subscribe_attempts
+            .map(|v| v.get())
+            .unwrap_or(usize::MAX - 1);
         loop {
             backoff.maybe_tick().await;
 
@@ -354,7 +358,7 @@ impl GrpcServer {
                 Err(error) => {
                     error!(?error, "failed to connect to gRPC jet-gateway");
                     consecutive_failed_connects += 1;
-                    if consecutive_failed_connects >= 3 {
+                    if consecutive_failed_connects >= max_resubscribe_attempts {
                         panic!("Too many consecutive failed connects. Exiting...");
                     }
                     // If error mentions feature flags, exit completely

@@ -523,6 +523,7 @@ impl ConnectingTask {
             .endpoint
             .connect_with(config, remote_peer_addr, "connect")
             .map_err(ConnectingError::ConnectError)?;
+
         tracing::trace!(
             "Connecting to remote peer: {} at address: {}",
             self.remote_peer_identity,
@@ -585,7 +586,6 @@ impl QuicTxSenderWorker {
     async fn send_tx(&mut self, tx_sig: Signature) -> Result<SentOk, SendTxError> {
         let tx = self.tx_map.get(&tx_sig).expect("tx should be in tx_map");
         let remote_peer_identity = tx.remote_peer;
-        metrics::jet::incr_send_tx_attempt(remote_peer_identity);
         let t = Instant::now();
         let mut attempt = 0;
         loop {

@@ -221,6 +221,18 @@ pub struct ConfigJetGatewayClient {
     /// If set to `None`, then stream size would be computed based on stake.
     /// It is clipped to the maximum staked-based stream size.
     pub max_streams: Option<NonZeroU64>,
+
+    ///
+    /// Maximum number of subscribe attempts to the jet-gateway.
+    /// If set to `None`, then it would be infinite.
+    #[serde(default = "ConfigJetGatewayClient::default_maximum_subscribe_attempts")]
+    pub maximum_subscribe_attempts: Option<NonZeroUsize>,
+}
+
+impl ConfigJetGatewayClient {
+    const fn default_maximum_subscribe_attempts() -> Option<NonZeroUsize> {
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]
