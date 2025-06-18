@@ -77,7 +77,8 @@ pub mod jet {
         super::{REGISTRY, init2},
         crate::util::CommitmentLevel,
         prometheus::{
-            HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+            Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+            IntGaugeVec, Opts,
         },
         solana_sdk::{clock::Slot, pubkey::Pubkey},
         std::{
@@ -112,17 +113,14 @@ pub mod jet {
         static ref STS_INFLIGHT_SIZE: IntGauge = IntGauge::new("sts_inflight_size", "Number of transactions sending right now").unwrap();
         static ref STS_RECEIVED_TOTAL: IntCounter = IntCounter::new("sts_received_total", "Total number of received transactions").unwrap();
         static ref STS_LANDED_TOTAL: IntCounter = IntCounter::new("sts_landed_total", "Total number of landed transactions").unwrap();
-        static ref STS_TPU_SEND: IntCounterVec = IntCounterVec::new(
-            Opts::new("sts_tpu_send_total", "Number of transactions sent to TPU"),
-            &["leaders"]
-        ).unwrap();
+        // TODO we should rename this in another version of jet.
         static ref STS_TPU_DENIED_TOTAL: IntCounter = IntCounter::new("sts_tpu_denied_total", "Total number of denied TPUs by Shield policy").unwrap();
 
         static ref QUIC_IDENTITY: IntGaugeVec = IntGaugeVec::new(Opts::new("quic_identity", "Current QUIC identity"), &["identity"]).unwrap();
         static ref QUIC_IDENTITY_EXPECTED: IntGaugeVec = IntGaugeVec::new(Opts::new("quic_identity_expected", "Expected QUIC identity"), &["identity"]).unwrap();
         static ref QUIC_SEND_ATTEMPTS: IntCounterVec = IntCounterVec::new(
             Opts::new("quic_send_attempts", "Status of sending transactions with QUIC"),
-            &["leader", "address", "status", "failure_message"]
+            &["leader", "address", "status"]
         ).unwrap();
 
         static ref QUIC_IDENTITY_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);
@@ -195,6 +193,98 @@ pub mod jet {
             &["leader"]
         ).unwrap();
 
+
+        static ref QUIC_GW_CONNECTING_GAUGE: IntGauge = IntGauge::new(
+            "quic_gw_connecting", "Number of ongoing connections to remote peer validators"
+        ).unwrap();
+
+        static ref QUIC_GW_CONNECTION_SUCCESS_CNT: IntCounter = IntCounter::new(
+            "quic_wg_connection_success", "Number of successful connections to remote peer validators"
+        ).unwrap();
+
+        static ref QUIC_GW_CONNECTION_FAILURE_CNT: IntCounter = IntCounter::new(
+            "quic_gw_connection_failure", "Number of failed connections to remote peer validators"
+        ).unwrap();
+
+        static ref QUIC_GW_ACTIVE_CONNECTION_GAUGE: IntGauge = IntGauge::new(
+            "quic_gw_active_connection", "Number of active connections to remote peer validators"
+        ).unwrap();
+
+        static ref QUIC_GW_TOTAL_CONNECTION_EVICTIONS_CNT: IntCounter = IntCounter::new(
+            "quic_gw_total_connection_evictions", "Total number of evicted connections to remote peer validators since the start of the service"
+        ).unwrap();
+
+        static ref QUIC_GW_CONNECTION_CLOSE_CNT: IntCounter = IntCounter::new(
+            "quic_gw_connection_close", "Number of closed connections to remote peer validators"
+        ).unwrap();
+
+        static ref QUIC_GW_ONGOING_EVICTIONS_GAUGE: IntGauge = IntGauge::new(
+            "quic_gw_ongoing_evictions", "Number of ongoing evictions of connections to remote peer validators"
+        ).unwrap();
+
+        static ref QUIC_GW_TX_CONNECTION_CACHE_HIT_CNT: IntCounter = IntCounter::new(
+            "quic_gw_tx_connection_cache_hit", "Number of hits transaction got forward to an existing connection to remote peer validators"
+        ).unwrap();
+
+        static ref QUIC_GW_TX_CONNECTION_CACHE_MISS_CNT: IntCounter = IntCounter::new(
+            "quic_gw_tx_connection_cache_miss", "Number of misses transaction got forward to a new connection to remote peer validators"
+        ).unwrap();
+
+        static ref QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE: IntGauge = IntGauge::new(
+            "quic_gw_tx_blocked_by_connecting", "Number of transactions waiting for remote peer connection to be established"
+        ).unwrap();
+
+        static ref QUIC_GW_CONNECTION_TIME_HIST: Histogram = Histogram::with_opts(
+            HistogramOpts::new(
+                "quic_gw_connection_time_ms",
+                "Time taken to establish a connection to remote peer validators in milliseconds"
+            )
+            .buckets(vec![1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0, 55.0, 89.0, 144.0, 233.0, 377.0, 610.0, 987.0, 1597.0, 2584.0, f64::INFINITY])
+        ).unwrap();
+
+        static ref QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED: IntCounter = IntCounter::new(
+            "quic_gw_remote_peer_addr_changes_detected",
+            "Number of detected changes in remote peer address"
+        ).unwrap();
+    }
+
+    pub fn incr_quic_gw_remote_peer_addr_changes_detected() {
+        QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED.inc();
+    }
+
+    pub fn observe_quic_gw_connection_time(duration: Duration) {
+        QUIC_GW_CONNECTION_TIME_HIST.observe(duration.as_millis() as f64);
+    }
+
+    pub fn set_quic_gw_tx_blocked_by_connecting_cnt(blocked: usize) {
+        QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE.set(blocked as i64);
+    }
+    pub fn set_quic_gw_connecting_cnt(connecting: usize) {
+        QUIC_GW_CONNECTING_GAUGE.set(connecting as i64);
+    }
+    pub fn set_quic_gw_ongoing_evictions_cnt(ongoing: usize) {
+        QUIC_GW_ONGOING_EVICTIONS_GAUGE.set(ongoing as i64);
+    }
+    pub fn set_quic_gw_active_connection_cnt(active: usize) {
+        QUIC_GW_ACTIVE_CONNECTION_GAUGE.set(active as i64);
+    }
+    pub fn incr_quic_gw_connection_failure_cnt() {
+        QUIC_GW_CONNECTION_FAILURE_CNT.inc();
+    }
+    pub fn incr_quic_gw_connection_success_cnt() {
+        QUIC_GW_CONNECTION_SUCCESS_CNT.inc();
+    }
+    pub fn incr_quic_gw_total_connection_evictions_cnt(amount: usize) {
+        QUIC_GW_TOTAL_CONNECTION_EVICTIONS_CNT.inc_by(amount as u64);
+    }
+    pub fn incr_quic_gw_connection_close_cnt() {
+        QUIC_GW_CONNECTION_CLOSE_CNT.inc();
+    }
+    pub fn incr_quic_gw_tx_connection_cache_hit_cnt() {
+        QUIC_GW_TX_CONNECTION_CACHE_HIT_CNT.inc();
+    }
+    pub fn incr_quic_gw_tx_connection_cache_miss_cnt() {
+        QUIC_GW_TX_CONNECTION_CACHE_MISS_CNT.inc();
     }
 
     pub fn observe_leader_rtt(leader: Pubkey, rtt: Duration) {
@@ -246,9 +336,21 @@ pub mod jet {
             register!(STS_POOL_SIZE);
             register!(STS_RECEIVED_TOTAL);
             register!(STS_TPU_DENIED_TOTAL);
-            register!(STS_TPU_SEND);
             register!(TRANSACTION_DECODE_ERRORS);
             register!(TRANSACTION_DESERIALIZE_ERRORS);
+
+            register!(QUIC_GW_CONNECTING_GAUGE);
+            register!(QUIC_GW_CONNECTION_SUCCESS_CNT);
+            register!(QUIC_GW_CONNECTION_FAILURE_CNT);
+            register!(QUIC_GW_ACTIVE_CONNECTION_GAUGE);
+            register!(QUIC_GW_TOTAL_CONNECTION_EVICTIONS_CNT);
+            register!(QUIC_GW_CONNECTION_CLOSE_CNT);
+            register!(QUIC_GW_ONGOING_EVICTIONS_GAUGE);
+            register!(QUIC_GW_TX_CONNECTION_CACHE_HIT_CNT);
+            register!(QUIC_GW_TX_CONNECTION_CACHE_MISS_CNT);
+            register!(QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE);
+            register!(QUIC_GW_CONNECTION_TIME_HIST);
+            register!(QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED);
         });
     }
 
@@ -402,12 +504,6 @@ pub mod jet {
         STS_LANDED_TOTAL.inc();
     }
 
-    pub fn sts_tpu_send_inc(leaders: usize) {
-        STS_TPU_SEND
-            .with_label_values(&[leaders.to_string().as_str()])
-            .inc();
-    }
-
     pub fn sts_tpu_denied_inc_by(denied: usize) {
         STS_TPU_DENIED_TOTAL.inc_by(denied as u64);
     }
@@ -432,19 +528,9 @@ pub mod jet {
         *QUIC_IDENTITY_EXPECTED_VALUE.lock().unwrap() = Some(identity);
     }
 
-    pub fn quic_send_attempts_inc(
-        leader: &Pubkey,
-        address: &SocketAddr,
-        status: &str,
-        failure_message: &str,
-    ) {
+    pub fn quic_send_attempts_inc(leader: Pubkey, address: SocketAddr, status: &str) {
         QUIC_SEND_ATTEMPTS
-            .with_label_values(&[
-                &leader.to_string(),
-                &address.to_string(),
-                status,
-                failure_message,
-            ])
+            .with_label_values(&[&leader.to_string(), &address.to_string(), status])
             .inc();
     }
 

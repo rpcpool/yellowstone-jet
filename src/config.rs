@@ -1,5 +1,9 @@
 use {
-    crate::{feature_flags::FeatureSet, util::CommitmentLevel},
+    crate::{
+        feature_flags::FeatureSet,
+        quic_gateway::{DEFAULT_LEADER_DURATION, DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT},
+        util::CommitmentLevel,
+    },
     anyhow::Context,
     serde::{
         Deserialize,
@@ -18,7 +22,7 @@ use {
     std::{
         collections::HashSet,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-        num::NonZeroUsize,
+        num::{NonZeroU64, NonZeroUsize},
         ops::Range,
         path::{Path, PathBuf},
     },
@@ -212,6 +216,23 @@ pub struct ConfigJetGatewayClient {
 
     /// Access token
     pub x_token: Option<String>,
+
+    /// Maximum number of permit that can be received from jet-gateway, overrides staked-based stream computation.
+    /// If set to `None`, then stream size would be computed based on stake.
+    /// It is clipped to the maximum staked-based stream size.
+    pub max_streams: Option<NonZeroU64>,
+
+    ///
+    /// Maximum number of subscribe attempts to the jet-gateway.
+    /// If set to `None`, then it would be infinite.
+    #[serde(default = "ConfigJetGatewayClient::default_maximum_subscribe_attempts")]
+    pub maximum_subscribe_attempts: Option<NonZeroUsize>,
+}
+
+impl ConfigJetGatewayClient {
+    const fn default_maximum_subscribe_attempts() -> Option<NonZeroUsize> {
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,20 +310,26 @@ impl ConfigSendTransactionService {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigQuic {
-    /// Total number of pools (one pool per remote address, i.e. one per leader)
+    /// Total number of pools (one pool per remote address, i.e. one per leader).
+    /// Deprecated, use `max_concurrent_connection` instead.
     /// Solana value is 1024
     /// https://github.com/solana-labs/solana/blob/v1.17.31/connection-cache/src/connection_cache.rs#L22
     #[serde(default = "ConfigQuic::default_connection_max_pools")]
+    #[deprecated]
     pub connection_max_pools: NonZeroUsize,
+
+    #[serde(default = "ConfigQuic::default_max_concurrent_connection")]
+    pub max_concurrent_connection: NonZeroUsize,
 
     /// TPU connection pool size per remote address
     /// Default is `solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE` (1 from 1.17.33 / 1.18.12, previous value is 4)
+    /// DEPRECATED
     #[serde(
         default = "ConfigQuic::default_connection_pool_size",
         deserialize_with = "ConfigQuic::deserialize_connection_pool_size"
     )]
+    #[deprecated]
     pub connection_pool_size: usize,
 
     /// Number of immediate retries in case of failed send (not applied to timedout)
@@ -333,15 +360,19 @@ pub struct ConfigQuic {
     /// Period of inactivity before sending a keep-alive packet
     /// https://docs.rs/quinn/0.10.2/quinn/struct.TransportConfig.html#method.keep_alive_interval
     /// Default is `solana_sdk::quic::QUIC_KEEP_ALIVE` -- 1s
+    /// DEPRECATED, this is a constant that should not be changed, always 1s
     #[serde(
         default = "ConfigQuic::default_keep_alive_interval",
         with = "humantime_serde"
     )]
+    #[deprecated]
     pub keep_alive_interval: Duration,
 
     /// Send tx timeout, for batches value multipled by number of transactions in the batch
     /// Solana default value is 10 seconds
+    /// DEPRECATED
     #[serde(default = "ConfigQuic::default_send_timeout", with = "humantime_serde")]
+    #[deprecated]
     pub send_timeout: Duration,
 
     /// Ports used by QUIC endpoints
@@ -357,17 +388,60 @@ pub struct ConfigQuic {
     /// https://github.com/anza-xyz/agave/blob/v1.17.31/streamer/src/nonblocking/quic.rs#L244-L279
     /// Minumum value is `QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS` -- for unstaked nodes, 128
     /// Value for staked calculated from total stake, but maximum is `QUIC_MAX_STAKED_CONCURRENT_STREAMS`
+    /// DEPRECATED, this is based of stake
     #[serde(default = "ConfigQuic::default_send_max_concurrent_streams")]
+    #[deprecated]
     pub send_max_concurrent_streams: usize,
 
     /// Extra TPU forward (transactions would be always sent to these nodes)
+    /// DEPRECATED
     #[serde(default)]
+    #[deprecated]
     pub extra_tpu_forward: Vec<ConfigExtraTpuForward>,
+
+    ///
+    /// How many endpoints to create for the QUIC gateway.
+    ///
+    /// Each [`quinn::Endpoint`] has its own event-loop.
+    /// Each endpoint can manage thousands of connections concurrently.
+    /// HOWEVER, each [`quinn::Endpoint`] has a state mutex lock.
+    ///
+    /// Quickly looking at quinn's source code, it seems that each lock acquisition is quite short live.
+    ///
+    /// If we have too many connections over a single endpoint, we might end up with a lot of contention on the endpoint mutex.
+    ///
+    /// At the same time, if we have too many endpoints, we might end up with too many event loops running concurrently.
+    ///
+    /// Talking with Anza, we should not open more than 5 endpoints to host QUIC connections.
+    /// Still, Anza told us that using multiple Endpoints yield marginal performance improvements.
+    /// Perhaps, multi-endpoints are more useful for the validator sides, where the number of connections is much higher.
+    #[serde(default = "ConfigQuic::default_num_endpoints")]
+    pub endpoint_count: NonZeroUsize,
+
+    ///
+    /// Connection eviction is trigger when the total number of connections in the QUIC gateway exceeds configured
+    /// `max_concurrent_connection`.
+    ///
+    /// Connection eviction will evict lower staked connection first that have not been used for in the last
+    /// `connection_eviction_grace` duration.
+    ///
+    /// Default is `2s` (2 seconds) which means that if a connection has not been used for 2 seconds, it will
+    /// be elligbile for eviction.
+    ///
+    #[serde(
+        default = "ConfigQuic::default_connection_eviction_grace",
+        with = "humantime_serde"
+    )]
+    pub connection_idle_eviction_grace: Duration,
 }
 
 impl ConfigQuic {
     pub const fn default_connection_max_pools() -> NonZeroUsize {
         NonZeroUsize::new(1024).unwrap()
+    }
+
+    pub const fn default_max_concurrent_connection() -> NonZeroUsize {
+        NonZeroUsize::new(2048).unwrap()
     }
 
     pub const fn default_connection_pool_size() -> usize {
@@ -414,6 +488,14 @@ impl ConfigQuic {
         D: Deserializer<'de>,
     {
         Range::deserialize(deserializer).map(|range| (range.start, range.end))
+    }
+
+    pub const fn default_num_endpoints() -> NonZeroUsize {
+        DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT
+    }
+
+    pub const fn default_connection_eviction_grace() -> Duration {
+        DEFAULT_LEADER_DURATION
     }
 }
 

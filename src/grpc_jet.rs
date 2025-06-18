@@ -40,7 +40,6 @@ use {
     solana_sdk::signer::Signer,
     std::sync::Arc,
     tokio::{
-        sync::oneshot,
         task::JoinSet,
         time::{Duration, interval},
     },
@@ -308,12 +307,8 @@ impl GrpcServer {
         config: ConfigJetGatewayClient,
         tx_sender: RpcServerImplSolanaLike,
         features: FeatureSet,
-        mut stop_rx: oneshot::Receiver<()>,
     ) {
-        tokio::select! {
-            () = Self::grpc_subscribe(signer, stake_info, config, tx_sender, features) => {},
-            _ = &mut stop_rx => {},
-        }
+        Self::grpc_subscribe(signer, stake_info, config, tx_sender, features).await
     }
 
     async fn grpc_subscribe(
@@ -332,7 +327,11 @@ impl GrpcServer {
         let mut tasks = JoinSet::<anyhow::Result<()>>::new();
         let mut quick_disconnects = 0;
         let mut last_connect_time = std::time::Instant::now();
-
+        let mut consecutive_failed_connects = 0;
+        let max_resubscribe_attempts = config
+            .maximum_subscribe_attempts
+            .map(|v| v.get())
+            .unwrap_or(usize::MAX - 1);
         loop {
             backoff.maybe_tick().await;
 
@@ -353,11 +352,15 @@ impl GrpcServer {
                 Ok((sink, stream)) => {
                     backoff.reset();
                     last_connect_time = std::time::Instant::now();
+                    consecutive_failed_connects = 0;
                     (sink, stream)
                 }
                 Err(error) => {
                     error!(?error, "failed to connect to gRPC jet-gateway");
-
+                    consecutive_failed_connects += 1;
+                    if consecutive_failed_connects >= max_resubscribe_attempts {
+                        panic!("Too many consecutive failed connects. Exiting...");
+                    }
                     // If error mentions feature flags, exit completely
                     if error.to_string().contains("features")
                         || error.to_string().contains("Feature")
@@ -367,7 +370,7 @@ impl GrpcServer {
                         );
                         // Wait a bit before exiting to allow log to flush
                         tokio::time::sleep(Duration::from_secs(1)).await;
-                        std::process::exit(1);
+                        panic!("Exiting due to feature flag incompatibility");
                     }
 
                     backoff.init();
@@ -379,13 +382,17 @@ impl GrpcServer {
 
             let my_identity = signer.pubkey();
 
+            let configured_max_messages_per100ms = config.max_streams;
             let loop_result = async {
                 loop {
                     if let Err(error) = async {
                         tokio::select! {
                             _ = limit_interval.tick() => {
                                 let limits = stake_info.get_stake_limits(my_identity);
-                                let messages_per100ms = limits.per100ms_limit;
+                                let messages_per100ms = configured_max_messages_per100ms
+                                    .map(|proposed| proposed.get())
+                                    .filter(|proposed| proposed <= &limits.per100ms_limit)
+                                    .unwrap_or(limits.per100ms_limit);
                                 let message = SubscribeRequest {
                                     message: Some(SubscribeRequestMessage::UpdateLimit(SubscribeUpdateLimit { messages_per100ms }))
                                 };
