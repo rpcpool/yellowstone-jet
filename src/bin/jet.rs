@@ -58,7 +58,7 @@ use {
         },
         util::WaitShutdown,
     },
-    yellowstone_shield_store::{BuiltPolicyStore, PolicyStoreBuilder},
+    yellowstone_shield_store::PolicyStore,
 };
 
 #[cfg(not(target_env = "msvc"))]
@@ -300,22 +300,12 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .features
         .is_feature_enabled(yellowstone_jet::proto::jet::Feature::YellowstoneShield)
     {
-        let rpc =
-            solana_client::nonblocking::rpc_client::RpcClient::new(config.upstream.rpc.clone());
-        let BuiltPolicyStore {
-            subscription,
-            policies,
-        } = PolicyStoreBuilder::new()
-            .rpc(rpc)
-            .vixen(config.upstream.primary_grpc.clone().into())
-            .build()
+        let policy_store = PolicyStore::build()
+            .config(config.upstream.clone().into())
+            .run(&local)
             .await?;
 
-        if let Some(sub) = subscription {
-            local.spawn_local(sub);
-        }
-
-        Arc::new(policies) as Arc<dyn TransactionPolicyStore + Send + Sync>
+        Arc::new(policy_store) as Arc<dyn TransactionPolicyStore + Send + Sync>
     } else {
         Arc::new(AlwaysAllowTransactionPolicyStore)
     };

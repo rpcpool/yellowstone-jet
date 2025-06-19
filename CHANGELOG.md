@@ -12,7 +12,9 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Breaking Changes
 
-### Features
+### Changes
+
+- Update `yellowstone-shield-store` to `0.5.1` which adjusts public API of `PolicyStore`.
 
 ### Fixes
 
