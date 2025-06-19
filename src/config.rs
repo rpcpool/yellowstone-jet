@@ -27,7 +27,7 @@ use {
         path::{Path, PathBuf},
     },
     tokio::{fs, time::Duration},
-    yellowstone_shield_store::{BufferConfig, NullConfig, OptConfig, VixenConfig},
+    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig, YellowstoneConfig},
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -122,7 +122,7 @@ impl ConfigIdentity {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
     /// Primary gRPC service
@@ -195,16 +195,21 @@ impl ConfigUpstreamGrpc {
     }
 }
 
-impl From<ConfigUpstreamGrpc> for VixenConfig<NullConfig> {
-    fn from(ConfigUpstreamGrpc { endpoint, x_token }: ConfigUpstreamGrpc) -> Self {
+impl From<ConfigUpstream> for PolicyStoreConfig {
+    fn from(
+        ConfigUpstream {
+            rpc,
+            primary_grpc: ConfigUpstreamGrpc { endpoint, x_token },
+            ..
+        }: ConfigUpstream,
+    ) -> Self {
         Self {
-            yellowstone: yellowstone_shield_store::YellowstoneConfig {
+            rpc: PolicyStoreRpcConfig { endpoint: rpc },
+            grpc: YellowstoneConfig {
                 endpoint,
                 x_token,
                 timeout: 60,
             },
-            buffer: BufferConfig::default(),
-            metrics: OptConfig::default(),
         }
     }
 }
