@@ -12,7 +12,7 @@ use {
         types::error::{ErrorObject, ErrorObjectOwned, INVALID_PARAMS_CODE},
     },
     solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient,
-    solana_sdk::pubkey::Pubkey,
+    solana_pubkey::Pubkey,
     std::{
         error::Error,
         fmt,
@@ -167,13 +167,9 @@ pub mod rpc_admin {
             core::{async_trait, RpcResult},
             proc_macros::rpc,
         },
-        solana_sdk::{
-            pubkey::Pubkey,
-            signer::{
-                keypair::{read_keypair_file, Keypair},
-                Signer,
-            },
-        },
+        solana_pubkey::Pubkey,
+        solana_signer::Signer,
+        solana_keypair::{read_keypair_file, Keypair},
         tracing::info,
     };
 
@@ -267,17 +263,10 @@ pub mod rpc_solana_like {
             payload::JetRpcSendTransactionConfig, rpc::invalid_params,
             solana::decode_and_deserialize, transaction_handler::TransactionHandler,
             transactions::SendTransactionsPool,
-        },
-        jsonrpsee::{
+        }, jsonrpsee::{
             core::{async_trait, RpcResult},
             proc_macros::rpc,
-        },
-        solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient,
-        solana_rpc_client_api::response::RpcVersionInfo,
-        solana_sdk::transaction::VersionedTransaction,
-        solana_transaction_status::UiTransactionEncoding,
-        std::sync::Arc,
-        tracing::debug,
+        }, solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient, solana_rpc_client_api::response::RpcVersionInfo, solana_transaction::versioned::VersionedTransaction, solana_transaction_status_client_types::UiTransactionEncoding, std::sync::Arc, tracing::debug
     };
 
     #[rpc(server, client)]

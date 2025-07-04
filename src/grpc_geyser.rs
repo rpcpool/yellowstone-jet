@@ -13,7 +13,9 @@ use {
     maplit::hashmap,
     semver::{Version, VersionReq},
     serde::Deserialize,
-    solana_sdk::{clock::Slot, hash::Hash, signature::Signature},
+    solana_clock::Slot,
+    solana_hash::Hash,
+    solana_signature::Signature,
     std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration},
     tokio::{
         sync::{
@@ -193,7 +195,6 @@ impl GeyserSubscriber {
                                     Ok(GrpcCommitmentLevel::Processed) => CommitmentLevel::Processed,
                                     Ok(GrpcCommitmentLevel::Confirmed) => CommitmentLevel::Confirmed,
                                     Ok(GrpcCommitmentLevel::Finalized) => CommitmentLevel::Finalized,
-                                    Ok(_) => continue,
                                     Err(error) => {
                                         anyhow::bail!("gRPC: failed to parse commitment level ({endpoint}): {error:?}")
                                     }

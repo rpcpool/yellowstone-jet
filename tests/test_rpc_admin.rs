@@ -2,10 +2,8 @@ mod testkit;
 
 use {
     jsonrpsee::http_client::HttpClientBuilder,
-    solana_sdk::{
-        signature::{write_keypair_file, Keypair},
-        signer::Signer,
-    },
+    solana_keypair::{write_keypair_file, Keypair},
+    solana_signer::Signer,
     std::{path::PathBuf, time::Duration},
     testkit::{default_config_quic, generate_random_local_addr},
     yellowstone_jet::{

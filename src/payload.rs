@@ -20,16 +20,7 @@ use {
             PublishTransaction, SubscribeTransaction, TransactionConfig, TransactionWrapper,
         },
         util::ms_since_epoch,
-    },
-    anyhow::Result,
-    base64::prelude::{Engine, BASE64_STANDARD},
-    serde::{Deserialize, Serialize},
-    solana_client::rpc_config::RpcSendTransactionConfig,
-    solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction},
-    solana_transaction_status::UiTransactionEncoding,
-    std::str::FromStr,
-    thiserror::Error,
-    tracing::debug,
+    }, anyhow::Result, base64::prelude::{Engine, BASE64_STANDARD}, serde::{Deserialize, Serialize}, solana_client::rpc_config::RpcSendTransactionConfig, solana_pubkey::{ParsePubkeyError, Pubkey}, solana_transaction::versioned::VersionedTransaction, solana_transaction_status_client_types::UiTransactionEncoding, std::str::FromStr, thiserror::Error, tracing::debug
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +80,7 @@ pub enum PayloadError {
     #[error("failed to deserialize transaction: {0}")]
     BincodeError(#[from] bincode::Error),
     #[error("failed to parse pubkey: {0}")]
-    InvalidPubkey(#[from] solana_sdk::pubkey::ParsePubkeyError),
+    InvalidPubkey(#[from] ParsePubkeyError),
     #[error("failed to convert proto message: {0}")]
     ProtoConversionError(String),
 }

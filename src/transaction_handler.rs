@@ -3,22 +3,13 @@ use {
         payload::JetRpcSendTransactionConfig,
         solana::decode_and_deserialize,
         transactions::{SendTransactionRequest, SendTransactionsPool},
-    },
-    anyhow::Result,
-    jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE},
-    solana_client::{
+    }, anyhow::Result, jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE}, solana_client::{
         client_error::ClientErrorKind,
         nonblocking::rpc_client::RpcClient,
         rpc_config::{RcpSanitizeTransactionConfig, RpcSimulateTransactionConfig},
         rpc_request::{RpcError, RpcResponseErrorData},
         rpc_response::{Response as RpcResponse, RpcSimulateTransactionResult, RpcVersionInfo},
-    },
-    solana_rpc_client_api::config::RpcSendTransactionConfig,
-    solana_sdk::{commitment_config::CommitmentConfig, transaction::VersionedTransaction},
-    solana_transaction_status::UiTransactionEncoding,
-    solana_version::Version,
-    std::sync::Arc,
-    thiserror::Error,
+    }, solana_commitment_config::CommitmentConfig, solana_rpc_client_api::config::RpcSendTransactionConfig, solana_transaction::versioned::VersionedTransaction, solana_transaction_status_client_types::UiTransactionEncoding, solana_version::Version, std::sync::Arc, thiserror::Error
 };
 
 #[derive(Debug, Error)]
@@ -249,18 +240,10 @@ impl TransactionHandler {
 #[cfg(test)]
 mod tests {
     use {
-        super::*,
-        solana_client::{
+        super::*, solana_client::{
             nonblocking::pubsub_client::PubsubClientResult, rpc_response::RpcResponseContext,
-        },
-        solana_sdk::{
-            hash::Hash,
-            message::Message,
-            pubkey::Pubkey,
-            signature::{Keypair, Signer},
-            system_instruction,
-            transaction::Transaction,
-        },
+        }, solana_hash::Hash, solana_keypair::Keypair, solana_message::Message, solana_pubkey::Pubkey, solana_signer::Signer, solana_system_interface::instruction::transfer, solana_transaction::Transaction
+
     };
 
     #[derive(Debug)]
@@ -282,7 +265,7 @@ mod tests {
                     api_version: None,
                 },
                 value: RpcSimulateTransactionResult {
-                    err: Some(solana_sdk::transaction::TransactionError::AccountBorrowOutstanding),
+                    err: Some(solana_transaction_error::TransactionError::AccountBorrowOutstanding),
                     logs: None,
                     accounts: None,
                     units_consumed: None,
@@ -382,7 +365,7 @@ mod tests {
         let keypair = Keypair::new();
         let recipient = Pubkey::new_unique();
         let instruction =
-            system_instruction::transfer(&keypair.pubkey(), &recipient, 1_000_000_000_000);
+            transfer(&keypair.pubkey(), &recipient, 1_000_000_000_000);
         let message = Message::new(&[instruction], Some(&keypair.pubkey()));
         let tx = Transaction::new(&[&keypair], message, Hash::default());
         let versioned_tx = VersionedTransaction::from(tx);
@@ -404,7 +387,7 @@ mod tests {
 
         let keypair = Keypair::new();
         let recipient = Pubkey::new_unique();
-        let instruction = system_instruction::transfer(&keypair.pubkey(), &recipient, 1_000);
+        let instruction = transfer(&keypair.pubkey(), &recipient, 1_000);
         let message = Message::new(&[instruction], Some(&keypair.pubkey()));
         let tx = Transaction::new(&[&keypair], message, Hash::default());
         let versioned_tx = VersionedTransaction::from(tx);

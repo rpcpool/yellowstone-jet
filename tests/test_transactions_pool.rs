@@ -1,35 +1,22 @@
 mod testkit;
 
 use {
-    core::panic,
-    solana_sdk::{
-        hash::Hash,
-        message::{v0, VersionedMessage},
-        pubkey::Pubkey,
-        signature::{Keypair, Signature},
-        signer::Signer,
-        system_instruction,
-        transaction::VersionedTransaction,
-    },
-    std::{
+    core::panic, solana_hash::Hash, solana_keypair::Keypair, solana_message::{v0, VersionedMessage}, solana_pubkey::Pubkey, solana_signature::Signature, solana_signer::Signer, solana_system_interface::instruction::transfer, solana_transaction::versioned::VersionedTransaction, std::{
         sync::{Arc, Mutex, RwLock as StdRwLock},
         time::Duration,
-    },
-    testkit::default_config_transaction,
-    tokio::sync::{broadcast, oneshot, Barrier, Notify, RwLock},
-    yellowstone_jet::{
+    }, testkit::default_config_transaction, tokio::sync::{broadcast, oneshot, Barrier, Notify, RwLock}, yellowstone_jet::{
         blockhash_queue::testkit::MockBlockhashQueue,
         transactions::{
             testkit::mock_rooted_tx_channel, BoxedTxChannelPermit, SendTransactionInfoId,
             SendTransactionRequest, SendTransactionsPool, TxChannel, TxChannelPermit,
         },
-    },
+    }
 };
 
 pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTransactionRequest {
     let fake_wallet_keypair1 = Keypair::new();
     let fake_wallet_keypair2 = Keypair::new();
-    let instructions = vec![system_instruction::transfer(
+    let instructions = vec![transfer(
         &fake_wallet_keypair1.pubkey(),
         &fake_wallet_keypair2.pubkey(),
         10,

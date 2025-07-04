@@ -1,11 +1,10 @@
 use {
     core::fmt,
     serde::{Deserialize, Serialize},
-    solana_sdk::{
-        pubkey::Pubkey,
-        signature::{Keypair, Signature},
-        signer::Signer,
-    },
+    solana_pubkey::Pubkey,
+    solana_signature::Signature,
+    solana_keypair::Keypair,
+    solana_signer::Signer,
     std::{
         collections::HashMap,
         sync::Arc,
@@ -275,7 +274,8 @@ impl OneTimeAuthTokenStore for InMemoryTokenStore {
 mod tests {
     use {
         super::*,
-        solana_sdk::signature::{Keypair, Signer},
+        solana_keypair::Keypair,
+        solana_signer::Signer,
         std::time::Duration,
     };
 

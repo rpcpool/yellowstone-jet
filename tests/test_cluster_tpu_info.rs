@@ -4,7 +4,10 @@ use {
         client_error::Result as ClientResult,
         rpc_response::{RpcContactInfo, RpcLeaderSchedule},
     },
-    solana_sdk::{clock::Slot, epoch_schedule::EpochSchedule, hash::Hash, pubkey::Pubkey},
+    solana_clock::Slot,
+    solana_epoch_schedule::EpochSchedule,
+    solana_hash::Hash,
+    solana_pubkey::Pubkey,
     std::{collections::HashMap, sync::Arc, time::Duration},
     tokio::sync::{broadcast, mpsc, Mutex, RwLock},
     yellowstone_jet::{

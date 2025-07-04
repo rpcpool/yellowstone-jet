@@ -155,7 +155,7 @@ pub mod testkit {
             client_error::{Error, ErrorKind},
             request::RpcRequest,
         },
-        solana_sdk::epoch_info::EpochInfo,
+        solana_epoch_info::EpochInfo,
         std::sync::Mutex,
     };
 

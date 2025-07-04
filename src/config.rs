@@ -1,29 +1,17 @@
 use {
-    crate::{feature_flags::FeatureSet, util::CommitmentLevel},
-    anyhow::Context,
-    serde::{
+    crate::{feature_flags::FeatureSet, util::CommitmentLevel}, anyhow::Context, serde::{
         de::{self, Deserializer},
         Deserialize,
-    },
-    solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
-    solana_sdk::{
-        pubkey::Pubkey,
-        quic::{
-            QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
-            QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
-        },
-        signer::keypair::{read_keypair_file, Keypair},
-    },
-    solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
-    std::{
+    }, solana_keypair::{read_keypair_file, Keypair}, solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE}, solana_pubkey::Pubkey, solana_quic_definitions::{
+        QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT, QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS
+    }, solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE, std::{
         collections::HashSet,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
         num::NonZeroUsize,
         ops::Range,
         path::{Path, PathBuf},
-    },
-    tokio::{fs, time::Duration},
-    yellowstone_shield_store::{BufferConfig, NullConfig, OptConfig, VixenConfig},
+    }, tokio::{fs, time::Duration},
+    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -118,7 +106,7 @@ impl ConfigIdentity {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
     /// Primary gRPC service
@@ -191,16 +179,21 @@ impl ConfigUpstreamGrpc {
     }
 }
 
-impl From<ConfigUpstreamGrpc> for VixenConfig<NullConfig> {
-    fn from(ConfigUpstreamGrpc { endpoint, x_token }: ConfigUpstreamGrpc) -> Self {
+impl From<ConfigUpstream> for PolicyStoreConfig {
+    fn from(
+        ConfigUpstream {
+            rpc,
+            primary_grpc: ConfigUpstreamGrpc { endpoint, x_token },
+            ..
+        }: ConfigUpstream,
+    ) -> Self {
         Self {
-            yellowstone: yellowstone_shield_store::YellowstoneConfig {
+            rpc: PolicyStoreRpcConfig { endpoint: rpc },
+            grpc: yellowstone_vixen::config::YellowstoneConfig {
                 endpoint,
                 x_token,
                 timeout: 60,
             },
-            buffer: BufferConfig::default(),
-            metrics: OptConfig::default(),
         }
     }
 }

@@ -1,21 +1,14 @@
 use {
-    quinn::crypto::rustls::QuicServerConfig,
-    rand::Rng,
-    solana_sdk::signature::Keypair,
-    solana_streamer::{
-        nonblocking::quic::ALPN_TPU_PROTOCOL_ID, tls_certificates::new_dummy_x509_certificate,
-    },
-    std::{
+    quinn::crypto::rustls::QuicServerConfig, rand::Rng, solana_keypair::Keypair, solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID, solana_tls_utils::{new_dummy_x509_certificate, SkipClientVerification}, std::{
         net::{SocketAddr, TcpListener},
         num::NonZeroUsize,
         sync::Arc,
         time::Duration,
-    },
-    yellowstone_jet::{
+    }, yellowstone_jet::{
         config::{ConfigQuic, ConfigQuicTpuPort, ConfigSendTransactionService},
         crypto_provider::crypto_provider,
         util::CommitmentLevel,
-    },
+    }
 };
 
 #[allow(dead_code)]
@@ -50,7 +43,7 @@ pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
     let mut crypto = rustls::ServerConfig::builder_with_provider(Arc::new(crypto_provider()))
         .with_safe_default_protocol_versions()
         .expect("server config build")
-        .with_client_cert_verifier(solana_streamer::quic::SkipClientVerification::new())
+        .with_client_cert_verifier(SkipClientVerification::new())
         .with_single_cert(vec![cert], priv_key)
         .expect("quinn server config");
     crypto.alpn_protocols = vec![ALPN_TPU_PROTOCOL_ID.to_vec()];

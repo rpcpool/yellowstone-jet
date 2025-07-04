@@ -5,7 +5,8 @@ use {
     crate::solana_rpc_utils::SolanaRpcErrorKindExt,
     futures::{stream, StreamExt},
     solana_client::{nonblocking::rpc_client::RpcClient, rpc_response::RpcVoteAccountStatus},
-    solana_sdk::{pubkey::Pubkey, quic::QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS},
+    solana_pubkey::Pubkey,
+    solana_quic_definitions::QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
     solana_streamer::nonblocking::quic::{compute_max_allowed_uni_streams, ConnectionPeerType},
     std::{
         collections::HashMap, future::Future, str::FromStr, sync::Arc, sync::RwLock as StdRwLock,
@@ -329,7 +330,9 @@ pub mod tests {
             rpc_request::RpcRequest,
             rpc_response::{RpcVoteAccountInfo, RpcVoteAccountStatus},
         },
-        solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer},
+        solana_pubkey::Pubkey,
+        solana_keypair::Keypair,
+        solana_signer::Signer,
         tokio::sync::{mpsc, oneshot},
     };
 

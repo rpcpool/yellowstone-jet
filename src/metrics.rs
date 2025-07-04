@@ -79,7 +79,8 @@ pub mod jet {
         prometheus::{
             HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
         },
-        solana_sdk::{clock::Slot, pubkey::Pubkey},
+        solana_clock::Slot,
+        solana_pubkey::Pubkey,
         std::{
             net::SocketAddr,
             sync::{Mutex, Once},

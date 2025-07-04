@@ -1,17 +1,5 @@
 use {
-    anyhow::Context,
-    clap::{Parser, Subcommand},
-    futures::future::{self, Either, FutureExt},
-    jsonrpsee::http_client::HttpClientBuilder,
-    reqwest::{Client, Url},
-    solana_client::rpc_client::RpcClientConfig,
-    solana_rpc_client::http_sender::HttpSender,
-    solana_sdk::{
-        commitment_config::CommitmentConfig,
-        pubkey::Pubkey,
-        signature::{read_keypair, Keypair},
-    },
-    std::{
+    anyhow::Context, clap::{Parser, Subcommand}, futures::future::{self, Either, FutureExt}, jsonrpsee::http_client::HttpClientBuilder, reqwest::{Client, Url}, solana_client::rpc_client::RpcClientConfig, solana_commitment_config::CommitmentConfig, solana_keypair::{read_keypair, Keypair}, solana_pubkey::Pubkey, solana_rpc_client::http_sender::HttpSender, std::{
         convert::identity,
         fs,
         path::PathBuf,
@@ -19,15 +7,12 @@ use {
             atomic::{AtomicUsize, Ordering},
             Arc,
         },
-    },
-    tokio::{
+    }, tokio::{
         runtime::Builder,
         signal::unix::{signal, SignalKind},
         sync::{broadcast, oneshot},
         task::JoinHandle,
-    },
-    tracing::{info, warn},
-    yellowstone_jet::{
+    }, tracing::{info, warn}, yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{
@@ -48,8 +33,7 @@ use {
         task_group::TaskGroup,
         transactions::{GrpcRootedTxReceiver, SendTransactionsPool},
         util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
-    },
-    yellowstone_shield_store::{BuiltPolicyStore, PolicyStoreBuilder, PolicyStoreTrait},
+    }, yellowstone_shield_store::{PolicyStore, PolicyStoreTrait}
 };
 
 #[derive(Debug, Parser)]
@@ -351,22 +335,12 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .features
         .is_feature_enabled(yellowstone_jet::proto::jet::Feature::YellowstoneShield)
     {
-        let rpc =
-            solana_client::nonblocking::rpc_client::RpcClient::new(config.upstream.rpc.clone());
-        let BuiltPolicyStore {
-            subscription,
-            policies,
-        } = PolicyStoreBuilder::new()
-            .rpc(rpc)
-            .vixen(config.upstream.primary_grpc.clone().into())
-            .build()
+        let policy_store = PolicyStore::build()
+            .config(config.upstream.clone().into())
+            .run(&local)
             .await?;
 
-        if let Some(sub) = subscription {
-            local.spawn_local(sub);
-        }
-
-        Some(Arc::new(policies) as Arc<dyn PolicyStoreTrait + Send + Sync>)
+        Some(Arc::new(policy_store) as Arc<dyn PolicyStoreTrait + Send + Sync>)
     } else {
         None
     };

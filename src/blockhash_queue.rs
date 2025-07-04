@@ -7,7 +7,8 @@ use {
             WaitShutdownSharedJoinHandle,
         },
     },
-    solana_sdk::{clock::MAX_RECENT_BLOCKHASHES, hash::Hash},
+    solana_clock::MAX_RECENT_BLOCKHASHES,
+    solana_hash::Hash,
     std::{collections::HashMap, ops::DerefMut, sync::Arc},
     tokio::sync::{broadcast, Notify, RwLock},
     tracing::debug,
@@ -136,7 +137,7 @@ pub mod testkit {
             grpc_geyser::SlotUpdateInfoWithCommitment,
             util::{BlockHeight, CommitmentLevel},
         },
-        solana_sdk::hash::Hash,
+        solana_hash::Hash,
         std::{collections::HashMap, sync::Arc},
         tokio::sync::RwLock,
     };

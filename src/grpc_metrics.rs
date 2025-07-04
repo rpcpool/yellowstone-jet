@@ -16,7 +16,9 @@ use {
         future::{pending, FutureExt},
         sink::SinkExt,
     },
-    solana_sdk::{clock::Slot, pubkey::Pubkey, signature::Signature},
+    solana_clock::Slot,
+    solana_pubkey::Pubkey,
+    solana_signature::Signature,
     std::{
         fmt,
         net::SocketAddr,

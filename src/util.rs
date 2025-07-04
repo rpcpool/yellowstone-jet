@@ -1,18 +1,9 @@
 use {
-    crate::quic_solana::{BoxedIdentityFlusher, IdentityFlusher},
-    futures::future::Either,
-    serde::Deserialize,
-    solana_sdk::{
-        pubkey::Pubkey,
-        signature::{Keypair, Signature},
-        signer::Signer,
-    },
-    std::{cmp::Ordering, future::Future, sync::Arc},
-    tokio::{
+    crate::quic_solana::{BoxedIdentityFlusher, IdentityFlusher}, futures::future::Either, serde::Deserialize, solana_keypair::Keypair, solana_pubkey::Pubkey, solana_signature::Signature, solana_signer::{Signer, SignerError}, std::{cmp::Ordering, future::Future, sync::Arc}, tokio::{
         sync::{oneshot, watch, Mutex, RwLock},
         task::{JoinError, JoinHandle},
         time::{sleep, Duration},
-    },
+    }
 };
 
 pub type BlockHeight = u64;
@@ -156,14 +147,14 @@ impl Signer for PubkeySigner {
         self.0.sign_message(message)
     }
 
-    fn try_pubkey(&self) -> Result<solana_sdk::pubkey::Pubkey, solana_sdk::signer::SignerError> {
+    fn try_pubkey(&self) -> Result<Pubkey, SignerError> {
         self.0.try_pubkey()
     }
 
     fn try_sign_message(
         &self,
         message: &[u8],
-    ) -> Result<Signature, solana_sdk::signer::SignerError> {
+    ) -> Result<Signature,  SignerError> {
         self.0.try_sign_message(message)
     }
 
