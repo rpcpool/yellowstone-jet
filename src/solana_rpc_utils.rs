@@ -151,11 +151,11 @@ pub mod testkit {
     use {
         serde::{Deserialize, Serialize},
         solana_client::rpc_sender::{RpcSender, RpcTransportStats},
+        solana_epoch_info::EpochInfo,
         solana_rpc_client_api::{
             client_error::{Error, ErrorKind},
             request::RpcRequest,
         },
-        solana_epoch_info::EpochInfo,
         std::sync::Mutex,
     };
 

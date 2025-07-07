@@ -1,14 +1,20 @@
 use {
-    quinn::crypto::rustls::QuicServerConfig, rand::Rng, solana_keypair::Keypair, solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID, solana_tls_utils::{new_dummy_x509_certificate, SkipClientVerification}, std::{
+    quinn::crypto::rustls::QuicServerConfig,
+    rand::Rng,
+    solana_keypair::Keypair,
+    solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
+    solana_tls_utils::{new_dummy_x509_certificate, SkipClientVerification},
+    std::{
         net::{SocketAddr, TcpListener},
         num::NonZeroUsize,
         sync::Arc,
         time::Duration,
-    }, yellowstone_jet::{
+    },
+    yellowstone_jet::{
         config::{ConfigQuic, ConfigQuicTpuPort, ConfigSendTransactionService},
         crypto_provider::crypto_provider,
         util::CommitmentLevel,
-    }
+    },
 };
 
 #[allow(dead_code)]
@@ -56,7 +62,7 @@ pub fn build_random_endpoint(addr: SocketAddr) -> (quinn::Endpoint, Keypair) {
 }
 
 #[allow(dead_code)]
-pub fn default_config_quic() -> ConfigQuic {
+pub const fn default_config_quic() -> ConfigQuic {
     ConfigQuic {
         connection_max_pools: ConfigQuic::default_connection_max_pools(),
         connection_pool_size: ConfigQuic::default_connection_pool_size(),
@@ -85,7 +91,7 @@ pub const fn default_config_transaction() -> ConfigSendTransactionService {
 }
 
 #[allow(dead_code)]
-pub fn default_config_quic_client() -> ConfigQuic {
+pub const fn default_config_quic_client() -> ConfigQuic {
     ConfigQuic {
         connection_max_pools: NonZeroUsize::new(256).unwrap(),
         connection_pool_size: 1,

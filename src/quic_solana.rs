@@ -9,22 +9,35 @@ use {
         },
         stake::StakeInfoMap,
         util::{PubkeySigner, ValueObserver},
-    }, lru::LruCache, quinn::{
+    },
+    lru::LruCache,
+    quinn::{
         crypto::rustls::QuicClientConfig, ClientConfig, ConnectError, Connection, ConnectionError,
         Endpoint, IdleTimeout, StoppedError, TransportConfig, VarInt, WriteError,
-    }, rand::{thread_rng, Rng}, rustls::{
+    },
+    rand::{thread_rng, Rng},
+    rustls::{
         client::danger::{HandshakeSignatureValid, ServerCertVerified},
         crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider},
         pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
         DigitallySignedStruct, Error,
-    }, solana_keypair::Keypair, solana_pubkey::Pubkey, solana_quic_definitions::QUIC_SEND_FAIRNESS, solana_signer::Signer, solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID, solana_tls_utils::new_dummy_x509_certificate, std::{
+    },
+    solana_keypair::Keypair,
+    solana_pubkey::Pubkey,
+    solana_quic_definitions::QUIC_SEND_FAIRNESS,
+    solana_signer::Signer,
+    solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
+    solana_tls_utils::new_dummy_x509_certificate,
+    std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::Arc,
         time::Duration,
-    }, tokio::{
+    },
+    tokio::{
         sync::{watch, AcquireError, Mutex, OnceCell, Semaphore},
         time::{timeout, Instant},
-    }, tracing::{debug, info}
+    },
+    tracing::{debug, info},
 };
 
 ///

@@ -330,8 +330,8 @@ pub mod tests {
             rpc_request::RpcRequest,
             rpc_response::{RpcVoteAccountInfo, RpcVoteAccountStatus},
         },
-        solana_pubkey::Pubkey,
         solana_keypair::Keypair,
+        solana_pubkey::Pubkey,
         solana_signer::Signer,
         tokio::sync::{mpsc, oneshot},
     };

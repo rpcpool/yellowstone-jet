@@ -1,6 +1,6 @@
 use {
     crate::{
-        grpc_geyser::{GeyserStreams, BlockMetaWithCommitment},
+        grpc_geyser::{BlockMetaWithCommitment, GeyserStreams},
         metrics::jet as metrics,
         util::{
             BlockHeight, CommitmentLevel, WaitShutdown, WaitShutdownJoinHandleResult,
@@ -44,7 +44,11 @@ impl BlockhashQueue {
         Self {
             slots: Arc::clone(&slots),
             shutdown: Arc::clone(&shutdown),
-            join_handle: Self::spawn(Self::subscribe(shutdown, slots, grpc.subscribe_block_meta())),
+            join_handle: Self::spawn(Self::subscribe(
+                shutdown,
+                slots,
+                grpc.subscribe_block_meta(),
+            )),
         }
     }
 
@@ -91,7 +95,9 @@ impl BlockhashQueue {
 
     pub async fn get_block_height(&self, block_hash: &Hash) -> Option<BlockHeight> {
         let slots = self.slots.read().await;
-        slots.get(block_hash).map(|block_meta| block_meta.block_height)
+        slots
+            .get(block_hash)
+            .map(|block_meta| block_meta.block_height)
     }
 
     pub async fn get_block_height_latest(
@@ -199,7 +205,9 @@ pub mod testkit {
     impl BlockHeightService for MockBlockhashQueue {
         async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
             let slots = self.slots.read().await;
-            slots.get(blockhash).map(|block_meta| block_meta.block_height)
+            slots
+                .get(blockhash)
+                .map(|block_meta| block_meta.block_height)
         }
 
         async fn get_block_height_for_commitment(

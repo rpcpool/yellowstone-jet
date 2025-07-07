@@ -18,7 +18,7 @@ use {
         sync::{broadcast, RwLock},
         time::{sleep, Duration, Instant},
     },
-    tracing::{info, warn, debug},
+    tracing::{debug, info, warn},
 };
 
 // Number of extra leader slots to keep in the schedule after the current slot
@@ -266,7 +266,10 @@ impl ClusterTpuInfo {
                 locked.latest_seen_slot = slot;
                 drop(locked);
 
-                debug!("Updated latest seen slot from {} to {}", previous_slot, slot);
+                debug!(
+                    "Updated latest seen slot from {} to {}",
+                    previous_slot, slot
+                );
 
                 // Check if we need to update the leader schedule
                 // We fetch the schedule for the entire epoch when we enter a new epoch
@@ -299,9 +302,12 @@ impl ClusterTpuInfo {
 
                                 // Clean up old leader schedule entries
                                 // Keep LEADER_SCHEDULE_RETENTION_SLOTS slots before current slot
-                                locked.leader_schedule.retain(|leader_schedule_slot, _pubkey| {
-                                    *leader_schedule_slot + LEADER_SCHEDULE_RETENTION_SLOTS > slot
-                                });
+                                locked
+                                    .leader_schedule
+                                    .retain(|leader_schedule_slot, _pubkey| {
+                                        *leader_schedule_slot + LEADER_SCHEDULE_RETENTION_SLOTS
+                                            > slot
+                                    });
 
                                 // Add new leader schedule entries
                                 // The RPC returns a map of validator pubkey -> array of slot indices within the epoch
@@ -327,7 +333,9 @@ impl ClusterTpuInfo {
                                     }
                                 }
 
-                                metrics::cluster_leaders_schedule_set_size(locked.leader_schedule.len());
+                                metrics::cluster_leaders_schedule_set_size(
+                                    locked.leader_schedule.len(),
+                                );
                                 info!(
                                     added,
                                     total = locked.leader_schedule.len(),

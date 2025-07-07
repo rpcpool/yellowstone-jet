@@ -1,9 +1,9 @@
 use {
     core::fmt,
     serde::{Deserialize, Serialize},
+    solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
-    solana_keypair::Keypair,
     solana_signer::Signer,
     std::{
         collections::HashMap,
@@ -272,12 +272,7 @@ impl OneTimeAuthTokenStore for InMemoryTokenStore {
 
 #[cfg(test)]
 mod tests {
-    use {
-        super::*,
-        solana_keypair::Keypair,
-        solana_signer::Signer,
-        std::time::Duration,
-    };
+    use {super::*, solana_keypair::Keypair, solana_signer::Signer, std::time::Duration};
 
     #[tokio::test]
     async fn test_sig_challenger() {
