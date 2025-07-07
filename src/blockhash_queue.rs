@@ -1,6 +1,6 @@
 use {
     crate::{
-        grpc_geyser::{GeyserStreams, SlotUpdateInfoWithCommitment},
+        grpc_geyser::{GeyserStreams, BlockMetaWithCommitment},
         metrics::jet as metrics,
         util::{
             BlockHeight, CommitmentLevel, WaitShutdown, WaitShutdownJoinHandleResult,
@@ -14,7 +14,7 @@ use {
     tracing::debug,
 };
 
-type SharedSlots = Arc<RwLock<HashMap<Hash, SlotUpdateInfoWithCommitment>>>;
+type SharedSlots = Arc<RwLock<HashMap<Hash, BlockMetaWithCommitment>>>;
 
 #[derive(Debug, Clone)]
 pub struct BlockhashQueue {
@@ -44,44 +44,54 @@ impl BlockhashQueue {
         Self {
             slots: Arc::clone(&slots),
             shutdown: Arc::clone(&shutdown),
-            join_handle: Self::spawn(Self::subscribe(shutdown, slots, grpc.subscribe_slots())),
+            join_handle: Self::spawn(Self::subscribe(shutdown, slots, grpc.subscribe_block_meta())),
         }
     }
 
     async fn subscribe(
         shutdown: Arc<Notify>,
         slots: SharedSlots,
-        mut slots_rx: broadcast::Receiver<SlotUpdateInfoWithCommitment>,
+        mut block_meta_rx: broadcast::Receiver<BlockMetaWithCommitment>,
     ) -> anyhow::Result<()> {
         loop {
-            let slot_update = tokio::select! {
+            let block_meta = tokio::select! {
                 _ = shutdown.notified() => return Ok(()),
-                message = slots_rx.recv() => message,
+                message = block_meta_rx.recv() => message,
             }
             .map_err(|error| anyhow::anyhow!("BlockhashQueue: grpc stream finished: {error:?}"))?;
 
             let mut slots = slots.write().await;
-            slots.insert(slot_update.block_hash, slot_update);
 
-            if slot_update.commitment == CommitmentLevel::Finalized {
+            // Store block metadata for ALL commitment levels
+            slots.insert(block_meta.block_hash, block_meta);
+
+            // Only clean up when we get a finalized block
+            if block_meta.commitment == CommitmentLevel::Finalized {
                 slots.retain(|_hash, slot| {
                     if slot.commitment == CommitmentLevel::Finalized {
-                        slot.block_height + MAX_RECENT_BLOCKHASHES as u64 > slot_update.block_height
+                        // Keep finalized blocks based on block height
+                        slot.block_height + MAX_RECENT_BLOCKHASHES as u64 > block_meta.block_height
                     } else {
-                        slot.slot > slot_update.slot
+                        // Keep non-finalized blocks based on slot number
+                        slot.slot > block_meta.slot
                     }
                 });
             }
-            debug!(slot = slot_update.slot, "add slot to the queue");
+
+            debug!(
+                slot = block_meta.slot,
+                commitment = ?block_meta.commitment,
+                "add block to the queue"
+            );
 
             metrics::blockhash_queue_set_size(slots.len());
-            metrics::blockhash_queue_set_slot(slot_update.commitment, slot_update.slot);
+            metrics::blockhash_queue_set_slot(block_meta.commitment, block_meta.slot);
         }
     }
 
     pub async fn get_block_height(&self, block_hash: &Hash) -> Option<BlockHeight> {
         let slots = self.slots.read().await;
-        slots.get(block_hash).map(|slot| slot.block_height)
+        slots.get(block_hash).map(|block_meta| block_meta.block_height)
     }
 
     pub async fn get_block_height_latest(
@@ -91,8 +101,8 @@ impl BlockhashQueue {
         let slots = self.slots.read().await;
         slots
             .values()
-            .filter(|info| info.commitment == commitment)
-            .map(|info| info.block_height)
+            .filter(|block_meta| block_meta.commitment == commitment)
+            .map(|block_meta| block_meta.block_height)
             .max()
     }
 }
@@ -101,7 +111,7 @@ impl BlockhashQueue {
 /// Interface to query block height information
 ///
 #[async_trait::async_trait]
-pub trait BlockHeighService {
+pub trait BlockHeightService {
     ///
     /// Get the block height for the given blockhash
     ///
@@ -116,7 +126,7 @@ pub trait BlockHeighService {
 }
 
 #[async_trait::async_trait]
-impl BlockHeighService for BlockhashQueue {
+impl BlockHeightService for BlockhashQueue {
     async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
         self.get_block_height(blockhash).await
     }
@@ -130,11 +140,10 @@ impl BlockHeighService for BlockhashQueue {
 }
 
 pub mod testkit {
-
     use {
-        super::{BlockHeighService, SharedSlots},
+        super::{BlockHeightService, SharedSlots},
         crate::{
-            grpc_geyser::SlotUpdateInfoWithCommitment,
+            grpc_geyser::BlockMetaWithCommitment,
             util::{BlockHeight, CommitmentLevel},
         },
         solana_hash::Hash,
@@ -159,14 +168,14 @@ pub mod testkit {
             let last_block = slots.values().last();
 
             let new_last_block = if let Some(last_block) = last_block {
-                SlotUpdateInfoWithCommitment {
+                BlockMetaWithCommitment {
                     block_hash: hash,
                     block_height: last_block.block_height + 1,
                     commitment: CommitmentLevel::Confirmed,
                     slot: last_block.slot + 1,
                 }
             } else {
-                SlotUpdateInfoWithCommitment {
+                BlockMetaWithCommitment {
                     block_hash: hash,
                     block_height: 1,
                     commitment: CommitmentLevel::Confirmed,
@@ -187,10 +196,10 @@ pub mod testkit {
     }
 
     #[async_trait::async_trait]
-    impl BlockHeighService for MockBlockhashQueue {
+    impl BlockHeightService for MockBlockhashQueue {
         async fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
             let slots = self.slots.read().await;
-            slots.get(blockhash).map(|slot| slot.block_height)
+            slots.get(blockhash).map(|block_meta| block_meta.block_height)
         }
 
         async fn get_block_height_for_commitment(
@@ -200,8 +209,8 @@ pub mod testkit {
             let slots = self.slots.read().await;
             slots
                 .values()
-                .filter(|info| info.commitment == commitment)
-                .map(|info| info.block_height)
+                .filter(|block_meta| block_meta.commitment == commitment)
+                .map(|block_meta| block_meta.block_height)
                 .max()
         }
     }

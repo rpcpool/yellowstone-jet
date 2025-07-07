@@ -75,7 +75,7 @@ pub fn collect_to_text() -> String {
 pub mod jet {
     use {
         super::{init2, REGISTRY},
-        crate::util::CommitmentLevel,
+        crate::util::{CommitmentLevel, SlotStatus},
         prometheus::{
             HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
         },
@@ -332,9 +332,9 @@ pub mod jet {
             .set(slot as i64)
     }
 
-    pub fn grpc_slot_set(commitment: CommitmentLevel, slot: Slot) {
+    pub fn grpc_slot_set(slot_status: SlotStatus, slot: Slot) {
         GRPC_SLOT_RECEIVED
-            .with_label_values(&[commitment.as_str()])
+            .with_label_values(&[slot_status.as_str()])
             .set(slot as i64);
     }
 

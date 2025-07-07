@@ -1,8 +1,8 @@
 use {
     crate::{
-        grpc_geyser::SlotUpdateInfoWithCommitment,
+        grpc_geyser::SlotUpdateWithStatus,
         metrics::jet as metrics,
-        util::{CommitmentLevel, IncrementalBackoff},
+        util::{IncrementalBackoff, SlotStatus},
     },
     futures::future::FutureExt,
     solana_client::{
@@ -18,8 +18,12 @@ use {
         sync::{broadcast, RwLock},
         time::{sleep, Duration, Instant},
     },
-    tracing::{info, warn},
+    tracing::{info, warn, debug},
 };
+
+// Number of extra leader slots to keep in the schedule after the current slot
+// This provides a buffer to avoid constantly fetching new schedules
+const LEADER_SCHEDULE_RETENTION_SLOTS: u64 = 42;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TpuInfo {
@@ -41,7 +45,6 @@ pub trait ClusterTpuRpcClient {
 }
 
 #[async_trait::async_trait]
-
 impl ClusterTpuRpcClient for RpcClient {
     async fn get_leader_schedule(
         &self,
@@ -53,6 +56,7 @@ impl ClusterTpuRpcClient for RpcClient {
     async fn get_cluster_nodes(&self) -> ClientResult<Vec<RpcContactInfo>> {
         self.get_cluster_nodes().await
     }
+
     async fn get_epoch_schedule(&self) -> ClientResult<EpochSchedule> {
         self.get_epoch_schedule().await
     }
@@ -60,7 +64,8 @@ impl ClusterTpuRpcClient for RpcClient {
 
 #[derive(Debug, Default)]
 struct ClusterTpuInfoInner {
-    processed_slot: Slot,
+    // Latest slot we've seen from FirstShredReceived
+    latest_seen_slot: Slot,
     epoch_schedule: EpochSchedule,
     leader_schedule: HashMap<Slot, Pubkey>,
     cluster_nodes: HashMap<Pubkey, RpcContactInfo>,
@@ -111,7 +116,7 @@ pub struct ClusterTpuInfo {
 impl ClusterTpuInfo {
     pub async fn new(
         rpc: Arc<dyn ClusterTpuRpcClient + Send + Sync + 'static>,
-        slots_rx: broadcast::Receiver<SlotUpdateInfoWithCommitment>,
+        slots_rx: broadcast::Receiver<SlotUpdateWithStatus>,
         cluster_nodes_update_interval: Duration,
     ) -> (Self, impl Future<Output = ()>) {
         assert_eq!(NUM_CONSECUTIVE_LEADER_SLOTS, 4);
@@ -132,7 +137,11 @@ impl ClusterTpuInfo {
                     _ = rx.recv() => {
                         info!("shutdown signal received in ClusterTpuInfo");
                     }
-                    _ = ClusterTpuInfo::update_leader_schedule(Arc::clone(&inner),Arc::clone(&rpc), slots_rx) => {
+                    _ = ClusterTpuInfo::update_latest_slot_and_leader_schedule(
+                        Arc::clone(&inner),
+                        Arc::clone(&rpc),
+                        slots_rx,
+                    ) => {
                         info!("Update leader schedule suddenly finished");
                     }
                     _ = ClusterTpuInfo::update_cluster_nodes(inner, rpc, cluster_nodes_update_interval) => {
@@ -144,8 +153,8 @@ impl ClusterTpuInfo {
         )
     }
 
-    pub async fn processed_slot(&self) -> Slot {
-        self.inner.read().await.processed_slot
+    pub async fn latest_seen_slot(&self) -> Slot {
+        self.inner.read().await.latest_seen_slot
     }
 
     pub async fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
@@ -215,27 +224,23 @@ impl ClusterTpuInfo {
         }
     }
 
-    async fn update_leader_schedule(
+    async fn update_latest_slot_and_leader_schedule(
         inner: Arc<RwLock<ClusterTpuInfoInner>>,
         rpc: Arc<dyn ClusterTpuRpcClient + Send + Sync + 'static>,
-        mut slots_rx: broadcast::Receiver<SlotUpdateInfoWithCommitment>,
+        mut slots_rx: broadcast::Receiver<SlotUpdateWithStatus>,
     ) -> anyhow::Result<()> {
         let mut backoff = IncrementalBackoff::default();
-
         let epoch_schedule = { inner.read().await.epoch_schedule.clone() };
 
         loop {
-            let mut slot_processed = None;
-            let mut slot_schedule = None;
+            let mut new_latest_slot = None;
 
             tokio::select! {
                 message = slots_rx.recv() => match message {
-                    Ok(slot_update) => match slot_update.commitment {
-                        CommitmentLevel::Processed => {
-                            slot_processed = Some(slot_update.slot)
-                        }
-                        CommitmentLevel::Confirmed | CommitmentLevel::Finalized => {
-                            slot_schedule = Some(slot_update.slot);
+                    Ok(slot_update) => {
+                        if slot_update.slot_status == SlotStatus::SlotFirstShredReceived {
+                            new_latest_slot = Some(slot_update.slot);
+                            debug!("Received FirstShredReceived for slot {}", slot_update.slot);
                         }
                     },
                     Err(error) => {
@@ -244,102 +249,106 @@ impl ClusterTpuInfo {
                 }
             }
 
-            // forward to latest update
+            // Consume all pending updates to get the latest slot
             while let Ok(slot_update_next) = slots_rx.try_recv() {
-                match slot_update_next.commitment {
-                    CommitmentLevel::Processed => {
-                        slot_processed = Some(
-                            slot_processed
-                                .unwrap_or(slot_update_next.slot)
-                                .max(slot_update_next.slot),
-                        );
-                    }
-                    CommitmentLevel::Confirmed | CommitmentLevel::Finalized => {
-                        slot_schedule = Some(
-                            slot_schedule
-                                .unwrap_or(slot_update_next.slot)
-                                .max(slot_update_next.slot),
-                        );
-                    }
+                if slot_update_next.slot_status == SlotStatus::SlotFirstShredReceived {
+                    new_latest_slot = Some(
+                        new_latest_slot
+                            .unwrap_or(slot_update_next.slot)
+                            .max(slot_update_next.slot),
+                    );
                 }
             }
 
-            if let Some(slot) = slot_processed {
+            if let Some(slot) = new_latest_slot {
                 let mut locked = inner.write().await;
-                locked.processed_slot = slot;
-            }
+                let previous_slot = locked.latest_seen_slot;
+                locked.latest_seen_slot = slot;
+                drop(locked);
 
-            let Some(slot) = slot_schedule else {
-                continue;
-            };
+                debug!("Updated latest seen slot from {} to {}", previous_slot, slot);
 
-            // check that leader schedule exists for received slot
-            let locked = inner.read().await;
-            if locked.leader_schedule.contains_key(&slot) {
-                continue;
-            }
-            drop(locked);
+                // Check if we need to update the leader schedule
+                // We fetch the schedule for the entire epoch when we enter a new epoch
+                // or when we don't have schedule data for the current slot
+                let locked = inner.read().await;
+                let need_schedule_update = !locked.leader_schedule.contains_key(&slot);
+                drop(locked);
 
-            // update leader schedule
-            backoff.reset();
-            let slot_offset =
-                epoch_schedule.get_first_slot_in_epoch(epoch_schedule.get_epoch(slot));
-            loop {
-                tokio::select! {
-                    _ = backoff.maybe_tick() => {}
-                }
+                if need_schedule_update {
+                    // Get the first slot of the epoch that contains our current slot
+                    let epoch = epoch_schedule.get_epoch(slot);
+                    let epoch_start_slot = epoch_schedule.get_first_slot_in_epoch(epoch);
 
-                let ts = Instant::now();
-                match rpc.get_leader_schedule(Some(slot)).await {
-                    Ok(Some(leader_schedule)) => {
-                        let mut locked = inner.write().await;
+                    info!(
+                        "Need to fetch leader schedule for epoch {} (slot {} is in this epoch)",
+                        epoch, slot
+                    );
 
-                        locked
-                            .leader_schedule
-                            .retain(|leader_schedule_slot, _pubkey| {
-                                // no magic, 42 is a silly number to left some leaders
-                                leader_schedule_slot + 42 > slot
-                            });
+                    // Fetch the leader schedule with retries
+                    backoff.reset();
+                    loop {
+                        tokio::select! {
+                            _ = backoff.maybe_tick() => {}
+                        }
 
-                        // update
-                        let mut added = 0;
-                        for (pubkey, slots) in leader_schedule {
-                            match pubkey.parse() {
-                                Ok(pubkey) => {
-                                    for slot_index in slots {
-                                        if locked
-                                            .leader_schedule
-                                            .insert(slot_offset + slot_index as u64, pubkey)
-                                            .is_none()
-                                        {
-                                            added += 1;
+                        let ts = Instant::now();
+                        match rpc.get_leader_schedule(Some(slot)).await {
+                            Ok(Some(leader_schedule)) => {
+                                let mut locked = inner.write().await;
+
+                                // Clean up old leader schedule entries
+                                // Keep LEADER_SCHEDULE_RETENTION_SLOTS slots before current slot
+                                locked.leader_schedule.retain(|leader_schedule_slot, _pubkey| {
+                                    *leader_schedule_slot + LEADER_SCHEDULE_RETENTION_SLOTS > slot
+                                });
+
+                                // Add new leader schedule entries
+                                // The RPC returns a map of validator pubkey -> array of slot indices within the epoch
+                                let mut added = 0;
+                                for (pubkey_str, slot_indices) in leader_schedule {
+                                    match pubkey_str.parse::<Pubkey>() {
+                                        Ok(pubkey) => {
+                                            for slot_index in slot_indices {
+                                                let absolute_slot = epoch_start_slot + slot_index as u64;
+                                                if locked
+                                                    .leader_schedule
+                                                    .insert(absolute_slot, pubkey)
+                                                    .is_none()
+                                                {
+                                                    added += 1;
+                                                }
+                                            }
                                         }
+                                        Err(error) => warn!(
+                                            "failed to parse leader schedule identity {}: {error:?}",
+                                            pubkey_str
+                                        ),
                                     }
                                 }
-                                Err(error) => warn!(
-                                    "failed to parse leader schedule identity {pubkey}: {error:?}"
-                                ),
+
+                                metrics::cluster_leaders_schedule_set_size(locked.leader_schedule.len());
+                                info!(
+                                    added,
+                                    total = locked.leader_schedule.len(),
+                                    elapsed_ms = ts.elapsed().as_millis(),
+                                    "updated leader schedule for epoch {}",
+                                    epoch
+                                );
+
+                                break;
+                            }
+                            Ok(None) => {
+                                metrics::cluster_leaders_schedule_set_size(0);
+                                backoff.init();
+                                warn!("RPC returned no leader schedule for slot: {}", slot);
+                            }
+                            Err(error) => {
+                                metrics::cluster_leaders_schedule_set_size(0);
+                                backoff.init();
+                                warn!("failed to get leader schedule: {error:?}");
                             }
                         }
-                        metrics::cluster_leaders_schedule_set_size(locked.leader_schedule.len());
-                        info!(
-                            added,
-                            total = locked.leader_schedule.len(),
-                            elapsed_ms = ts.elapsed().as_millis(),
-                            "update leader schedule"
-                        );
-
-                        break;
-                    }
-                    Ok(None) => {
-                        metrics::cluster_leaders_schedule_set_size(0);
-                        backoff.init();
-                        warn!("failed to find schedule for leader schedule slot: {slot}");
-                    }
-                    Err(error) => {
-                        metrics::cluster_leaders_schedule_set_size(0);
-                        backoff.init();
-                        warn!("failed to get leader schedule: {error:?}");
                     }
                 }
             }
@@ -355,9 +364,10 @@ impl ClusterTpuInfo {
     pub async fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo> {
         let inner = self.inner.read().await;
 
+        // Get TPU info for current and future leaders based on latest_seen_slot
         (0..=leader_forward_count as u64)
             .filter_map(|i| {
-                let leader_slot = inner.processed_slot + i * NUM_CONSECUTIVE_LEADER_SLOTS;
+                let leader_slot = inner.latest_seen_slot + i * NUM_CONSECUTIVE_LEADER_SLOTS;
                 inner.get_tpu_info(leader_slot)
             })
             .collect::<Vec<_>>()
