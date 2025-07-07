@@ -15,6 +15,8 @@ use {
 
 pub type BlockHeight = u64;
 
+// Maitaining CommitmentLevel for compatibility.
+// + Because is not the right thing to say that the commitmment of a block is a status of the slot.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CommitmentLevel {
@@ -51,6 +53,72 @@ impl Ord for CommitmentLevel {
 impl PartialOrd for CommitmentLevel {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+// SlotStatus is used to represent the status of a slot in the gRPC API.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlotStatus {
+    SlotProcessed,
+    SlotConfirmed,
+    SlotFinalized,
+    #[default]
+    SlotFirstShredReceived,
+    SlotCompleted,
+    SlotCreatedBank,
+    SlotDead,
+}
+
+impl SlotStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SlotProcessed => "processed",
+            Self::SlotConfirmed => "confirmed",
+            Self::SlotFinalized => "finalized",
+            Self::SlotFirstShredReceived => "first_shred_received",
+            Self::SlotCompleted => "completed",
+            Self::SlotCreatedBank => "created_bank",
+            Self::SlotDead => "dead",
+        }
+    }
+    const fn as_i32(self) -> i32 {
+        match self {
+            Self::SlotProcessed => 0,
+            Self::SlotConfirmed => 1,
+            Self::SlotFinalized => 2,
+            Self::SlotFirstShredReceived => 3,
+            Self::SlotCompleted => 4,
+            Self::SlotCreatedBank => 5,
+            Self::SlotDead => 6,
+        }
+    }
+}
+
+impl Ord for SlotStatus {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_i32().cmp(&other.as_i32())
+    }
+}
+
+impl PartialOrd for SlotStatus {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<i32> for SlotStatus {
+    fn from(status: i32) -> Self {
+        match status {
+            0 => Self::SlotProcessed,
+            1 => Self::SlotConfirmed,
+            2 => Self::SlotFinalized,
+            3 => Self::SlotFirstShredReceived,
+            4 => Self::SlotCompleted,
+            5 => Self::SlotCreatedBank,
+            6 => Self::SlotDead,
+            _ => Self::default(),
+        }
     }
 }
 

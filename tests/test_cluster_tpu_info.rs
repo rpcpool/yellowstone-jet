@@ -1,20 +1,12 @@
 use {
-    maplit::hashmap,
-    solana_client::{
+    maplit::hashmap, solana_client::{
         client_error::Result as ClientResult,
         rpc_response::{RpcContactInfo, RpcLeaderSchedule},
-    },
-    solana_clock::Slot,
-    solana_epoch_schedule::EpochSchedule,
-    solana_hash::Hash,
-    solana_pubkey::Pubkey,
-    std::{collections::HashMap, sync::Arc, time::Duration},
-    tokio::sync::{Mutex, RwLock, broadcast, mpsc},
-    yellowstone_jet::{
+    }, solana_clock::Slot, solana_epoch_schedule::EpochSchedule, solana_pubkey::Pubkey, std::{collections::HashMap, sync::Arc, time::Duration}, tokio::sync::{Mutex, RwLock, broadcast, mpsc}, yellowstone_jet::{
         cluster_tpu_info::{ClusterTpuInfo, ClusterTpuRpcClient},
-        grpc_geyser::{GeyserStreams, GrpcUpdateMessage, SlotUpdateInfoWithCommitment},
-        util::CommitmentLevel,
-    },
+        grpc_geyser::{BlockMetaWithCommitment, GeyserStreams, GrpcUpdateMessage, SlotUpdateWithStatus},
+        util::SlotStatus,
+    }
 };
 
 const fn create_contact_info(pubkey: String) -> RpcContactInfo {
@@ -37,7 +29,7 @@ const fn create_contact_info(pubkey: String) -> RpcContactInfo {
 }
 
 #[tokio::test]
-async fn test_processed_slot_update() {
+async fn test_slot_update() {
     let mock_grpc = MockGrpc::new();
     let rpc = MockRpc::default();
     let (cluster_tpu, cluster_futs) = ClusterTpuInfo::new(
@@ -47,41 +39,36 @@ async fn test_processed_slot_update() {
     )
     .await;
     let h = tokio::spawn(cluster_futs);
-    let slot_proccessed = SlotUpdateInfoWithCommitment {
-        block_hash: Hash::new_unique(),
+    let slot_update = SlotUpdateWithStatus {
         slot: 1,
-        block_height: 1,
-        commitment: CommitmentLevel::Processed,
+        slot_status: SlotStatus::SlotFirstShredReceived,
     };
 
-    let slot_proccessed2 = SlotUpdateInfoWithCommitment {
-        block_hash: Hash::new_unique(),
+    let slot_update2 = SlotUpdateWithStatus {
         slot: 2,
-        block_height: 1,
-        commitment: CommitmentLevel::Processed,
+        slot_status: SlotStatus::SlotFirstShredReceived,
     };
 
     mock_grpc
         .slots_tx
-        .send(slot_proccessed)
+        .send(slot_update)
         .expect("Error sending update");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_slot_processed = cluster_tpu.processed_slot();
-
-    assert_eq!(slot_proccessed.slot, cluster_slot_processed);
+    let cluster_slot = cluster_tpu.latest_seen_slot();
+    assert_eq!(slot_update.slot, cluster_slot);
 
     mock_grpc
         .slots_tx
-        .send(slot_proccessed2)
+        .send(slot_update2)
         .expect("Error sending update");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let cluster_slot_processed = cluster_tpu.processed_slot();
+    let cluster_slot = cluster_tpu.latest_seen_slot();
 
-    assert_eq!(slot_proccessed2.slot, cluster_slot_processed);
+    assert_eq!(slot_update2.slot, cluster_slot);
 
     cluster_tpu.shutdown().await;
     let _ = h.await;
@@ -157,7 +144,7 @@ async fn test_leader_schedule_doesnot_update_before_slot_confirmed() {
 }
 
 #[tokio::test]
-async fn test_leader_schedule_update_after_slot_confirmed() {
+async fn test_leader_schedule_update_after_slot_update() {
     let key1 = Pubkey::new_unique();
     let mock_grpc = MockGrpc::new();
 
@@ -181,16 +168,14 @@ async fn test_leader_schedule_update_after_slot_confirmed() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let slot_confirmed = SlotUpdateInfoWithCommitment {
-        block_hash: Hash::new_unique(),
+    let slot_update = SlotUpdateWithStatus {
         slot: 0,
-        block_height: 1,
-        commitment: CommitmentLevel::Confirmed,
+        slot_status: SlotStatus::SlotFirstShredReceived,
     };
 
     mock_grpc
         .slots_tx
-        .send(slot_confirmed)
+        .send(slot_update)
         .expect("Error sending update");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -229,16 +214,14 @@ async fn deletes_old_slots() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let slot_confirmed = SlotUpdateInfoWithCommitment {
-        block_hash: Hash::new_unique(),
+    let slot_update = SlotUpdateWithStatus {
         slot: 0,
-        block_height: 1,
-        commitment: CommitmentLevel::Confirmed,
+        slot_status: SlotStatus::SlotFirstShredReceived,
     };
 
     mock_grpc
         .slots_tx
-        .send(slot_confirmed)
+        .send(slot_update)
         .expect("Error sending update");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -263,16 +246,14 @@ async fn deletes_old_slots() {
     let schedule_compare2 = hashmap! {slot_offset + 1 => key2, slot_offset + 2 => key2};
     rpc.set_schedule(schedule).await;
 
-    let slot_confirmed = SlotUpdateInfoWithCommitment {
-        block_hash: Hash::new_unique(),
+    let slot_update = SlotUpdateWithStatus {
         slot,
-        block_height: 1,
-        commitment: CommitmentLevel::Confirmed,
+        slot_status: SlotStatus::SlotFirstShredReceived,
     };
 
     mock_grpc
         .slots_tx
-        .send(slot_confirmed)
+        .send(slot_update)
         .expect("Error sending update");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -314,16 +295,14 @@ async fn test_get_tpus_in_cluster() {
     let h = tokio::spawn(cluster_futs);
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let slot_confirmed = SlotUpdateInfoWithCommitment {
-        block_hash: Hash::new_unique(),
+    let slot_update = SlotUpdateWithStatus {
         slot: 1,
-        block_height: 1,
-        commitment: CommitmentLevel::Confirmed,
+        slot_status: SlotStatus::SlotFirstShredReceived,
     };
 
     mock_grpc
         .slots_tx
-        .send(slot_confirmed)
+        .send(slot_update)
         .expect("Error sending update");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -372,7 +351,8 @@ impl ClusterTpuRpcClient for MockRpc {
 }
 
 struct MockGrpc {
-    slots_tx: broadcast::Sender<SlotUpdateInfoWithCommitment>,
+    slots_tx: broadcast::Sender<SlotUpdateWithStatus>,
+    block_meta_tx: broadcast::Sender<BlockMetaWithCommitment>,
     transactions_rx: Arc<Mutex<Option<mpsc::Receiver<GrpcUpdateMessage>>>>,
     _transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
 }
@@ -380,10 +360,12 @@ struct MockGrpc {
 impl MockGrpc {
     fn new() -> Self {
         let (slots_tx, _) = broadcast::channel(1);
+        let (block_meta_tx, _) = broadcast::channel(1);
         let (_transactions_tx, transactions_rx) = mpsc::channel(10);
 
         Self {
             slots_tx,
+            block_meta_tx,
             transactions_rx: Arc::new(Mutex::new(Some(transactions_rx))),
             _transactions_tx,
         }
@@ -392,11 +374,15 @@ impl MockGrpc {
 
 #[async_trait::async_trait]
 impl GeyserStreams for MockGrpc {
-    fn subscribe_slots(&self) -> broadcast::Receiver<SlotUpdateInfoWithCommitment> {
+    fn subscribe_slots(&self) -> broadcast::Receiver<SlotUpdateWithStatus> {
         self.slots_tx.subscribe()
     }
 
     async fn subscribe_transactions(&self) -> Option<mpsc::Receiver<GrpcUpdateMessage>> {
         self.transactions_rx.lock().await.take()
+    }
+
+    fn subscribe_block_meta(&self) -> broadcast::Receiver<BlockMetaWithCommitment> {
+        self.block_meta_tx.subscribe()
     }
 }
