@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
 
     std::env::set_var("PROTOC", protobuf_src::protoc());
     tonic_build::configure()
-        .compile_protos(&["proto/jet.proto", "proto/metrics.proto"], &["proto"])?;
+        .compile_protos(&["proto/jet.proto", "proto/lewis.proto"], &["proto"])?;
 
     Ok(())
 }

@@ -21,7 +21,7 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{signal, SignalKind},
-        sync::{broadcast, oneshot},
+        sync::oneshot,
         task::JoinHandle,
     },
     tracing::{info, warn},
@@ -29,15 +29,14 @@ use {
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{
-            load_config, ConfigJet, ConfigJetGatewayClient, ConfigMetricsUpstream,
+            load_config, ConfigJet, ConfigJetGatewayClient,
             PrometheusConfig, RpcErrorStrategy,
         },
         feature_flags::FeatureSet,
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_jet::GrpcServer,
-        grpc_metrics::GrpcClient as GrpcMetricsClient,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
-        quic::{QuicClient, QuicClientMetric},
+        quic::QuicClient,
         quic_solana::ConnectionCache,
         rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType},
         setup_tracing,
@@ -226,41 +225,41 @@ async fn spawn_jet_gw_listener(
     }
 }
 
-fn spawn_lewis_metric_subscriber(
-    config: Option<ConfigMetricsUpstream>,
-    mut rx: broadcast::Receiver<QuicClientMetric>,
-) -> JoinHandle<()> {
-    let grpc_metrics = GrpcMetricsClient::new(config);
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(metric) => match metric {
-                    QuicClientMetric::SendAttempts {
-                        sig,
-                        leader,
-                        leader_tpu_addr,
-                        slots,
-                        error,
-                    } => {
-                        grpc_metrics.emit_send_attempt(
-                            &sig,
-                            &leader,
-                            slots.as_slice(),
-                            leader_tpu_addr,
-                            error,
-                        );
-                    }
-                },
-                Err(broadcast::error::RecvError::Closed) => {
-                    break;
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    warn!("lewis metrics subscriber lagged behind");
-                }
-            }
-        }
-    })
-}
+// fn spawn_lewis_metric_subscriber(
+//     config: Option<ConfigMetricsUpstream>,
+//     mut rx: broadcast::Receiver<QuicClientMetric>,
+// ) -> JoinHandle<()> {
+//     let grpc_metrics = GrpcMetricsClient::new(config);
+//     tokio::spawn(async move {
+//         loop {
+//             match rx.recv().await {
+//                 Ok(metric) => match metric {
+//                     QuicClientMetric::SendAttempts {
+//                         sig,
+//                         leader,
+//                         leader_tpu_addr,
+//                         slots,
+//                         error,
+//                     } => {
+//                         grpc_metrics.emit_send_attempt(
+//                             &sig,
+//                             &leader,
+//                             slots.as_slice(),
+//                             leader_tpu_addr,
+//                             error,
+//                         );
+//                     }
+//                 },
+//                 Err(broadcast::error::RecvError::Closed) => {
+//                     break;
+//                 }
+//                 Err(broadcast::error::RecvError::Lagged(_)) => {
+//                     warn!("lewis metrics subscriber lagged behind");
+//                 }
+//             }
+//         }
+//     })
+// }
 
 ///
 /// This task keeps the stake metrics up to date for the current identity.
@@ -404,8 +403,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         shield_policy_store,
     );
 
-    let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
-    let lewis = spawn_lewis_metric_subscriber(config.metrics_upstream, quic_tx_metrics_listener);
+    // let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
+    // let lewis = spawn_lewis_metric_subscriber(config.metrics_upstream, quic_tx_metrics_listener);
 
     let (send_transactions, send_tx_pool_fut) = SendTransactionsPool::spawn(
         config.send_transaction_service,
@@ -495,9 +494,9 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         keep_stake_metrics_up_to_date_task(stake_info_identity_observer, stake_info_map.clone()),
     );
 
-    tg.spawn_cancelable("lewis", async move {
-        lewis.await.expect("lewis");
-    });
+    // tg.spawn_cancelable("lewis", async move {
+    //     lewis.await.expect("lewis");
+    // });
 
     tg.spawn_with_shutdown("geyser", |mut stop| async move {
         tokio::select! {

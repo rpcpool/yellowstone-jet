@@ -449,13 +449,13 @@ pub mod jet {
             .inc();
     }
 
-    pub fn metrics_upstream_push_inc(status: Result<(), ()>) {
+    pub fn lewis_events_push_inc(status: Result<(), ()>) {
         METRICS_UPSTREAM_PUSH
             .with_label_values(&[if status.is_ok() { "ok" } else { "overflow" }])
             .inc()
     }
 
-    pub fn metrics_upstream_feed_inc() {
+    pub fn lewis_events_feed_inc() {
         METRICS_UPSTREAM_FEED.inc()
     }
 
