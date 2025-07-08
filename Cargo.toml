@@ -108,6 +108,14 @@ protobuf-src = "1.1.0"
 tonic-build = "0.12.3"
 vergen = { version = "9.0.1", features = ["build", "rustc"] }
 
+[[bin]]
+name = "jet-lewis-dummy-server"
+path = "src/bin/jet_lewis_dummy_server.rs"
+
+[[bin]]
+name = "jet-lewis-dummy-client"
+path = "src/bin/jet_lewis_dummy_client.rs"
+
 [lints.clippy]
 clone_on_ref_ptr = "deny"
 missing_const_for_fn = "deny"

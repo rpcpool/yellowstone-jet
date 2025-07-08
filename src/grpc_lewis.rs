@@ -287,3 +287,114 @@ pub mod event_builders {
         }
     }
 }
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MockEventSender {
+        send_count: Arc<AtomicUsize>,
+        should_fail: bool,
+    }
+
+    impl EventSender for MockEventSender {
+        fn try_send(&self, event: Event) -> Result<(), mpsc::error::TrySendError<Event>> {
+            if self.should_fail {
+                Err(mpsc::error::TrySendError::Full(event))
+            } else {
+                self.send_count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn test_client_creation() {
+        let (client, fut) = LewisEventClient::new(None);
+        assert!(client.tx.is_none());
+        assert!(fut.is_none());
+        client.emit(Event { event: None });
+
+        let config = ConfigLewisEvents {
+            lewis_endpoint: "http://localhost:8005".to_string(),
+            queue_size_grpc: 100,
+            queue_size_buffer: 1000,
+        };
+        let (client, fut) = LewisEventClient::new(Some(config));
+        assert!(client.tx.is_some());
+        assert!(fut.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_event_emission() {
+        use solana_signature::Signature;
+
+        let mock_sender = Arc::new(MockEventSender {
+            send_count: Arc::new(AtomicUsize::new(0)),
+            should_fail: false,
+        });
+
+        let client = LewisEventClient {
+            tx: Some(mock_sender.clone() as Arc<dyn EventSender>),
+        };
+
+        let event = event_builders::JetEventBuilder::new(
+            "req-1".to_string(),
+            "cascade-1".to_string(),
+            "gateway-1".to_string(),
+            "jet-1".to_string(),
+            &Signature::default(),
+            12345,
+        )
+        .build();
+
+        client.emit(event);
+        assert_eq!(mock_sender.send_count.load(Ordering::Relaxed), 1);
+
+        let fail_sender = Arc::new(MockEventSender {
+            send_count: Arc::new(AtomicUsize::new(0)),
+            should_fail: true,
+        });
+
+        let fail_client = LewisEventClient {
+            tx: Some(fail_sender.clone() as Arc<dyn EventSender>),
+        };
+
+        fail_client.emit(Event { event: None });
+        assert_eq!(fail_sender.send_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_connection_lifecycle() {
+        struct FailingFactory {
+            attempts: Arc<AtomicUsize>,
+        }
+
+        impl ConnectionFactory for FailingFactory {
+            fn create_endpoint(&self, _endpoint: &str) -> anyhow::Result<Endpoint> {
+                self.attempts.fetch_add(1, Ordering::Relaxed);
+                anyhow::bail!("Test failure")
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let config = ConfigLewisEvents {
+            lewis_endpoint: "http://test".to_string(),
+            queue_size_grpc: 10,
+            queue_size_buffer: 10,
+        };
+
+        let (_client, fut) = LewisEventClient::with_factory(
+            Some(config),
+            Box::new(FailingFactory { attempts: attempts.clone() }),
+        );
+
+        if let Some(fut) = fut {
+            let handle = tokio::spawn(fut);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            handle.abort();
+        }
+
+        assert!(attempts.load(Ordering::Relaxed) > 0);
+    }
+}
