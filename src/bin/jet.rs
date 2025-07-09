@@ -24,27 +24,12 @@ use {
         sync::oneshot,
         task::JoinHandle,
     },
-    tracing::{info, warn},
+    tracing::{info, warn, error},
     yellowstone_jet::{
-        blockhash_queue::BlockhashQueue,
-        cluster_tpu_info::ClusterTpuInfo,
-        config::{
+        blockhash_queue::BlockhashQueue, cluster_tpu_info::ClusterTpuInfo, config::{
             load_config, ConfigJet, ConfigJetGatewayClient,
             PrometheusConfig, RpcErrorStrategy,
-        },
-        feature_flags::FeatureSet,
-        grpc_geyser::{GeyserStreams, GeyserSubscriber},
-        grpc_jet::GrpcServer,
-        metrics::{collect_to_text, inject_job_label, jet as metrics},
-        quic::QuicClient,
-        quic_solana::ConnectionCache,
-        rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType},
-        setup_tracing,
-        solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
-        stake::{self, spawn_cache_stake_info_map, StakeInfoMap},
-        task_group::TaskGroup,
-        transactions::{GrpcRootedTxReceiver, SendTransactionsPool},
-        util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
+        }, feature_flags::FeatureSet, grpc_geyser::{GeyserStreams, GeyserSubscriber}, grpc_jet::GrpcServer, grpc_lewis::LewisEventClient, metrics::{collect_to_text, inject_job_label, jet as metrics}, quic::QuicClient, quic_solana::ConnectionCache, rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType}, setup_tracing, solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy}, stake::{self, spawn_cache_stake_info_map, StakeInfoMap}, task_group::TaskGroup, transactions::{GrpcRootedTxReceiver, SendTransactionsPool}, util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown}
     },
     yellowstone_shield_store::{PolicyStore, PolicyStoreTrait},
 };
@@ -225,42 +210,6 @@ async fn spawn_jet_gw_listener(
     }
 }
 
-// fn spawn_lewis_metric_subscriber(
-//     config: Option<ConfigMetricsUpstream>,
-//     mut rx: broadcast::Receiver<QuicClientMetric>,
-// ) -> JoinHandle<()> {
-//     let grpc_metrics = GrpcMetricsClient::new(config);
-//     tokio::spawn(async move {
-//         loop {
-//             match rx.recv().await {
-//                 Ok(metric) => match metric {
-//                     QuicClientMetric::SendAttempts {
-//                         sig,
-//                         leader,
-//                         leader_tpu_addr,
-//                         slots,
-//                         error,
-//                     } => {
-//                         grpc_metrics.emit_send_attempt(
-//                             &sig,
-//                             &leader,
-//                             slots.as_slice(),
-//                             leader_tpu_addr,
-//                             error,
-//                         );
-//                     }
-//                 },
-//                 Err(broadcast::error::RecvError::Closed) => {
-//                     break;
-//                 }
-//                 Err(broadcast::error::RecvError::Lagged(_)) => {
-//                     warn!("lewis metrics subscriber lagged behind");
-//                 }
-//             }
-//         }
-//     })
-// }
-
 ///
 /// This task keeps the stake metrics up to date for the current identity.
 ///
@@ -379,6 +328,18 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await;
 
+    let (lewis_client, lewis_fut) = match config.lewis_events {
+        Some(lewis_config) => {
+            info!("Lewis event tracking enabled");
+            let (client, fut) = LewisEventClient::new(Some(lewis_config));
+            (Some(client), fut)
+        }
+        None => {
+            info!("Lewis event tracking disabled");
+            (None, None)
+        }
+    };
+
     let rooted_tx_geyser_rx = geyser
         .subscribe_transactions()
         .await
@@ -401,10 +362,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         config.quic.clone(),
         Arc::new(quic_session),
         shield_policy_store,
+        lewis_client.clone(),
     );
-
-    // let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
-    // let lewis = spawn_lewis_metric_subscriber(config.metrics_upstream, quic_tx_metrics_listener);
 
     let (send_transactions, send_tx_pool_fut) = SendTransactionsPool::spawn(
         config.send_transaction_service,
@@ -494,9 +453,20 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         keep_stake_metrics_up_to_date_task(stake_info_identity_observer, stake_info_map.clone()),
     );
 
-    // tg.spawn_cancelable("lewis", async move {
-    //     lewis.await.expect("lewis");
-    // });
+     if let Some(fut) = lewis_fut {
+        tg.spawn_with_shutdown("lewis_events", |mut stop| async move {
+            tokio::select! {
+                result = fut => {
+                    if let Err(e) = result {
+                        error!("Lewis event loop error: {}", e);
+                    }
+                }
+                _ = &mut stop => {
+                    info!("Shutting down Lewis event client");
+                }
+            }
+        });
+    }
 
     tg.spawn_with_shutdown("geyser", |mut stop| async move {
         tokio::select! {

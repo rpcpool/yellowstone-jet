@@ -1,10 +1,6 @@
 use {
     crate::{
-        cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
-        config::{ConfigQuic, ConfigQuicTpuPort},
-        metrics::jet::{self as metrics, shield_policies_not_found_inc, sts_tpu_denied_inc_by},
-        quic_solana::{ConnectionCache, ConnectionCacheSendPermit},
-        transactions::SendTransactionInfoId,
+        cluster_tpu_info::{ClusterTpuInfo, TpuInfo}, config::{ConfigQuic, ConfigQuicTpuPort}, grpc_lewis::LewisEventClient, metrics::jet::{self as metrics, shield_policies_not_found_inc, sts_tpu_denied_inc_by}, quic_solana::{ConnectionCache, ConnectionCacheSendPermit}, transactions::SendTransactionInfoId
     },
     futures::{
         future::{join_all, BoxFuture},
@@ -27,6 +23,7 @@ pub struct QuicClient {
     extra_tpu_forward: Vec<TpuInfo>,
     tx_broadcast_metrics: broadcast::Sender<QuicClientMetric>,
     shield_policy_store: Option<Arc<dyn PolicyStoreTrait + Send + Sync + 'static>>,
+    lewis_client: Option<LewisEventClient>,
 }
 
 impl fmt::Debug for QuicClient {
@@ -181,6 +178,7 @@ impl QuicClient {
         config: ConfigQuic,
         connection_cache: Arc<ConnectionCache>,
         shield_policy_store: Option<Arc<dyn PolicyStoreTrait + Send + Sync + 'static>>,
+        lewis_client: Option<LewisEventClient>
     ) -> Self {
         let extra_tpu_forward = config
             .extra_tpu_forward
@@ -201,6 +199,7 @@ impl QuicClient {
             extra_tpu_forward,
             tx_broadcast_metrics: tx,
             shield_policy_store,
+            lewis_client,
         }
     }
 
