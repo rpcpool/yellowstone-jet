@@ -10,11 +10,9 @@ use {
         nonblocking::rpc_client::RpcClient,
         rpc_response::{RpcContactInfo, RpcLeaderSchedule},
     },
-    solana_sdk::{
-        clock::{NUM_CONSECUTIVE_LEADER_SLOTS, Slot},
-        epoch_schedule::EpochSchedule,
-        pubkey::Pubkey,
-    },
+    solana_clock::{NUM_CONSECUTIVE_LEADER_SLOTS, Slot},
+    solana_epoch_schedule::EpochSchedule,
+    solana_pubkey::Pubkey,
     std::{
         collections::HashMap,
         future::Future,

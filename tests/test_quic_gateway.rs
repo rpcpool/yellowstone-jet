@@ -4,11 +4,10 @@ use {
     crate::testkit::{build_validator_quic_tpu_endpoint, find_available_port},
     bytes::Bytes,
     quinn::{ConnectionError, VarInt},
-    solana_sdk::{
-        pubkey::Pubkey,
-        signature::{Keypair, Signature},
-        signer::Signer,
-    },
+    solana_keypair::Keypair,
+    solana_pubkey::Pubkey,
+    solana_signature::Signature,
+    solana_signer::Signer,
     std::{
         array,
         collections::HashMap,

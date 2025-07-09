@@ -9,7 +9,7 @@ use {
         types::error::{ErrorObject, ErrorObjectOwned, INVALID_PARAMS_CODE},
     },
     rpc_admin::JetIdentityUpdater,
-    solana_sdk::pubkey::Pubkey,
+    solana_pubkey::Pubkey,
     std::{
         error::Error,
         fmt,
@@ -139,13 +139,9 @@ pub mod rpc_admin {
             core::{RpcResult, async_trait},
             proc_macros::rpc,
         },
-        solana_sdk::{
-            pubkey::Pubkey,
-            signer::{
-                Signer,
-                keypair::{Keypair, read_keypair_file},
-            },
-        },
+        solana_keypair::{Keypair, read_keypair_file},
+        solana_pubkey::Pubkey,
+        solana_signer::Signer,
         std::sync::Arc,
         tokio::sync::Mutex,
         tracing::info,
@@ -264,8 +260,8 @@ pub mod rpc_solana_like {
             proc_macros::rpc,
         },
         solana_rpc_client_api::response::RpcVersionInfo,
-        solana_sdk::transaction::VersionedTransaction,
-        solana_transaction_status::UiTransactionEncoding,
+        solana_transaction::versioned::VersionedTransaction,
+        solana_transaction_status_client_types::UiTransactionEncoding,
         tracing::debug,
     };
 

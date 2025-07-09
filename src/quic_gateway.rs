@@ -63,17 +63,14 @@ use {
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, StoppedError,
         TransportConfig, VarInt, WriteError, crypto::rustls::QuicClientConfig,
     },
+    solana_keypair::Keypair,
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
-    solana_quic_client::nonblocking::quic_client::{QuicClientCertificate, SkipServerVerification},
-    solana_sdk::{
-        pubkey::Pubkey,
-        quic::{QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT, QUIC_SEND_FAIRNESS},
-        signature::{Keypair, Signature},
-        signer::Signer,
-    },
-    solana_streamer::{
-        nonblocking::quic::ALPN_TPU_PROTOCOL_ID, tls_certificates::new_dummy_x509_certificate,
-    },
+    solana_pubkey::Pubkey,
+    solana_quic_definitions::{QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT, QUIC_SEND_FAIRNESS},
+    solana_signature::Signature,
+    solana_signer::Signer,
+    solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
+    solana_tls_utils::{QuicClientCertificate, SkipServerVerification, new_dummy_x509_certificate},
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -2053,7 +2050,8 @@ mod test {
             GatewayCommand, GatewayIdentityUpdater, StakeSortedPeerSet,
             UpdateGatewayIdentityCommand,
         },
-        solana_sdk::{pubkey::Pubkey, signature::Keypair},
+        solana_keypair::Keypair,
+        solana_pubkey::Pubkey,
         std::time::Duration,
         tokio::sync::mpsc,
     };
@@ -2116,7 +2114,7 @@ mod test {
 mod stake_based_eviction_strategy_test {
     use {
         crate::quic_gateway::{ConnectionEvictionStrategy, StakeSortedPeerSet},
-        solana_sdk::pubkey::Pubkey,
+        solana_pubkey::Pubkey,
         std::time::{Duration, Instant},
     };
 

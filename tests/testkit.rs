@@ -1,10 +1,9 @@
 use {
     quinn::crypto::rustls::QuicServerConfig,
     rand::Rng,
-    solana_sdk::signature::Keypair,
-    solana_streamer::{
-        nonblocking::quic::ALPN_TPU_PROTOCOL_ID, tls_certificates::new_dummy_x509_certificate,
-    },
+    solana_keypair::Keypair,
+    solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
+    solana_tls_utils::{SkipClientVerification, new_dummy_x509_certificate},
     std::{
         net::{SocketAddr, TcpListener},
         sync::Arc,
@@ -52,7 +51,7 @@ pub fn build_validator_quic_tpu_endpoint(kp: &Keypair, addr: SocketAddr) -> quin
     let mut crypto = rustls::ServerConfig::builder_with_provider(Arc::new(crypto_provider()))
         .with_safe_default_protocol_versions()
         .expect("server config build")
-        .with_client_cert_verifier(solana_streamer::quic::SkipClientVerification::new())
+        .with_client_cert_verifier(SkipClientVerification::new())
         .with_single_cert(vec![cert], priv_key)
         .expect("quinn server config");
     crypto.alpn_protocols = vec![ALPN_TPU_PROTOCOL_ID.to_vec()];

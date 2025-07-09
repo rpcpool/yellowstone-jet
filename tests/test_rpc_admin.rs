@@ -2,10 +2,8 @@ mod testkit;
 
 use {
     jsonrpsee::http_client::HttpClientBuilder,
-    solana_sdk::{
-        signature::{Keypair, write_keypair_file},
-        signer::Signer,
-    },
+    solana_keypair::{Keypair, write_keypair_file},
+    solana_signer::Signer,
     std::{
         path::PathBuf,
         sync::{Arc, RwLock},

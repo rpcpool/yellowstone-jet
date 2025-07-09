@@ -8,12 +8,10 @@ use {
         util::CommitmentLevel,
     },
     bytes::Bytes,
-    solana_sdk::{
-        clock::{MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES, Slot},
-        pubkey::Pubkey,
-        signature::Signature,
-        transaction::VersionedTransaction,
-    },
+    solana_clock::{MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES, Slot},
+    solana_pubkey::Pubkey,
+    solana_signature::Signature,
+    solana_transaction::versioned::VersionedTransaction,
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         future::Future,
@@ -804,7 +802,7 @@ pub mod testkit {
     use {
         super::RootedTxReceiver,
         crate::util::CommitmentLevel,
-        solana_sdk::signature::Signature,
+        solana_signature::Signature,
         std::{
             collections::HashMap,
             sync::{Arc, RwLock as StdRwLock},

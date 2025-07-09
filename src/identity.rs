@@ -1,7 +1,6 @@
 use {
-    crate::rpc::rpc_admin::JetIdentityUpdater,
-    solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer},
-    std::sync::Arc,
+    crate::rpc::rpc_admin::JetIdentityUpdater, solana_keypair::Keypair, solana_pubkey::Pubkey,
+    solana_signer::Signer, std::sync::Arc,
 };
 
 ///

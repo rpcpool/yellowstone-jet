@@ -9,14 +9,12 @@ use {
         Deserialize,
         de::{self, Deserializer},
     },
+    solana_keypair::{Keypair, read_keypair_file},
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
-    solana_sdk::{
-        pubkey::Pubkey,
-        quic::{
-            QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
-            QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
-        },
-        signer::keypair::{Keypair, read_keypair_file},
+    solana_pubkey::Pubkey,
+    solana_quic_definitions::{
+        QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
+        QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
     },
     solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
     std::{
@@ -27,7 +25,8 @@ use {
         path::{Path, PathBuf},
     },
     tokio::{fs, time::Duration},
-    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig, YellowstoneConfig},
+    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
+    yellowstone_vixen::config::YellowstoneConfig,
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>

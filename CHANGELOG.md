@@ -10,7 +10,9 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
--
+## [14.1.0]
+
+- Moved away from solana-sdk for individuals solana crates instead.
 
 ## [14.0.0]
 

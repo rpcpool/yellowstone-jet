@@ -10,13 +10,11 @@ use {
     solana_client::{
         nonblocking::rpc_client::RpcClient as SolanaRpcClient, rpc_client::RpcClientConfig,
     },
+    solana_commitment_config::CommitmentConfig,
+    solana_keypair::{Keypair, read_keypair},
+    solana_pubkey::Pubkey,
+    solana_quic_definitions::QUIC_MAX_TIMEOUT,
     solana_rpc_client::http_sender::HttpSender,
-    solana_sdk::{
-        commitment_config::CommitmentConfig,
-        pubkey::Pubkey,
-        quic::QUIC_MAX_TIMEOUT,
-        signature::{Keypair, read_keypair},
-    },
     std::{
         fs,
         path::PathBuf,
