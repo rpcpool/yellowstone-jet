@@ -241,6 +241,14 @@ impl ClusterTpuInfo {
                         if slot_update.slot_status == SlotStatus::SlotFirstShredReceived {
                             new_latest_slot = Some(slot_update.slot);
                             debug!("Received FirstShredReceived for slot {}", slot_update.slot);
+                        } else {
+                            // TODO: Debug, on Solana Test Validator we don't receive FirstShredReceived
+                            new_latest_slot = Some(
+                                new_latest_slot
+                                    .unwrap_or(slot_update.slot)
+                                    .max(slot_update.slot),
+                            );
+                            debug!("Received slot update: {:?}", slot_update);
                         }
                     },
                     Err(error) => {

@@ -4,18 +4,15 @@ use {
     rand::Rng,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
-    yellowstone_jet::{
-        grpc_lewis::event_builders::JetEventBuilder,
-        proto::lewis::{
-            transaction_tracker_client::TransactionTrackerClient,
-            Event,
-        },
-        setup_tracing,
-    },
     std::time::Duration,
     tokio::time::interval,
     tonic::transport::channel::Endpoint,
     tracing::info,
+    yellowstone_jet::{
+        grpc_lewis::event_builders::JetEventBuilder,
+        proto::lewis::{transaction_tracker_client::TransactionTrackerClient, Event},
+        setup_tracing,
+    },
 };
 
 #[derive(Debug, Clone, Parser)]

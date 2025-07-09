@@ -1,7 +1,7 @@
 use {
+    solana_clock::Slot,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
-    solana_clock::Slot,
     std::{net::SocketAddr, time::SystemTime},
 };
 
@@ -53,7 +53,7 @@ pub enum SendResult {
 }
 
 impl SendResult {
-    pub fn is_success(&self) -> bool {
+    pub const fn is_success(&self) -> bool {
         matches!(self, SendResult::Success)
     }
 }

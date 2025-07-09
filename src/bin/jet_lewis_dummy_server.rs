@@ -1,25 +1,20 @@
-
 use {
     clap::Parser,
     solana_signature::Signature,
+    std::{
+        net::SocketAddr,
+        sync::atomic::{AtomicU64, Ordering},
+    },
+    tonic::{transport::server::Server, Request, Response, Status, Streaming},
+    tracing::{error, info},
     yellowstone_jet::{
         proto::lewis::{
-            transaction_tracker_server::{TransactionTracker, TransactionTrackerServer},
             event::Event as EventType,
+            transaction_tracker_server::{TransactionTracker, TransactionTrackerServer},
             Event, EventAck,
         },
         setup_tracing,
     },
-    std::{
-        net::SocketAddr,
-        sync::atomic::{AtomicU64, Ordering},
-        time::Duration,
-    },
-    tonic::{
-        transport::server::{Server, TcpIncoming},
-        Request, Response, Status, Streaming,
-    },
-    tracing::{error, info},
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -34,24 +29,16 @@ async fn main() -> anyhow::Result<()> {
     setup_tracing(false)?;
     let args = Args::parse();
 
-    let incoming = TcpIncoming::new(
-        args.listen,
-        true,
-        Some(Duration::from_secs(20)),
-    )
-    .map_err(|error| anyhow::anyhow!(error))?;
-
     let service = TransactionTrackerServer::new(DummyLewisService {
         client_counter: AtomicU64::new(0),
     });
 
     info!("Lewis dummy server listening on {}", args.listen);
 
-    Server::builder()
+    Ok(Server::builder()
         .add_service(service)
-        .serve_with_incoming(incoming)
-        .await
-        .map_err(Into::into)
+        .serve(args.listen)
+        .await?)
 }
 
 #[derive(Debug)]
@@ -73,7 +60,7 @@ impl DummyLewisService {
 
             match event.event {
                 Some(EventType::Cascade(_)) => {
-                   continue; // Skip cascade events
+                    continue; // Skip cascade events
                 }
                 Some(EventType::Jet(jet)) => {
                     let sig = Signature::try_from(jet.sig)
@@ -122,11 +109,10 @@ impl TransactionTracker for DummyLewisService {
     ) -> Result<Response<EventAck>, Status> {
         let client_id = self.client_counter.fetch_add(1, Ordering::Relaxed);
 
-        tokio::spawn(async move {
-            if let Err(error) = Self::handle_stream(client_id, request).await {
-                error!(client_id, %error, "stream handler error");
-            }
-        });
+        if let Err(error) = Self::handle_stream(client_id, request).await {
+            error!(client_id, %error, "stream handler error");
+            return Err(Status::internal("stream handler error"));
+        }
 
         Ok(Response::new(EventAck {}))
     }

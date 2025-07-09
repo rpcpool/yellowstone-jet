@@ -1,223 +1,157 @@
 use {
     crate::{
-        config::ConfigLewisEvents, event_tracker::{SendAttempt, SendResult, TransactionEventTracker}, metrics::jet as metrics, proto::lewis::{
-            transaction_tracker_client::TransactionTrackerClient, Event, EventAck
-        }, util::IncrementalBackoff
-    }, anyhow::Context, futures::{
-        future::{pending, Future, FutureExt},
-        sink::SinkExt,
-    }, solana_clock::Slot, solana_signature::Signature, std::{
-        sync::Arc,
-        time::Duration,
-    }, tokio::sync::mpsc, tonic::transport::channel::{Channel, Endpoint}, tracing::error
+        config::ConfigLewisEvents,
+        event_tracker::{SendAttempt, SendResult, TransactionEventTracker},
+        metrics::jet as metrics,
+        proto::lewis::{transaction_tracker_client::TransactionTrackerClient, Event, EventAck},
+    },
+    anyhow::Context,
+    futures::SinkExt,
+    solana_clock::Slot,
+    solana_signature::Signature,
+    std::{future::Future, sync::Arc, time::Duration},
+    tokio::sync::mpsc,
+    tonic::transport::Endpoint,
+    tracing::{debug, info, warn},
 };
-
-pub trait EventSender: Send + Sync + 'static {
-    fn try_send(&self, event: Event) -> Result<(), mpsc::error::TrySendError<Event>>;
-}
-
-impl EventSender for mpsc::Sender<Event> {
-    fn try_send(&self, event: Event) -> Result<(), mpsc::error::TrySendError<Event>> {
-        self.try_send(event)
-    }
-}
-
-pub trait ConnectionFactory: Send + Sync + 'static {
-    fn create_endpoint(&self, endpoint: &str) -> anyhow::Result<Endpoint>;
-}
-
-pub struct DefaultConnectionFactory;
-
-impl ConnectionFactory for DefaultConnectionFactory {
-    fn create_endpoint(&self, endpoint: &str) -> anyhow::Result<Endpoint> {
-        Ok(Endpoint::from_shared(endpoint.to_string())?
-            // TODO: make configurable
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(1))
-            .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())?)
-    }
-}
 
 #[derive(Clone)]
 pub struct LewisEventClient {
-    tx: Option<Arc<dyn EventSender>>,
+    tx: Option<mpsc::Sender<Event>>,
 }
 
 impl LewisEventClient {
-    /// Creates a new event tracker based on configuration
-    /// Returns None if no config provided, otherwise returns the tracker and its background task
     pub fn create_event_tracker(
         config: Option<ConfigLewisEvents>,
-    ) -> (Option<Arc<dyn TransactionEventTracker + Send + Sync>>, Option<impl Future<Output = anyhow::Result<()>> + Send>) {
-        match config {
-            None => (None, None),
-            Some(config) => {
-                let (client, fut) = Self::new(Some(config));
-                let tracker = Arc::new(client) as Arc<dyn TransactionEventTracker + Send + Sync>;
-                (Some(tracker), fut)
-            }
-        }
+    ) -> (
+        Option<Arc<dyn TransactionEventTracker + Send + Sync>>,
+        Option<impl Future<Output = anyhow::Result<()>> + Send>,
+    ) {
+        let Some(config) = config else {
+            return (None, None);
+        };
+
+        let (tx, rx) = mpsc::channel(config.queue_size_buffer);
+        let client = Self { tx: Some(tx) };
+
+        let tracker = Arc::new(client) as Arc<dyn TransactionEventTracker + Send + Sync>;
+        info!(
+            "Lewis event tracker created for endpoint: {}",
+            config.lewis_endpoint
+        );
+
+        let fut = Self::run_event_loop(config, rx);
+        (Some(tracker), Some(fut))
     }
 
-    pub fn new(
-        config: Option<ConfigLewisEvents>,
-    ) -> (Self, Option<impl Future<Output = anyhow::Result<()>> + Send>) {
-        match config {
-            None => (Self { tx: None }, None),
-            Some(config) => {
-                let (tx, rx) = mpsc::channel(config.queue_size_buffer);
-                let client = Self {
-                    tx: Some(Arc::new(tx) as Arc<dyn EventSender>),
-                };
-
-                let fut = Self::create_event_loop(
-                    config,
-                    rx,
-                    Box::new(DefaultConnectionFactory),
-                );
-
-                (client, Some(fut))
-            }
-        }
-    }
-
-    pub fn with_factory(
-        config: Option<ConfigLewisEvents>,
-        connection_factory: Box<dyn ConnectionFactory>,
-    ) -> (Self, Option<impl Future<Output = anyhow::Result<()>> + Send>) {
-        match config {
-            None => (Self { tx: None }, None),
-            Some(config) => {
-                let (tx, rx) = mpsc::channel(config.queue_size_buffer);
-                let client = Self {
-                    tx: Some(Arc::new(tx) as Arc<dyn EventSender>),
-                };
-
-                let fut = Self::create_event_loop(config, rx, connection_factory);
-
-                (client, Some(fut))
-            }
-        }
-    }
-
-    fn create_event_loop(
+    async fn run_event_loop(
         config: ConfigLewisEvents,
-        rx: mpsc::Receiver<Event>,
-        connection_factory: Box<dyn ConnectionFactory>,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send {
-        async move {
-            Self::send_loop(
-                config.lewis_endpoint,
-                config.queue_size_grpc,
-                rx,
-                connection_factory,
-            ).await
-        }
-    }
-
-    async fn send_loop(
-        endpoint: String,
-        buffer_size: usize,
         mut rx: mpsc::Receiver<Event>,
-        connection_factory: Box<dyn ConnectionFactory>,
     ) -> anyhow::Result<()> {
-        let mut backoff = IncrementalBackoff::default();
-
-        loop {
-            backoff.maybe_tick().await;
-
-            let channel = match Self::connect(&endpoint, &*connection_factory).await {
-                Ok(channel) => {
-                    backoff.reset();
-                    channel
-                }
-                Err(error) => {
-                    error!(?error, endpoint, "failed to connect to Lewis event service");
-                    backoff.init();
-                    continue;
-                }
-            };
-
-            let mut client = TransactionTrackerClient::new(channel);
-
-            if let Err(error) = Self::handle_stream_session(
-                &mut client,
-                buffer_size,
-                &mut rx,
-            ).await {
-                error!(?error, "Lewis event stream session failed");
+        match Self::connect_and_stream(&config, &mut rx).await {
+            Ok(()) => {
+                info!("Lewis event stream completed normally");
+                Ok(())
+            }
+            Err(e) => {
+                warn!(
+                    "Lewis connection failed: {}. Continuing without event tracking.",
+                    e
+                );
+                while rx.recv().await.is_some() {}
+                Ok(())
             }
         }
     }
 
-    async fn connect(
-        endpoint: &str,
-        factory: &dyn ConnectionFactory,
-    ) -> anyhow::Result<Channel> {
-        factory
-            .create_endpoint(endpoint)?
+    async fn connect_and_stream(
+        config: &ConfigLewisEvents,
+        rx: &mut mpsc::Receiver<Event>,
+    ) -> anyhow::Result<()> {
+        debug!("Connecting to Lewis at {}", config.lewis_endpoint);
+
+        let channel = Endpoint::from_shared(config.lewis_endpoint.clone())?
+            .connect_timeout(Duration::from_secs(10))
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .keep_alive_timeout(Duration::from_secs(10))
+            .keep_alive_while_idle(true)
             .connect()
             .await
-            .context("failed to establish connection")
-    }
+            .context("Failed to connect to Lewis")?;
 
-    async fn handle_stream_session(
-        client: &mut TransactionTrackerClient<Channel>,
-        buffer_size: usize,
-        rx: &mut mpsc::Receiver<Event>,
-    ) -> anyhow::Result<()> {
-        let (mut stream_tx, stream_rx) = futures::channel::mpsc::channel(buffer_size);
+        info!("Connected to Lewis");
 
-        let response_fut = client.track_events(stream_rx);
+        let mut client = TransactionTrackerClient::new(channel);
+        let (tx, rx_stream) = futures::channel::mpsc::channel(config.queue_size_grpc);
 
-        let feed_result = Self::event_feed_loop(&mut stream_tx, rx).await;
+        let response = client.track_events(rx_stream);
+        let mut tx = Box::pin(tx);
 
-        stream_tx.close_channel();
+        let mut pending = 0u64;
+        let mut last_flush = tokio::time::Instant::now();
 
-        match response_fut.await {
-            Ok(response) => {
-                let _ack: EventAck = response.into_inner();
-                feed_result
-            }
-            Err(status) => Err(anyhow::anyhow!("gRPC error: {}", status)),
-        }
-    }
-
-    async fn event_feed_loop(
-        stream_tx: &mut futures::channel::mpsc::Sender<Event>,
-        rx: &mut mpsc::Receiver<Event>,
-    ) -> anyhow::Result<()> {
-        let mut flush_required = false;
+        tokio::pin!(response);
 
         loop {
-            let flush_fut = if flush_required {
-                stream_tx.flush().boxed()
-            } else {
-                pending().boxed()
-            };
-
             tokio::select! {
-                result = flush_fut => {
-                    result.context("failed to flush events")?;
-                    flush_required = false;
-                },
-                event = rx.recv() => {
-                    match event {
+                maybe_event = rx.recv() => {
+                    match maybe_event {
                         Some(event) => {
-                            stream_tx.feed(event).await.context("failed to feed event")?;
-                            flush_required = true;
+                            tx.send(event).await.context("Failed to send to gRPC stream")?;
+                            pending += 1;
                             metrics::lewis_events_feed_inc();
+
+                            if pending >= 10 || last_flush.elapsed() > Duration::from_millis(100) {
+                                tx.flush().await.context("Failed to flush stream")?;
+                                debug!("Flushed {} events", pending);
+                                pending = 0;
+                                last_flush = tokio::time::Instant::now();
+                            }
                         }
-                        None => return Ok(()),
+                        None => {
+                            if pending > 0 {
+                                tx.flush().await.context("Failed to flush final events")?;
+                            }
+                            drop(tx);
+
+                            match response.await {
+                                Ok(resp) => {
+                                    let _ack: EventAck = resp.into_inner();
+                                    info!("Lewis acknowledged stream completion");
+                                }
+                                Err(status) => {
+                                    warn!("Lewis final ack error: {}", status);
+                                }
+                            }
+                            return Ok(());
+                        }
                     }
+                }
+
+                _ = &mut response => {
+                    warn!("Lewis stream ended unexpectedly");
+                    return Err(anyhow::anyhow!("Stream terminated by server"));
                 }
             }
         }
     }
 
-    pub fn emit(&self, event: Event) {
+    fn emit(&self, event: Event) {
         if let Some(tx) = &self.tx {
-            metrics::lewis_events_push_inc(tx.try_send(event).map_err(|_| ()));
+            match tx.try_send(event) {
+                Ok(()) => {
+                    debug!("Queued Lewis event");
+                    metrics::lewis_events_push_inc(Ok(()));
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!("Lewis event queue full, dropping event");
+                    metrics::lewis_events_push_inc(Err(()));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    debug!("Lewis event channel closed");
+                    metrics::lewis_events_push_inc(Err(()));
+                }
+            }
         }
     }
 }
@@ -231,40 +165,35 @@ impl TransactionEventTracker for LewisEventClient {
         send_attempts: Vec<SendAttempt>,
     ) {
         let mut builder = event_builders::JetEventBuilder::new(
-            String::new(),  // req_id - we'll leave these empty for now
-            String::new(),  // cascade_id
-            String::new(),  // jet_gateway_id
-            String::new(),  // jet_id
+            // TODO: we need to define these.
+            String::new(), // req_id - we'll leave these empty for now
+            String::new(), // cascade_id
+            String::new(), // jet_gateway_id
+            String::new(), // jet_id
             signature,
             slot,
         );
 
         for attempt in send_attempts {
             builder = match attempt.result {
-                SendResult::Success => {
-                    builder.add_send(
-                        attempt.validator.to_string(),
-                        attempt.tpu_addr.to_string(),
-                        false,
-                        None,
-                    )
-                },
-                SendResult::Skipped { reason } => {
-                    builder.add_send(
-                        attempt.validator.to_string(),
-                        attempt.tpu_addr.to_string(),
-                        true,
-                        Some(reason),
-                    )
-                },
-                SendResult::Failed { error } => {
-                    builder.add_send(
-                        attempt.validator.to_string(),
-                        attempt.tpu_addr.to_string(),
-                        false,
-                        Some(error),
-                    )
-                },
+                SendResult::Success => builder.add_send(
+                    attempt.validator.to_string(),
+                    attempt.tpu_addr.to_string(),
+                    false,
+                    None,
+                ),
+                SendResult::Skipped { reason } => builder.add_send(
+                    attempt.validator.to_string(),
+                    attempt.tpu_addr.to_string(),
+                    true,
+                    Some(reason),
+                ),
+                SendResult::Failed { error } => builder.add_send(
+                    attempt.validator.to_string(),
+                    attempt.tpu_addr.to_string(),
+                    false,
+                    Some(error),
+                ),
             };
         }
 
@@ -274,10 +203,11 @@ impl TransactionEventTracker for LewisEventClient {
 }
 
 pub mod event_builders {
-    use super::*;
-    use crate::proto::lewis::{EventJet, JetSend};
-    use solana_signature::Signature;
-    use std::time::SystemTime;
+    use {
+        super::*,
+        crate::proto::lewis::{Event, EventJet, JetSend},
+        std::time::SystemTime,
+    };
 
     pub struct JetEventBuilder {
         req_id: String,
@@ -347,112 +277,111 @@ pub mod event_builders {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use {
+        super::*,
+        solana_pubkey::Pubkey,
+        std::net::{IpAddr, Ipv4Addr, SocketAddr},
+    };
 
-    struct MockEventSender {
-        send_count: Arc<AtomicUsize>,
-        should_fail: bool,
-    }
+    #[tokio::test]
+    async fn test_transaction_lifecycle() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let client = Arc::new(LewisEventClient { tx: Some(tx) });
 
-    impl EventSender for MockEventSender {
-        fn try_send(&self, event: Event) -> Result<(), mpsc::error::TrySendError<Event>> {
-            if self.should_fail {
-                Err(mpsc::error::TrySendError::Full(event))
-            } else {
-                self.send_count.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-        }
-    }
+        let signature = Signature::from([1u8; 64]);
+        let slot = 98765;
 
-    #[test]
-    fn test_client_creation() {
-        let (client, fut) = LewisEventClient::new(None);
-        assert!(client.tx.is_none());
-        assert!(fut.is_none());
-        client.emit(Event { event: None });
+        let send_attempts = vec![
+            SendAttempt::success(
+                Pubkey::from([1u8; 32]),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8001),
+            ),
+            SendAttempt::failed(
+                Pubkey::from([2u8; 32]),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 8002),
+                "Connection timeout".to_string(),
+            ),
+            SendAttempt::skipped(
+                Pubkey::from([3u8; 32]),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3)), 8003),
+                "Rate limited".to_string(),
+            ),
+        ];
 
-        let config = ConfigLewisEvents {
-            lewis_endpoint: "http://localhost:8005".to_string(),
-            queue_size_grpc: 100,
-            queue_size_buffer: 1000,
+        client.track_transaction_send(&signature, slot, send_attempts);
+
+        let event = rx.recv().await.unwrap();
+        let jet_event = match event.event {
+            Some(crate::proto::lewis::event::Event::Jet(jet)) => jet,
+            _ => panic!("Expected Jet event"),
         };
-        let (client, fut) = LewisEventClient::new(Some(config));
-        assert!(client.tx.is_some());
-        assert!(fut.is_some());
+
+        assert_eq!(jet_event.sig, signature.as_ref());
+        assert_eq!(jet_event.slot, slot);
+        assert_eq!(jet_event.jet_sends.len(), 3);
+
+        assert!(!jet_event.jet_sends[0].skipped);
+        assert!(jet_event.jet_sends[0].error.is_empty());
+
+        assert!(!jet_event.jet_sends[1].skipped);
+        assert_eq!(jet_event.jet_sends[1].error, "Connection timeout");
+
+        assert!(jet_event.jet_sends[2].skipped);
+        assert_eq!(jet_event.jet_sends[2].error, "Rate limited");
     }
 
     #[tokio::test]
     async fn test_event_emission() {
-        use solana_signature::Signature;
-
-        let mock_sender = Arc::new(MockEventSender {
-            send_count: Arc::new(AtomicUsize::new(0)),
-            should_fail: false,
-        });
-
-        let client = LewisEventClient {
-            tx: Some(mock_sender.clone() as Arc<dyn EventSender>),
-        };
+        let (tx, mut rx) = mpsc::channel(10);
+        let client = LewisEventClient { tx: Some(tx) };
 
         let event = event_builders::JetEventBuilder::new(
-            "req-1".to_string(),
-            "cascade-1".to_string(),
-            "gateway-1".to_string(),
-            "jet-1".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
             &Signature::default(),
             12345,
         )
         .build();
 
         client.emit(event);
-        assert_eq!(mock_sender.send_count.load(Ordering::Relaxed), 1);
 
-        let fail_sender = Arc::new(MockEventSender {
-            send_count: Arc::new(AtomicUsize::new(0)),
-            should_fail: true,
-        });
-
-        let fail_client = LewisEventClient {
-            tx: Some(fail_sender.clone() as Arc<dyn EventSender>),
-        };
-
-        fail_client.emit(Event { event: None });
-        assert_eq!(fail_sender.send_count.load(Ordering::Relaxed), 0);
+        assert!(rx.recv().await.is_some());
     }
 
     #[tokio::test]
-    async fn test_connection_lifecycle() {
-        struct FailingFactory {
-            attempts: Arc<AtomicUsize>,
+    async fn test_full_queue_drops_events() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let client = LewisEventClient { tx: Some(tx) };
+
+        let event1 = event_builders::JetEventBuilder::new(
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            &Signature::default(),
+            1,
+        )
+        .build();
+        client.emit(event1);
+
+        let event2 = event_builders::JetEventBuilder::new(
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            &Signature::default(),
+            2,
+        )
+        .build();
+        client.emit(event2);
+
+        drop(client);
+        let mut count = 0;
+        while rx.try_recv().is_ok() {
+            count += 1;
         }
-
-        impl ConnectionFactory for FailingFactory {
-            fn create_endpoint(&self, _endpoint: &str) -> anyhow::Result<Endpoint> {
-                self.attempts.fetch_add(1, Ordering::Relaxed);
-                anyhow::bail!("Test failure")
-            }
-        }
-
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let config = ConfigLewisEvents {
-            lewis_endpoint: "http://test".to_string(),
-            queue_size_grpc: 10,
-            queue_size_buffer: 10,
-        };
-
-        let (_client, fut) = LewisEventClient::with_factory(
-            Some(config),
-            Box::new(FailingFactory { attempts: attempts.clone() }),
-        );
-
-        if let Some(fut) = fut {
-            let handle = tokio::spawn(fut);
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            handle.abort();
-        }
-
-        assert!(attempts.load(Ordering::Relaxed) > 0);
+        assert_eq!(count, 1);
     }
 }

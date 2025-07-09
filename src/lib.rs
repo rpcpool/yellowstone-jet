@@ -11,10 +11,11 @@ pub mod blockhash_queue;
 pub mod cluster_tpu_info;
 pub mod config;
 pub mod crypto_provider;
+pub mod event_tracker;
 pub mod feature_flags;
-pub mod grpc_lewis;
-pub mod grpc_jet;
 pub mod grpc_geyser;
+pub mod grpc_jet;
+pub mod grpc_lewis;
 pub mod metrics;
 pub mod payload;
 pub mod proto;
@@ -30,7 +31,6 @@ pub mod transaction_handler;
 pub mod transactions;
 pub mod util;
 pub mod version;
-pub mod event_tracker;
 
 pub fn setup_tracing(json: bool) -> anyhow::Result<()> {
     let env_filter = EnvFilter::builder()

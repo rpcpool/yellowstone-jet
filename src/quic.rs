@@ -1,6 +1,11 @@
 use {
     crate::{
-        cluster_tpu_info::{ClusterTpuInfo, TpuInfo}, config::{ConfigQuic, ConfigQuicTpuPort}, event_tracker::{SendAttempt, TransactionEventTracker}, metrics::jet::{self as metrics, shield_policies_not_found_inc, sts_tpu_denied_inc_by}, quic_solana::{ConnectionCache, ConnectionCacheSendPermit}, transactions::SendTransactionInfoId
+        cluster_tpu_info::{ClusterTpuInfo, TpuInfo},
+        config::{ConfigQuic, ConfigQuicTpuPort},
+        event_tracker::{SendAttempt, SendResult, TransactionEventTracker},
+        metrics::jet::{self as metrics, shield_policies_not_found_inc, sts_tpu_denied_inc_by},
+        quic_solana::{ConnectionCache, ConnectionCacheSendPermit},
+        transactions::SendTransactionInfoId,
     },
     futures::{
         future::{join_all, BoxFuture},
@@ -110,11 +115,8 @@ impl QuicSendTxPermit {
             async move {
                 let tpu_info = permit.tpu_info;
                 let tpu_addr = permit.addr;
-                let mut final_attempt = SendAttempt::failed(
-                    tpu_info.leader,
-                    tpu_addr,
-                    "No attempt made".to_string()
-                );
+                let mut final_attempt =
+                    SendAttempt::failed(tpu_info.leader, tpu_addr, "No attempt made".to_string());
 
                 for _ in 0..send_retry_count {
                     match timeout(send_timeout, permit.send_buffer(&wire_tx)).await {
@@ -143,11 +145,8 @@ impl QuicSendTxPermit {
                                 "error",
                                 &error.get_categorie(),
                             );
-                            final_attempt = SendAttempt::failed(
-                                tpu_info.leader,
-                                tpu_addr,
-                                error.to_string()
-                            );
+                            final_attempt =
+                                SendAttempt::failed(tpu_info.leader, tpu_addr, error.to_string());
                             let metric = QuicClientMetric::SendAttempts {
                                 sig: signature,
                                 leader: tpu_info.leader,
@@ -178,7 +177,7 @@ impl QuicSendTxPermit {
                             final_attempt = SendAttempt::failed(
                                 tpu_info.leader,
                                 tpu_addr,
-                                "Send timeout".to_string()
+                                "Send timeout".to_string(),
                             );
                             let metric = QuicClientMetric::SendAttempts {
                                 sig: signature,
@@ -200,7 +199,8 @@ impl QuicSendTxPermit {
         let send_attempts: Vec<SendAttempt> = join_all(send_futs).await;
 
         // Count successes
-        let success_count = send_attempts.iter()
+        let success_count = send_attempts
+            .iter()
             .filter(|attempt| attempt.result.is_success())
             .count();
 
@@ -208,13 +208,22 @@ impl QuicSendTxPermit {
 
         metrics::sts_tpu_send_inc(success_count);
 
+        debug!(
+            "Tracking transaction send: signature={}, slot={}, attempts={} (skipped={}, success={}, failed={})",
+            signature,
+            self.current_slot,
+            all_send_attempts.len(),
+            all_send_attempts.iter().filter(|a| matches!(a.result, SendResult::Skipped { .. })).count(),
+            all_send_attempts.iter().filter(|a| matches!(a.result, SendResult::Success)).count(),
+            all_send_attempts.iter().filter(|a| matches!(a.result, SendResult::Failed { .. })).count(),
+        );
+
         // Emit the event with all attempts (skipped + actual sends)
         if let Some(event_tracker) = &self.event_tracker {
-            event_tracker.track_transaction_send(
-                &signature,
-                self.current_slot,
-                all_send_attempts,
-            );
+            debug!("Emitting Lewis event for transaction {}", signature);
+            event_tracker.track_transaction_send(&signature, self.current_slot, all_send_attempts);
+        } else {
+            debug!("No event tracker configured");
         }
     }
 }
@@ -271,12 +280,13 @@ impl QuicClient {
             .get_leader_tpus(leader_forward_count)
             .await;
 
-        let current_slot = self
-            .upcoming_leader_schedule
-            .get_current_slot()
-            .await;
+        let current_slot = self.upcoming_leader_schedule.get_current_slot().await;
 
-        debug!("Attempt to send to {} leaders at slot {}", tpus_info.len(), current_slot);
+        debug!(
+            "Attempt to send to {} leaders at slot {}",
+            tpus_info.len(),
+            current_slot
+        );
 
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
 
@@ -311,7 +321,7 @@ impl QuicClient {
                                     filtered_out.push((
                                         tpu_info.leader,
                                         addr,
-                                        "Policy denied".to_string()
+                                        "Policy denied".to_string(),
                                     ));
                                 }
                             }
@@ -327,7 +337,7 @@ impl QuicClient {
                                 filtered_out.push((
                                     tpu_info.leader,
                                     addr,
-                                    "Policy not found".to_string()
+                                    "Policy not found".to_string(),
                                 ));
                             }
                             false
@@ -371,7 +381,6 @@ impl QuicClient {
             })
         }
     }
-
 }
 
 pub mod teskit {

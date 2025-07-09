@@ -24,12 +24,27 @@ use {
         sync::oneshot,
         task::JoinHandle,
     },
-    tracing::{info, warn, error},
+    tracing::{error, info, warn},
     yellowstone_jet::{
-        blockhash_queue::BlockhashQueue, cluster_tpu_info::ClusterTpuInfo, config::{
-            load_config, ConfigJet, ConfigJetGatewayClient,
-            PrometheusConfig, RpcErrorStrategy,
-        }, feature_flags::FeatureSet, grpc_geyser::{GeyserStreams, GeyserSubscriber}, grpc_jet::GrpcServer, grpc_lewis::LewisEventClient, metrics::{collect_to_text, inject_job_label, jet as metrics}, quic::QuicClient, quic_solana::ConnectionCache, rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType}, setup_tracing, solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy}, stake::{self, spawn_cache_stake_info_map, StakeInfoMap}, task_group::TaskGroup, transactions::{GrpcRootedTxReceiver, SendTransactionsPool}, util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown}
+        blockhash_queue::BlockhashQueue,
+        cluster_tpu_info::ClusterTpuInfo,
+        config::{
+            load_config, ConfigJet, ConfigJetGatewayClient, PrometheusConfig, RpcErrorStrategy,
+        },
+        feature_flags::FeatureSet,
+        grpc_geyser::{GeyserStreams, GeyserSubscriber},
+        grpc_jet::GrpcServer,
+        grpc_lewis::LewisEventClient,
+        metrics::{collect_to_text, inject_job_label, jet as metrics},
+        quic::QuicClient,
+        quic_solana::ConnectionCache,
+        rpc::{rpc_admin::RpcClient, rpc_solana_like::RpcServerImpl, RpcServer, RpcServerType},
+        setup_tracing,
+        solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
+        stake::{self, spawn_cache_stake_info_map, StakeInfoMap},
+        task_group::TaskGroup,
+        transactions::{GrpcRootedTxReceiver, SendTransactionsPool},
+        util::{IdentityFlusherWaitGroup, PubkeySigner, ValueObserver, WaitShutdown},
     },
     yellowstone_shield_store::{PolicyStore, PolicyStoreTrait},
 };
@@ -443,7 +458,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         keep_stake_metrics_up_to_date_task(stake_info_identity_observer, stake_info_map.clone()),
     );
 
-     if let Some(fut) = lewis_fut {
+    if let Some(fut) = lewis_fut {
         tg.spawn_with_shutdown("lewis_events", |mut stop| async move {
             tokio::select! {
                 result = fut => {
