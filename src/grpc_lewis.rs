@@ -1,25 +1,15 @@
 use {
     crate::{
-        config::ConfigLewisEvents,
-        metrics::jet as metrics,
-        proto::lewis::{
-            transaction_tracker_client::TransactionTrackerClient,
-            Event, EventAck,
-        },
-        util::IncrementalBackoff,
-    },
-    anyhow::Context,
-    futures::{
+        config::ConfigLewisEvents, event_tracker::{SendAttempt, SendResult, TransactionEventTracker}, metrics::jet as metrics, proto::lewis::{
+            transaction_tracker_client::TransactionTrackerClient, Event, EventAck
+        }, util::IncrementalBackoff
+    }, anyhow::Context, futures::{
         future::{pending, Future, FutureExt},
         sink::SinkExt,
-    },
-    std::{
+    }, solana_clock::Slot, solana_signature::Signature, std::{
         sync::Arc,
         time::Duration,
-    },
-    tokio::sync::mpsc,
-    tonic::transport::channel::{Channel, Endpoint},
-    tracing::error,
+    }, tokio::sync::mpsc, tonic::transport::channel::{Channel, Endpoint}, tracing::error
 };
 
 pub trait EventSender: Send + Sync + 'static {
@@ -54,6 +44,21 @@ pub struct LewisEventClient {
 }
 
 impl LewisEventClient {
+    /// Creates a new event tracker based on configuration
+    /// Returns None if no config provided, otherwise returns the tracker and its background task
+    pub fn create_event_tracker(
+        config: Option<ConfigLewisEvents>,
+    ) -> (Option<Arc<dyn TransactionEventTracker + Send + Sync>>, Option<impl Future<Output = anyhow::Result<()>> + Send>) {
+        match config {
+            None => (None, None),
+            Some(config) => {
+                let (client, fut) = Self::new(Some(config));
+                let tracker = Arc::new(client) as Arc<dyn TransactionEventTracker + Send + Sync>;
+                (Some(tracker), fut)
+            }
+        }
+    }
+
     pub fn new(
         config: Option<ConfigLewisEvents>,
     ) -> (Self, Option<impl Future<Output = anyhow::Result<()>> + Send>) {
@@ -217,6 +222,57 @@ impl LewisEventClient {
     }
 }
 
+#[async_trait::async_trait]
+impl TransactionEventTracker for LewisEventClient {
+    fn track_transaction_send(
+        &self,
+        signature: &Signature,
+        slot: Slot,
+        send_attempts: Vec<SendAttempt>,
+    ) {
+        let mut builder = event_builders::JetEventBuilder::new(
+            String::new(),  // req_id - we'll leave these empty for now
+            String::new(),  // cascade_id
+            String::new(),  // jet_gateway_id
+            String::new(),  // jet_id
+            signature,
+            slot,
+        );
+
+        for attempt in send_attempts {
+            builder = match attempt.result {
+                SendResult::Success => {
+                    builder.add_send(
+                        attempt.validator.to_string(),
+                        attempt.tpu_addr.to_string(),
+                        false,
+                        None,
+                    )
+                },
+                SendResult::Skipped { reason } => {
+                    builder.add_send(
+                        attempt.validator.to_string(),
+                        attempt.tpu_addr.to_string(),
+                        true,
+                        Some(reason),
+                    )
+                },
+                SendResult::Failed { error } => {
+                    builder.add_send(
+                        attempt.validator.to_string(),
+                        attempt.tpu_addr.to_string(),
+                        false,
+                        Some(error),
+                    )
+                },
+            };
+        }
+
+        let event = builder.build();
+        self.emit(event);
+    }
+}
+
 pub mod event_builders {
     use super::*;
     use crate::proto::lewis::{EventJet, JetSend};
@@ -257,6 +313,7 @@ pub mod event_builders {
             mut self,
             validator: String,
             tpu_addr: String,
+            skipped: bool,
             error: Option<String>,
         ) -> Self {
             self.jet_sends.push(JetSend {
@@ -265,7 +322,7 @@ pub mod event_builders {
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap()
                     .as_secs() as i64,
-                skipped: error.is_some(),
+                skipped,
                 tpu_addr,
                 error: error.unwrap_or_default(),
             });
@@ -287,6 +344,7 @@ pub mod event_builders {
         }
     }
 }
+
 #[cfg(test)]
 mod test {
     use super::*;

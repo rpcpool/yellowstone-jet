@@ -372,6 +372,20 @@ impl ClusterTpuInfo {
     pub async fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo> {
         let inner = self.inner.read().await;
 
+        // TODO: Improve leader selection logic
+        // Current behavior: Returns (leader_forward_count + 1) leaders total
+        // - With leader_forward_count = 4, returns 5 leaders: current + 4 future
+        // - Range 0..=leader_forward_count means indices 0,1,2,3,4
+        //
+        // Future improvements:
+        // 1. Make leader_forward_count return exactly that many leaders (not +1)
+        // 2. Add granular control to skip current leader if we're at their last slot
+        // 3. Consider slot position within leader's 4-slot allocation
+        // 4. Add option to exclude current leader entirely and only forward
+        //
+        // Example: If current slot is 103 (last slot for leader A who has 100-103),
+        // we might want to skip leader A and get the next N leaders instead
+
         // Get TPU info for current and future leaders based on latest_seen_slot
         (0..=leader_forward_count as u64)
             .filter_map(|i| {
@@ -379,5 +393,9 @@ impl ClusterTpuInfo {
                 inner.get_tpu_info(leader_slot)
             })
             .collect::<Vec<_>>()
+    }
+
+    pub async fn get_latest_seen_slot(&self) -> Slot {
+        self.inner.read().await.latest_seen_slot
     }
 }

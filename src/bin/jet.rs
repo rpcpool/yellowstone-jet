@@ -328,18 +328,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await;
 
-    let (lewis_client, lewis_fut) = match config.lewis_events {
-        Some(lewis_config) => {
-            info!("Lewis event tracking enabled");
-            let (client, fut) = LewisEventClient::new(Some(lewis_config));
-            (Some(client), fut)
-        }
-        None => {
-            info!("Lewis event tracking disabled");
-            (None, None)
-        }
-    };
-
     let rooted_tx_geyser_rx = geyser
         .subscribe_transactions()
         .await
@@ -357,12 +345,14 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         identity_flusher_wg.clone(),
     );
 
+    let (event_tracker, lewis_fut) = LewisEventClient::create_event_tracker(config.lewis_events);
+
     let quic_tx_sender = QuicClient::new(
         Arc::new(cluster_tpu_info.clone()),
         config.quic.clone(),
         Arc::new(quic_session),
         shield_policy_store,
-        lewis_client.clone(),
+        event_tracker,
     );
 
     let (send_transactions, send_tx_pool_fut) = SendTransactionsPool::spawn(

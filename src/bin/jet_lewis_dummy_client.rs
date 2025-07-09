@@ -85,9 +85,11 @@ fn create_jet_event(counter: u64) -> Event {
 
     for i in 0..send_attempts {
         let has_error = rng.gen_bool(0.1);
+        let skipped = rng.gen_bool(0.2);
         builder = builder.add_send(
             Pubkey::new_unique().to_string(),
             format!("192.168.1.{}:8003", i + 1),
+            skipped,
             if has_error {
                 Some("Connection timeout".to_string())
             } else {

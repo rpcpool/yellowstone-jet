@@ -1,6 +1,6 @@
 use {
     crate::{
-        cluster_tpu_info::{ClusterTpuInfo, TpuInfo}, config::{ConfigQuic, ConfigQuicTpuPort}, grpc_lewis::LewisEventClient, metrics::jet::{self as metrics, shield_policies_not_found_inc, sts_tpu_denied_inc_by}, quic_solana::{ConnectionCache, ConnectionCacheSendPermit}, transactions::SendTransactionInfoId
+        cluster_tpu_info::{ClusterTpuInfo, TpuInfo}, config::{ConfigQuic, ConfigQuicTpuPort}, event_tracker::{SendAttempt, TransactionEventTracker}, metrics::jet::{self as metrics, shield_policies_not_found_inc, sts_tpu_denied_inc_by}, quic_solana::{ConnectionCache, ConnectionCacheSendPermit}, transactions::SendTransactionInfoId
     },
     futures::{
         future::{join_all, BoxFuture},
@@ -23,7 +23,7 @@ pub struct QuicClient {
     extra_tpu_forward: Vec<TpuInfo>,
     tx_broadcast_metrics: broadcast::Sender<QuicClientMetric>,
     shield_policy_store: Option<Arc<dyn PolicyStoreTrait + Send + Sync + 'static>>,
-    lewis_client: Option<LewisEventClient>,
+    event_tracker: Option<Arc<dyn TransactionEventTracker + Send + Sync + 'static>>,
 }
 
 impl fmt::Debug for QuicClient {
@@ -63,11 +63,17 @@ impl fmt::Display for SendError {
 ///
 pub trait UpcomingLeaderSchedule {
     fn get_leader_tpus(&self, leader_forward_lookahead: usize) -> BoxFuture<'_, Vec<TpuInfo>>;
+
+    fn get_current_slot(&self) -> BoxFuture<'_, Slot>;
 }
 
 impl UpcomingLeaderSchedule for ClusterTpuInfo {
     fn get_leader_tpus(&self, leader_forward_lookahead: usize) -> BoxFuture<'_, Vec<TpuInfo>> {
         async move { self.get_leader_tpus(leader_forward_lookahead).await }.boxed()
+    }
+
+    fn get_current_slot(&self) -> BoxFuture<'_, Slot> {
+        async move { self.get_latest_seen_slot().await }.boxed()
     }
 }
 
@@ -76,6 +82,9 @@ pub struct QuicSendTxPermit {
     send_retry_count: usize,
     send_timeout: Duration,
     tx_broadcast_metrics: broadcast::Sender<QuicClientMetric>,
+    event_tracker: Option<Arc<dyn TransactionEventTracker + Send + Sync + 'static>>,
+    current_slot: Slot,
+    filtered_out_validators: Vec<(Pubkey, SocketAddr, String)>,
 }
 
 impl QuicSendTxPermit {
@@ -86,14 +95,27 @@ impl QuicSendTxPermit {
         signature: Signature,
         wire_transaction: Arc<Vec<u8>>,
     ) {
+        let mut all_send_attempts = Vec::new();
+
+        for (validator, tpu_addr, reason) in self.filtered_out_validators {
+            all_send_attempts.push(SendAttempt::skipped(validator, tpu_addr, reason));
+        }
+
         let send_futs = self.connection_permits.into_iter().map(|permit| {
             let tx_broadcast_metrics = self.tx_broadcast_metrics.clone();
             let send_retry_count = self.send_retry_count;
             let send_timeout = self.send_timeout;
             let wire_tx = Arc::clone(&wire_transaction);
+
             async move {
                 let tpu_info = permit.tpu_info;
                 let tpu_addr = permit.addr;
+                let mut final_attempt = SendAttempt::failed(
+                    tpu_info.leader,
+                    tpu_addr,
+                    "No attempt made".to_string()
+                );
+
                 for _ in 0..send_retry_count {
                     match timeout(send_timeout, permit.send_buffer(&wire_tx)).await {
                         Ok(Ok(())) => {
@@ -103,6 +125,7 @@ impl QuicSendTxPermit {
                                 "success",
                                 "",
                             );
+                            final_attempt = SendAttempt::success(tpu_info.leader, tpu_addr);
                             let metric = QuicClientMetric::SendAttempts {
                                 sig: signature,
                                 leader: tpu_info.leader,
@@ -111,7 +134,7 @@ impl QuicSendTxPermit {
                                 error: None,
                             };
                             let _ = tx_broadcast_metrics.send(metric);
-                            return Ok(());
+                            return final_attempt;
                         }
                         Ok(Err(error)) => {
                             metrics::quic_send_attempts_inc(
@@ -119,6 +142,11 @@ impl QuicSendTxPermit {
                                 &tpu_addr,
                                 "error",
                                 &error.get_categorie(),
+                            );
+                            final_attempt = SendAttempt::failed(
+                                tpu_info.leader,
+                                tpu_addr,
+                                error.to_string()
                             );
                             let metric = QuicClientMetric::SendAttempts {
                                 sig: signature,
@@ -147,7 +175,11 @@ impl QuicSendTxPermit {
                                 "timedout",
                                 "timedout",
                             );
-
+                            final_attempt = SendAttempt::failed(
+                                tpu_info.leader,
+                                tpu_addr,
+                                "Send timeout".to_string()
+                            );
                             let metric = QuicClientMetric::SendAttempts {
                                 sig: signature,
                                 leader: tpu_info.leader,
@@ -160,15 +192,30 @@ impl QuicSendTxPermit {
                         }
                     }
                 }
-                Err(())
+                final_attempt
             }
         });
-        let success = join_all(send_futs)
-            .await
-            .into_iter()
-            .filter(|value| value.is_ok())
+
+        // Collect all send results
+        let send_attempts: Vec<SendAttempt> = join_all(send_futs).await;
+
+        // Count successes
+        let success_count = send_attempts.iter()
+            .filter(|attempt| attempt.result.is_success())
             .count();
-        metrics::sts_tpu_send_inc(success);
+
+        all_send_attempts.extend(send_attempts);
+
+        metrics::sts_tpu_send_inc(success_count);
+
+        // Emit the event with all attempts (skipped + actual sends)
+        if let Some(event_tracker) = &self.event_tracker {
+            event_tracker.track_transaction_send(
+                &signature,
+                self.current_slot,
+                all_send_attempts,
+            );
+        }
     }
 }
 
@@ -178,7 +225,7 @@ impl QuicClient {
         config: ConfigQuic,
         connection_cache: Arc<ConnectionCache>,
         shield_policy_store: Option<Arc<dyn PolicyStoreTrait + Send + Sync + 'static>>,
-        lewis_client: Option<LewisEventClient>
+        event_tracker: Option<Arc<dyn TransactionEventTracker + Send + Sync + 'static>>,
     ) -> Self {
         let extra_tpu_forward = config
             .extra_tpu_forward
@@ -199,7 +246,7 @@ impl QuicClient {
             extra_tpu_forward,
             tx_broadcast_metrics: tx,
             shield_policy_store,
-            lewis_client,
+            event_tracker,
         }
     }
 
@@ -223,35 +270,76 @@ impl QuicClient {
             .upcoming_leader_schedule
             .get_leader_tpus(leader_forward_count)
             .await;
-        debug!(
-            "Attempting to send to {} leaders before filtering",
-            tpus_info.len()
-        );
+
+        let current_slot = self
+            .upcoming_leader_schedule
+            .get_current_slot()
+            .await;
+
+        debug!("Attempt to send to {} leaders at slot {}", tpus_info.len(), current_slot);
 
         tpus_info.extend(self.extra_tpu_forward.iter().cloned());
+
+        // Collect all validators with their TPU addresses before filtering
+        let mut all_validators: Vec<(Pubkey, SocketAddr)> = Vec::new();
+        for tpu_info in &tpus_info {
+            if let Some(addr) = match self.config.tpu_port {
+                ConfigQuicTpuPort::Normal => tpu_info.quic,
+                ConfigQuicTpuPort::Forwards => tpu_info.quic_forwards,
+            } {
+                all_validators.push((tpu_info.leader, addr));
+            }
+        }
+
+        // Track which validators were filtered out
+        let mut filtered_out: Vec<(Pubkey, SocketAddr, String)> = Vec::new();
 
         let tpus_info = if let Some(store) = self.shield_policy_store.as_ref() {
             let snapshot = store.snapshot();
 
             tpus_info
                 .into_iter()
-                .filter(
-                    |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
-                        Ok(allowed) => allowed,
+                .filter(|tpu_info| {
+                    match snapshot.is_allowed(&policies, &tpu_info.leader) {
+                        Ok(allowed) => {
+                            if !allowed {
+                                // Track filtered out validator
+                                if let Some(addr) = match self.config.tpu_port {
+                                    ConfigQuicTpuPort::Normal => tpu_info.quic,
+                                    ConfigQuicTpuPort::Forwards => tpu_info.quic_forwards,
+                                } {
+                                    filtered_out.push((
+                                        tpu_info.leader,
+                                        addr,
+                                        "Policy denied".to_string()
+                                    ));
+                                }
+                            }
+                            allowed
+                        }
                         Err(_) => {
                             shield_policies_not_found_inc();
-
+                            // Track filtered out validator
+                            if let Some(addr) = match self.config.tpu_port {
+                                ConfigQuicTpuPort::Normal => tpu_info.quic,
+                                ConfigQuicTpuPort::Forwards => tpu_info.quic_forwards,
+                            } {
+                                filtered_out.push((
+                                    tpu_info.leader,
+                                    addr,
+                                    "Policy not found".to_string()
+                                ));
+                            }
                             false
                         }
-                    },
-                )
+                    }
+                })
                 .collect()
         } else {
             tpus_info
         };
 
         let before_policy_check_tpu_infos_count = tpus_info.len();
-
         sts_tpu_denied_inc_by(before_policy_check_tpu_infos_count - tpus_info.len());
 
         debug!("After filtering, sending to {} leaders", tpus_info.len());
@@ -268,6 +356,7 @@ impl QuicClient {
             .map(|(tpu_info, addr)| self.connection_cache.reserve_send_permit(tpu_info, addr));
 
         let connection_permits = join_all(futs).await;
+
         if connection_permits.is_empty() {
             None
         } else {
@@ -276,172 +365,13 @@ impl QuicClient {
                 send_retry_count: self.config.send_retry_count,
                 tx_broadcast_metrics: self.tx_broadcast_metrics.clone(),
                 send_timeout: self.config.send_timeout,
+                event_tracker: self.event_tracker.clone(),
+                current_slot,
+                filtered_out_validators: filtered_out,
             })
         }
     }
 
-    #[deprecated(note = "use reserve_send_permit instead")]
-    #[instrument(skip_all, fields(id, signature, leader_forward_count))]
-    pub async fn send_transaction(
-        &self,
-        id: SendTransactionInfoId,
-        signature: Signature,
-        wire_transaction: Arc<Vec<u8>>,
-        leader_forward_count: usize,
-        policies: Vec<Pubkey>,
-    ) {
-        let mut tpus_info = self
-            .upcoming_leader_schedule
-            .get_leader_tpus(leader_forward_count)
-            .await;
-        tpus_info.extend(self.extra_tpu_forward.iter().cloned());
-
-        let before_policy_check_tpu_infos_count = tpus_info.len();
-        let tpus_info = if let Some(store) = self.shield_policy_store.as_ref() {
-            let snapshot = store.snapshot();
-
-            tpus_info
-                .into_iter()
-                .filter(
-                    |tpu_info| match snapshot.is_allowed(&policies, &tpu_info.leader) {
-                        Ok(allowed) => allowed,
-                        Err(_) => {
-                            shield_policies_not_found_inc();
-
-                            false
-                        }
-                    },
-                )
-                .collect()
-        } else {
-            tpus_info
-        };
-
-        sts_tpu_denied_inc_by(before_policy_check_tpu_infos_count - tpus_info.len());
-
-        let tpu_send_fut = tpus_info.into_iter().map(|tpu_info| {
-            let send_retry_count = self.config.send_retry_count;
-            let config_tpu_port = self.config.tpu_port;
-            let session = Arc::clone(&self.connection_cache);
-            let wire_transaction = Arc::clone(&wire_transaction);
-            let send_timeout = self.config.send_timeout;
-            let tx_broadcast_metrics = self.tx_broadcast_metrics.clone();
-            async move {
-                let Some(tpu_addr) = (match config_tpu_port {
-                    ConfigQuicTpuPort::Normal => tpu_info.quic,
-                    ConfigQuicTpuPort::Forwards => tpu_info.quic_forwards,
-                }) else {
-                    return Ok(());
-                };
-
-                debug!(
-                    id,
-                    %signature,
-                    tpu.leader = %tpu_info.leader,
-                    tpu.slots = ?tpu_info.slots,
-                    tpu.quic = %tpu_addr,
-                    "trying to send transaction",
-                );
-
-                for _ in 0..send_retry_count {
-                    match timeout(
-                        send_timeout,
-                        session.send_buffer(tpu_addr, wire_transaction.as_ref(), &tpu_info),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {
-                            debug!(
-                                id,
-                                %signature,
-                                tpu.leader = %tpu_info.leader,
-                                tpu.slots = ?tpu_info.slots,
-                                tpu.quic = %tpu_addr,
-                                "successfully sent transaction",
-                            );
-                            metrics::quic_send_attempts_inc(
-                                &tpu_info.leader,
-                                &tpu_addr,
-                                "success",
-                                "",
-                            );
-                            let metric = QuicClientMetric::SendAttempts {
-                                sig: signature,
-                                leader: tpu_info.leader,
-                                leader_tpu_addr: tpu_addr,
-                                slots: tpu_info.slots.to_vec(),
-                                error: None,
-                            };
-                            let _ = tx_broadcast_metrics.send(metric);
-                            return Ok(());
-                        }
-                        Ok(Err(error)) => {
-                            debug!(
-                                id,
-                                %signature,
-                                tpu.leader = %tpu_info.leader,
-                                tpu.slots = ?tpu_info.slots,
-                                tpu.quic = %tpu_addr,
-                                error = ?error,
-                                "failed to send transaction",
-                            );
-                            metrics::quic_send_attempts_inc(
-                                &tpu_info.leader,
-                                &tpu_addr,
-                                "error",
-                                &error.get_categorie(),
-                            );
-                            let metric = QuicClientMetric::SendAttempts {
-                                sig: signature,
-                                leader: tpu_info.leader,
-                                leader_tpu_addr: tpu_addr,
-                                slots: tpu_info.slots.to_vec(),
-                                error: Some(SendError::QuicError(error.to_string())),
-                            };
-                            let _ = tx_broadcast_metrics.send(metric);
-                            if error.is_timedout() {
-                                break;
-                            }
-                        }
-                        Err(_timeout) => {
-                            debug!(
-                                id,
-                                %signature,
-                                tpu.leader = %tpu_info.leader,
-                                tpu.slots = ?tpu_info.slots,
-                                tpu.quic = %tpu_addr,
-                                "failed to send transaction: timedout",
-                            );
-                            metrics::quic_send_attempts_inc(
-                                &tpu_info.leader,
-                                &tpu_addr,
-                                "timedout",
-                                "timedout",
-                            );
-
-                            let metric = QuicClientMetric::SendAttempts {
-                                sig: signature,
-                                leader: tpu_info.leader,
-                                leader_tpu_addr: tpu_addr,
-                                slots: tpu_info.slots.to_vec(),
-                                error: Some(SendError::Timeout),
-                            };
-                            let _ = tx_broadcast_metrics.send(metric);
-                            break;
-                        }
-                    }
-                }
-                Err(())
-            }
-        });
-
-        let success = join_all(tpu_send_fut)
-            .await
-            .into_iter()
-            .filter(|value| value.is_ok())
-            .count();
-        metrics::sts_tpu_send_inc(success);
-    }
 }
 
 pub mod teskit {
@@ -465,6 +395,10 @@ pub mod teskit {
         fn get_leader_tpus(&self, _leader_forward_lookahead: usize) -> BoxFuture<'_, Vec<TpuInfo>> {
             let leaders = self.leaders.clone();
             async move { leaders }.boxed()
+        }
+
+        fn get_current_slot(&self) -> BoxFuture<'_, solana_clock::Slot> {
+            async move { 0 }.boxed()
         }
     }
 }

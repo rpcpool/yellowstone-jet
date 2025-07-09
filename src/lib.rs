@@ -30,6 +30,7 @@ pub mod transaction_handler;
 pub mod transactions;
 pub mod util;
 pub mod version;
+pub mod event_tracker;
 
 pub fn setup_tracing(json: bool) -> anyhow::Result<()> {
     let env_filter = EnvFilter::builder()
