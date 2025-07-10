@@ -16,6 +16,14 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+## [12.1.0]
+
+### Features
+
+- Upgrade solana dependencies to v2.2, where `solana-sdk` is now decoupled from Agave. Followed by `yellowstone-grpc` and `yellowstone-shield`.
+- Improved the way we collect slots update by having access to `FirstShredReceived` slot status, where adds substantial improvements.
+- Added support for lewisv2.
+
 ## [12.0.0]
 
 ### Breaking Changes
