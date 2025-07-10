@@ -4,7 +4,9 @@ use {
         identity::JetIdentitySyncMember, rpc::rpc_solana_like::RpcServerImpl, stake::StakeInfoMap,
     },
     futures::FutureExt,
-    solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer},
+    solana_keypair::Keypair,
+    solana_pubkey::Pubkey,
+    solana_signer::Signer,
     std::{future, sync::Arc},
     tokio::sync::mpsc::{self},
 };

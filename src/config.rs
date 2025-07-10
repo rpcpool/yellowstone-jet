@@ -9,14 +9,12 @@ use {
         Deserialize,
         de::{self, Deserializer},
     },
+    solana_keypair::{Keypair, read_keypair_file},
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
-    solana_sdk::{
-        pubkey::Pubkey,
-        quic::{
-            QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
-            QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
-        },
-        signer::keypair::{Keypair, read_keypair_file},
+    solana_pubkey::Pubkey,
+    solana_quic_definitions::{
+        QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
+        QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
     },
     solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
     std::{
@@ -27,7 +25,8 @@ use {
         path::{Path, PathBuf},
     },
     tokio::{fs, time::Duration},
-    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig, YellowstoneConfig},
+    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
+    yellowstone_vixen::config::YellowstoneConfig,
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -340,7 +339,7 @@ pub struct ConfigQuic {
     /// Number of immediate retries in case of failed send (not applied to timedout)
     /// Solana do not retry, atlas doing 4 retries, by default we keep same limit as Solana
     #[serde(default = "ConfigQuic::default_send_retry_count")]
-    pub send_retry_count: usize,
+    pub send_retry_count: NonZeroUsize,
 
     /// Kind of Quic port: `normal` or `forwards`
     pub tpu_port: ConfigQuicTpuPort,
@@ -453,8 +452,8 @@ impl ConfigQuic {
         DEFAULT_TPU_CONNECTION_POOL_SIZE
     }
 
-    pub const fn default_send_retry_count() -> usize {
-        1
+    pub const fn default_send_retry_count() -> NonZeroUsize {
+        NonZeroUsize::new(1).unwrap()
     }
 
     pub const fn default_connection_handshake_timeout() -> Duration {

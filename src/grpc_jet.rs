@@ -37,7 +37,7 @@ use {
         sink::{Sink, SinkExt},
         stream::{Stream, StreamExt},
     },
-    solana_sdk::signer::Signer,
+    solana_signer::Signer,
     std::sync::Arc,
     tokio::{
         task::JoinSet,
