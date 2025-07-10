@@ -60,8 +60,8 @@ use {
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
-        ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, StoppedError,
-        TransportConfig, VarInt, WriteError, crypto::rustls::QuicClientConfig,
+        ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
+        WriteError, crypto::rustls::QuicClientConfig,
     },
     solana_keypair::Keypair,
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
@@ -107,7 +107,7 @@ pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 pub const DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS: usize = 3;
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
-pub const DEFAULT_MAX_SEND_ATTEMPT: usize = 3;
+pub const DEFAULT_MAX_SEND_ATTEMPT: NonZeroUsize = NonZeroUsize::new(3).unwrap();
 pub const DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TX_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -171,7 +171,7 @@ pub struct QuicGatewayConfig {
     /// Attempt may fail due to connection losts, stream limit exceeded, etc.
     /// It might be useful to retry sending a transaction at least 2-3 times before giving up.
     ///
-    pub max_send_attempt: usize,
+    pub max_send_attempt: NonZeroUsize,
 
     ///
     /// Interval to watch remote peer address changes.
@@ -556,7 +556,7 @@ struct QuicTxSenderWorker {
     tx_queue: VecDeque<GatewayTransaction>,
     cancel_notify: Arc<Notify>,
     tx_map: HashMap<Signature, GatewayTransaction>,
-    max_tx_attempt: usize,
+    max_tx_attempt: NonZeroUsize,
     // TODO: Check if this is necessary, since there is already flow control in QUIC
     // Moreover, most QUIC API are instantaneous and do not block
     // and if a connection is idle for 2s it will be closed anyway, moreover remote validator could technically decide to kick us off
@@ -584,9 +584,7 @@ impl QuicTxSenderWorker {
         let tx = self.tx_map.get(&tx_sig).expect("tx should be in tx_map");
         let remote_peer_identity = tx.remote_peer;
         let t = Instant::now();
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
+        for attempt in 1..=self.max_tx_attempt.get() {
             let mut uni = self.connection.open_uni().await?;
             let result = uni.write_all(&tx.wire).await.map_err(|e| match e {
                 WriteError::Stopped(var_int) => SendTxError::StreamStopped(var_int),
@@ -598,7 +596,7 @@ impl QuicTxSenderWorker {
             });
 
             if let Err(e) = result {
-                if attempt >= self.max_tx_attempt
+                if attempt == self.max_tx_attempt.get()
                     || matches!(
                         e,
                         SendTxError::ZeroRttRejected | SendTxError::ConnectionError(_)
@@ -626,12 +624,8 @@ impl QuicTxSenderWorker {
                 continue;
             }
 
-            uni.finish().expect("finish uni");
-            uni.stopped().await.map_err(|e| match e {
-                StoppedError::ConnectionLost(connection_error) => connection_error.into(),
-                StoppedError::ZeroRttRejected => SendTxError::ZeroRttRejected,
-            })?;
-
+            // Dropping the uni is doing the same thing as finish.
+            drop(uni);
             break;
         }
 

@@ -339,7 +339,7 @@ pub struct ConfigQuic {
     /// Number of immediate retries in case of failed send (not applied to timedout)
     /// Solana do not retry, atlas doing 4 retries, by default we keep same limit as Solana
     #[serde(default = "ConfigQuic::default_send_retry_count")]
-    pub send_retry_count: usize,
+    pub send_retry_count: NonZeroUsize,
 
     /// Kind of Quic port: `normal` or `forwards`
     pub tpu_port: ConfigQuicTpuPort,
@@ -452,8 +452,8 @@ impl ConfigQuic {
         DEFAULT_TPU_CONNECTION_POOL_SIZE
     }
 
-    pub const fn default_send_retry_count() -> usize {
-        1
+    pub const fn default_send_retry_count() -> NonZeroUsize {
+        NonZeroUsize::new(1).unwrap()
     }
 
     pub const fn default_connection_handshake_timeout() -> Duration {

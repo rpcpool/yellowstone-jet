@@ -12,7 +12,7 @@ use {
         array,
         collections::HashMap,
         net::SocketAddr,
-        num::NonZero,
+        num::{NonZero, NonZeroUsize},
         sync::{Arc, RwLock as StdRwLock},
         time::Duration,
     },
@@ -650,7 +650,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };
-    const MAX_CONN_ATTEMPT: usize = 3;
+    const MAX_CONN_ATTEMPT: NonZeroUsize = NonZeroUsize::new(1).unwrap();
     let gateway_config = QuicGatewayConfig {
         max_connection_attempts: 1,
         max_send_attempt: MAX_CONN_ATTEMPT,
