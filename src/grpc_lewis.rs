@@ -18,6 +18,7 @@ use {
 #[derive(Clone)]
 pub struct LewisEventClient {
     tx: Option<mpsc::Sender<Event>>,
+    jet_id: Option<String>,
 }
 
 impl LewisEventClient {
@@ -32,7 +33,10 @@ impl LewisEventClient {
         };
 
         let (tx, rx) = mpsc::channel(config.queue_size_buffer);
-        let client = Self { tx: Some(tx) };
+        let client = Self {
+            tx: Some(tx),
+            jet_id: config.jet_id.clone(),
+        };
 
         let tracker = Arc::new(client) as Arc<dyn TransactionEventTracker + Send + Sync>;
         info!(
@@ -169,7 +173,7 @@ impl TransactionEventTracker for LewisEventClient {
             String::new(), // req_id - we'll leave these empty for now
             String::new(), // cascade_id
             String::new(), // jet_gateway_id
-            String::new(), // jet_id
+            self.jet_id.clone().unwrap_or_default(), // jet_id
             signature,
             slot,
         );
@@ -286,7 +290,10 @@ mod test {
     #[tokio::test]
     async fn test_transaction_lifecycle() {
         let (tx, mut rx) = mpsc::channel(10);
-        let client = Arc::new(LewisEventClient { tx: Some(tx) });
+        let client = Arc::new(LewisEventClient {
+            tx: Some(tx),
+            jet_id: Some("test_jet_id".to_string()),
+        });
 
         let signature = Signature::from([1u8; 64]);
         let slot = 98765;
@@ -320,6 +327,8 @@ mod test {
         assert_eq!(jet_event.slot, slot);
         assert_eq!(jet_event.jet_sends.len(), 3);
 
+        assert_eq!(jet_event.jet_id, "test_jet_id");
+
         assert!(!jet_event.jet_sends[0].skipped);
         assert!(jet_event.jet_sends[0].error.is_empty());
 
@@ -333,7 +342,10 @@ mod test {
     #[tokio::test]
     async fn test_event_emission() {
         let (tx, mut rx) = mpsc::channel(10);
-        let client = LewisEventClient { tx: Some(tx) };
+        let client = LewisEventClient {
+            tx: Some(tx),
+            jet_id: None,
+        };
 
         let event = event_builders::JetEventBuilder::new(
             String::new(),
@@ -353,7 +365,10 @@ mod test {
     #[tokio::test]
     async fn test_full_queue_drops_events() {
         let (tx, mut rx) = mpsc::channel(1);
-        let client = LewisEventClient { tx: Some(tx) };
+        let client = LewisEventClient {
+            tx: Some(tx),
+            jet_id: None,
+        };
 
         let event1 = event_builders::JetEventBuilder::new(
             String::new(),

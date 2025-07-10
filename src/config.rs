@@ -463,6 +463,9 @@ pub struct ConfigLewisEvents {
     /// Event buffer queue size
     #[serde(default = "ConfigLewisEvents::default_queue_size_buffer")]
     pub queue_size_buffer: usize,
+
+    /// Jet Id
+    pub jet_id: Option<String>,
 }
 
 impl ConfigLewisEvents {

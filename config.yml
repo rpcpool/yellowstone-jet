@@ -117,14 +117,11 @@ quic:
   #     quic: 208.61.229.3:8442
   #     quic_forwards: 208.61.229.3:8443
 
-# Send metrics to lewis
-# metrics_upstream:
-#   # lewis gRPC metrics endpoint
-#   endpoint: http://127.0.0.1:8005
-#   # Events gRPC queue size
-#   queue_size_grpc: 1000
-#   # Event buffer queue size
-#   queue_size_buffer: 100000
+lewis_events:
+  lewis_endpoint: "http://localhost:8005"
+  queue_size_grpc: 1000
+  queue_size_buffer: 100000
+  jet_id: "jet-test-123"
 
 features:
   enabled_features:
