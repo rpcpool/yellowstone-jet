@@ -62,8 +62,8 @@ solana-tls-utils = "2"
 # --> Anza - Solana SDK (decoupled from agave)
 solana-program = "2"
 # TEMPORARY
-yellowstone-vixen = "0.2.0"
-
+reqwest = { version = "0.12.15", features = ["json"] }
+retry = "2.0.0"
 solana-instruction = "2"
 solana-pubkey = "2"
 solana-keypair = "2"
@@ -83,9 +83,6 @@ solana-compute-budget-interface = "2"
 solana-native-token = "2"
 solana-nonce = "2"
 solana-packet = "2"
-
-
-yellowstone-shield-store = { git = "https://github.com/rpcpool/yellowstone-shield.git", branch = "main" }
 thiserror = "1.0.58"
 tokio = { version = "1.36.0", features = ["rt-multi-thread", "macros"] }
 tokio-stream = "0.1.15"
@@ -99,10 +96,12 @@ tracing-subscriber = { version = "0.3.1", features = [
     "json",
 ] }
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
+
 yellowstone-grpc-client = "7"
 yellowstone-grpc-proto = "7"
-reqwest = { version = "0.12.15", features = ["json"] }
-retry = "2.0.0"
+yellowstone-shield-store = "~0.5.2"
+yellowstone-vixen = "0.2.0"
+
 
 [build-dependencies]
 anyhow = "1.0.69"
