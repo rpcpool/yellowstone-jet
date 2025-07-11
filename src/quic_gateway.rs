@@ -63,6 +63,7 @@ use {
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
         WriteError, crypto::rustls::QuicClientConfig,
     },
+    solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_pubkey::Pubkey,
@@ -110,6 +111,8 @@ pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms *
 pub const DEFAULT_MAX_SEND_ATTEMPT: NonZeroUsize = NonZeroUsize::new(3).unwrap();
 pub const DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TX_SEND_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub const DEFAULT_LEADER_PREDICTION_LOOKAHEAD: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ConnectingError {
@@ -182,6 +185,11 @@ pub struct QuicGatewayConfig {
     /// Timeout for sending a transaction to a remote peer.
     ///
     pub send_timeout: Duration,
+
+    ///
+    /// Maximum number of leaders to predict
+    ///
+    pub leader_prediction_lookahead: Option<NonZeroUsize>,
 }
 
 impl Default for QuicGatewayConfig {
@@ -199,6 +207,7 @@ impl Default for QuicGatewayConfig {
             max_send_attempt: DEFAULT_MAX_SEND_ATTEMPT,
             remote_peer_addr_watch_interval: DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL,
             send_timeout: DEFAULT_TX_SEND_TIMEOUT,
+            leader_prediction_lookahead: Some(DEFAULT_LEADER_PREDICTION_LOOKAHEAD),
         }
     }
 }
@@ -258,6 +267,30 @@ struct WaitingEviction {
 struct EndpointUsage {
     connected_remote_peers: HashSet<Pubkey>,
 }
+
+///
+/// Base trait for predicting upcoming leaders in the Solana cluster.
+///
+pub trait UpcomingLeaderPredictor {
+    ///
+    /// Tries to predict the next `n` leaders based on the current leader.
+    ///
+    fn try_predict_next_n_leaders(&self, n: usize) -> Vec<Pubkey>;
+}
+
+///
+/// A dummy upcoming leader predictor that does not predict any leaders.
+///
+#[derive(Debug, Default)]
+pub struct IgnorantLeaderPredictor;
+
+impl UpcomingLeaderPredictor for IgnorantLeaderPredictor {
+    fn try_predict_next_n_leaders(&self, _n: usize) -> Vec<Pubkey> {
+        Vec::new()
+    }
+}
+
+const FOREVER: Duration = Duration::from_secs(31_536_000); // One year is considered "forever" in this context.
 
 ///
 /// Tokio-based runtime to driver a QUIC gateway.
@@ -364,6 +397,16 @@ pub(crate) struct TokioQuicGatewayRuntime {
     connecting_blocked_by_eviction_list: VecDeque<WaitingEviction>,
 
     remote_peer_addr_watcher: RemotePeerAddrWatcher,
+
+    ///
+    /// Upcoming leader predictor to use.
+    ///
+    leader_predictor: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
+
+    ///
+    /// Next leader prediction deadline.
+    ///
+    next_leader_prediction_deadline: Instant,
 }
 
 pub trait LeaderTpuInfoService {
@@ -708,6 +751,7 @@ impl QuicTxSenderWorker {
 
     async fn run(mut self) -> TxSenderWorkerCompleted {
         let mut canceled = false;
+
         let maybe_err = loop {
             if let Some(e) = self.process_tx_queue_if_any().await {
                 break Some(e);
@@ -1581,11 +1625,56 @@ impl TokioQuicGatewayRuntime {
         }
     }
 
+    fn try_predict_upcoming_leaders_if_necessary(&mut self) {
+        if self.next_leader_prediction_deadline.elapsed() == Duration::ZERO {
+            return;
+        }
+
+        if self
+            .config
+            .leader_prediction_lookahead
+            .map_or(0, |nz| nz.get())
+            == 0
+        {
+            // If we don't have leader prediction lookahead configured, we don't predict upcoming leaders.
+            // Next time we will try to predict upcoming leaders is in FOREVER.
+            self.next_leader_prediction_deadline = Instant::now() + FOREVER;
+            return;
+        }
+
+        let lh = self.config.leader_prediction_lookahead.unwrap().get() as u64;
+        let wait_dur_ms = lh * NUM_CONSECUTIVE_LEADER_SLOTS * DEFAULT_MS_PER_SLOT;
+        let wait_dur = Duration::from_millis(wait_dur_ms);
+        self.next_leader_prediction_deadline = Instant::now() + wait_dur;
+
+        let upcoming_leaders = self
+            .leader_predictor
+            .try_predict_next_n_leaders(lh as usize);
+        for upcoming_leader in upcoming_leaders {
+            let is_already_connectish = self.tx_worker_handle_map.contains_key(&upcoming_leader)
+                || self.connecting_remote_peers.contains_key(&upcoming_leader);
+
+            if !is_already_connectish {
+                metrics::jet::incr_quic_gw_leader_prediction_hit();
+                tracing::trace!(
+                    "Spawning connection for predicted upcoming leader: {}",
+                    upcoming_leader
+                );
+                self.spawn_connecting(upcoming_leader, self.config.max_connection_attempts);
+            } else {
+                metrics::jet::incr_quic_gw_leader_prediction_miss();
+            }
+        }
+    }
+
     pub async fn run(mut self) {
         metrics::jet::quic_set_identity(self.identity.pubkey());
+
         loop {
             self.do_eviction_if_required();
             self.update_prom_metrics();
+            self.try_predict_upcoming_leaders_if_necessary();
+
             tokio::select! {
                 maybe = self.tx_inlet.recv() => {
                     match maybe {
@@ -1833,6 +1922,7 @@ impl TokioQuicGatewaySpawner {
             identity,
             Default::default(),
             Arc::new(StakeBasedEvictionStrategy::default()),
+            Arc::new(IgnorantLeaderPredictor::default()),
         )
     }
 
@@ -1841,11 +1931,13 @@ impl TokioQuicGatewaySpawner {
         identity: Keypair,
         config: QuicGatewayConfig,
         eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
+        leader_schedule: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
     ) -> TokioQuicGatewaySession {
         self.spawn_on(
             identity,
             config,
             eviction_strategy,
+            leader_schedule,
             tokio::runtime::Handle::current(),
         )
     }
@@ -1855,6 +1947,7 @@ impl TokioQuicGatewaySpawner {
         identity: Keypair,
         config: QuicGatewayConfig,
         eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
+        leader_predictor: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
         gateway_rt: Handle,
     ) -> TokioQuicGatewaySession {
         let (tx_inlet, tx_outlet) = mpsc::channel(self.gateway_tx_channel_capacity);
@@ -1924,6 +2017,8 @@ impl TokioQuicGatewaySpawner {
             endpoints,
             endpoints_usage,
             remote_peer_addr_watcher,
+            leader_predictor,
+            next_leader_prediction_deadline: Instant::now(),
         };
 
         let jh = gateway_rt.spawn(gateway_runtime.run());

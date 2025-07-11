@@ -39,8 +39,8 @@ use {
         jet_gateway::spawn_jet_gw_listener,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
         quic_gateway::{
-            QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
-            TokioQuicGatewaySpawner,
+            IgnorantLeaderPredictor, QuicGatewayConfig, StakeBasedEvictionStrategy,
+            TokioQuicGatewaySession, TokioQuicGatewaySpawner,
         },
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
@@ -361,6 +361,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(StakeBasedEvictionStrategy {
             peer_idle_eviction_grace_period: config.quic.connection_idle_eviction_grace,
         }),
+        Arc::new(IgnorantLeaderPredictor::default()),
     );
 
     tg.spawn_cancelable("gateway", async move {

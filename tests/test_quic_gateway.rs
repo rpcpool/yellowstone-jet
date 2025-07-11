@@ -24,9 +24,9 @@ use {
     tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream},
     yellowstone_jet::{
         quic_gateway::{
-            GatewayResponse, GatewayTransaction, LeaderTpuInfoService, QuicGatewayConfig,
-            StakeBasedEvictionStrategy, TokioQuicGatewaySession, TokioQuicGatewaySpawner,
-            TxDropReason,
+            GatewayResponse, GatewayTransaction, IgnorantLeaderPredictor, LeaderTpuInfoService,
+            QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
+            TokioQuicGatewaySpawner, TxDropReason,
         },
         stake::StakeInfoMap,
     },
@@ -312,6 +312,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor::default()),
     );
 
     let rx_server_handle = tokio::spawn(async move {
@@ -376,6 +377,7 @@ async fn it_should_update_gatway_identity() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor::default()),
     );
 
     let (mut client_rx, _, _rx_server_handle) =
@@ -447,6 +449,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor::default()),
     );
 
     let (validator_rx1, _, _) = MockedRemoteValidator::spawn(
@@ -545,6 +548,7 @@ async fn it_should_evict_connection() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor::default()),
     );
 
     let (validator_rx1, mut validator_conn_spy1, _) = MockedRemoteValidator::spawn(
@@ -667,6 +671,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor::default()),
     );
 
     let _rx_server_handle = tokio::spawn(async move {
@@ -736,6 +741,7 @@ async fn it_should_detect_remote_peer_address_change() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor::default()),
     );
 
     let (mut client_rx1, mut conn_spy_rx1, _rx_server_handle) =
