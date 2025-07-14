@@ -290,6 +290,15 @@ impl UpcomingLeaderPredictor for IgnorantLeaderPredictor {
     }
 }
 
+impl UpcomingLeaderPredictor for ClusterTpuInfo {
+    fn try_predict_next_n_leaders(&self, n: usize) -> Vec<Pubkey> {
+        self.get_leader_tpus(n)
+            .iter()
+            .map(|info| info.leader)
+            .collect()
+    }
+}
+
 const FOREVER: Duration = Duration::from_secs(31_536_000); // One year is considered "forever" in this context.
 
 ///
