@@ -1,6 +1,6 @@
 use {
     crate::{
-        grpc_geyser::{GeyserStreams, BlockMetaWithCommitment},
+        grpc_geyser::{BlockMetaWithCommitment, GeyserStreams},
         metrics::jet as metrics,
         util::{
             BlockHeight, CommitmentLevel, WaitShutdown, WaitShutdownJoinHandleResult,
@@ -48,7 +48,11 @@ impl BlockhashQueue {
         Self {
             blockmeta_map: Arc::clone(&blockmeta_map),
             shutdown: Arc::clone(&shutdown),
-            join_handle: Self::spawn(Self::subscribe(shutdown, blockmeta_map, grpc.subscribe_block_meta())),
+            join_handle: Self::spawn(Self::subscribe(
+                shutdown,
+                blockmeta_map,
+                grpc.subscribe_block_meta(),
+            )),
         }
     }
 
@@ -101,7 +105,9 @@ impl BlockhashQueue {
             .blockmeta_map
             .read()
             .expect("Failed to acquire read lock on blockmeta_map");
-        blockmeta_map.get(block_hash).map(|block_meta| block_meta.block_height)
+        blockmeta_map
+            .get(block_hash)
+            .map(|block_meta| block_meta.block_height)
     }
 
     pub fn get_block_height_latest(&self, commitment: CommitmentLevel) -> Option<BlockHeight> {
@@ -213,7 +219,9 @@ pub mod testkit {
                 .blockmeta_map
                 .read()
                 .expect("Failed to acquire read lock on blockmeta_map");
-            blockmeta_map.get(blockhash).map(|block_meta| block_meta.block_height)
+            blockmeta_map
+                .get(blockhash)
+                .map(|block_meta| block_meta.block_height)
         }
 
         fn get_block_height_for_commitment(

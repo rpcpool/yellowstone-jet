@@ -74,7 +74,7 @@ pub fn collect_to_text() -> String {
 
 pub mod jet {
     use {
-        super::{init2, REGISTRY},
+        super::{REGISTRY, init2},
         crate::util::{CommitmentLevel, SlotStatus},
         prometheus::{
             Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,

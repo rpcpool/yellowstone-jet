@@ -8,7 +8,7 @@ use {
         util::CommitmentLevel,
     },
     bytes::Bytes,
-    solana_clock::{Slot, MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES},
+    solana_clock::{MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES, Slot},
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_transaction::versioned::VersionedTransaction,
@@ -178,7 +178,7 @@ impl GrpcRootedTxReceiver {
                             blockmeta.block_height + MAX_RECENT_BLOCKHASHES as u64
                                 > blockmeta.block_height
                         } else {
-                            blockmeta.slot > blockmeta.slot
+                            blockmeta.slot > blockmeta_update.slot
                         }
                     } else {
                         true

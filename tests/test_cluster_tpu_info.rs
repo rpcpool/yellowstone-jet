@@ -1,12 +1,21 @@
 use {
-    maplit::hashmap, solana_client::{
+    maplit::hashmap,
+    solana_client::{
         client_error::Result as ClientResult,
         rpc_response::{RpcContactInfo, RpcLeaderSchedule},
-    }, solana_clock::Slot, solana_epoch_schedule::EpochSchedule, solana_pubkey::Pubkey, std::{collections::HashMap, sync::Arc, time::Duration}, tokio::sync::{Mutex, RwLock, broadcast, mpsc}, yellowstone_jet::{
+    },
+    solana_clock::Slot,
+    solana_epoch_schedule::EpochSchedule,
+    solana_pubkey::Pubkey,
+    std::{collections::HashMap, sync::Arc, time::Duration},
+    tokio::sync::{Mutex, RwLock, broadcast, mpsc},
+    yellowstone_jet::{
         cluster_tpu_info::{ClusterTpuInfo, ClusterTpuRpcClient},
-        grpc_geyser::{BlockMetaWithCommitment, GeyserStreams, GrpcUpdateMessage, SlotUpdateWithStatus},
+        grpc_geyser::{
+            BlockMetaWithCommitment, GeyserStreams, GrpcUpdateMessage, SlotUpdateWithStatus,
+        },
         util::SlotStatus,
-    }
+    },
 };
 
 const fn create_contact_info(pubkey: String) -> RpcContactInfo {

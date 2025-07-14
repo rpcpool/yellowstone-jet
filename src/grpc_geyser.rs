@@ -2,7 +2,7 @@ use {
     crate::{
         config::ConfigUpstreamGrpc,
         metrics::jet as metrics,
-        util::{BlockHeight, CommitmentLevel, IncrementalBackoff, fork_oneshot, SlotStatus},
+        util::{BlockHeight, CommitmentLevel, IncrementalBackoff, SlotStatus, fork_oneshot},
     },
     anyhow::Context,
     futures::{
@@ -61,7 +61,7 @@ impl SlotTrackingInfo {
         self.statuses_seen |= 1 << (status as i32 as u8);
     }
 
-    fn has_seen_status(&self, status: SlotStatus) -> bool {
+    const fn has_seen_status(&self, status: SlotStatus) -> bool {
         self.statuses_seen & (1 << (status as i32 as u8)) != 0
     }
 }
@@ -521,7 +521,7 @@ impl GeyserSubscriber {
 // Helper function to convert SlotStatus to CommitmentLevel
 // Only Processed, Confirmed, and Finalized map to commitment levels
 // Other statuses (FirstShredReceived, etc.) are slot-only events
-fn slot_status_to_commitment(status: SlotStatus) -> Option<CommitmentLevel> {
+const fn slot_status_to_commitment(status: SlotStatus) -> Option<CommitmentLevel> {
     match status {
         SlotStatus::SlotProcessed => Some(CommitmentLevel::Processed),
         SlotStatus::SlotConfirmed => Some(CommitmentLevel::Confirmed),
