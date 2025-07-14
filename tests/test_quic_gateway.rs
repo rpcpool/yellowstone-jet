@@ -26,7 +26,7 @@ use {
         quic_gateway::{
             GatewayResponse, GatewayTransaction, IgnorantLeaderPredictor, LeaderTpuInfoService,
             QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
-            TokioQuicGatewaySpawner, TxDropReason,
+            TokioQuicGatewaySpawner, TxDropReason, UpcomingLeaderPredictor,
         },
         stake::StakeInfoMap,
     },
@@ -80,23 +80,36 @@ pub enum MockConnectionError {
     ReadError(#[from] std::io::Error),
 }
 
+struct MockConnectionEstablished {
+    remote_pubkey: Pubkey,
+    connection_id: usize,
+}
+
 struct MockConnectionEnd {
     remote_pubkey: Pubkey,
     result: Result<(), ConnectionError>,
 }
 
+#[derive(Default)]
+struct MockValidatorNotifiers {
+    connection_end_notify: Option<mpsc::Sender<MockConnectionEnd>>,
+    connection_established_notify: Option<mpsc::Sender<MockConnectionEstablished>>,
+}
+
+///
+/// MockedRemoteValidator is a mock implementation of a remote validator that
+///
+/// spawns a QUIC endpoint that accepts connections and reads data from them.
+/// Tis used to test the TokioQuicGatewaySpawner and its ability to handle
+///
 impl MockedRemoteValidator {
     fn spawn(
         kp: Keypair,
         addr: SocketAddr,
-    ) -> (
-        mpsc::Receiver<MockReceipt>,
-        mpsc::Receiver<MockConnectionEnd>,
-        JoinHandle<()>,
-    ) {
+        notifiers: MockValidatorNotifiers,
+    ) -> (mpsc::Receiver<MockReceipt>, JoinHandle<()>) {
         let endpoint = build_validator_quic_tpu_endpoint(&kp, addr);
         let (client_tx, client_rx) = mpsc::channel(100);
-        let (connection_spy_tx, connection_spy_rx) = mpsc::channel(100);
         let client_tx2 = client_tx.clone();
         struct ConnectionDetail {
             remote_pubkey: Pubkey,
@@ -114,18 +127,28 @@ impl MockedRemoteValidator {
                         let (id, result) = result.expect("join next");
                         let connection_detail = connection_set_meta.remove(&id)
                             .expect("connection detail");
-                        let _ = connection_spy_tx.send(MockConnectionEnd {
-                            remote_pubkey: connection_detail.remote_pubkey,
-                            result,
-                        }).await;
+                        if let Some(tx) = notifiers.connection_end_notify.as_ref() {
+                            let _ = tx.send(MockConnectionEnd {
+                                remote_pubkey: connection_detail.remote_pubkey,
+                                result: result.clone(),
+                            }).await;
+                        }
                         continue;
                     }
                 };
                 let new_connection_id = connection_id;
                 let conn = connecting.await.expect("quinn connection");
+                connection_id += 1;
                 let remote_key = solana_streamer::nonblocking::quic::get_remote_pubkey(&conn)
                     .expect("get remote pubkey");
-                connection_id += 1;
+                if let Some(tx) = notifiers.connection_established_notify.as_ref() {
+                    let _ = tx
+                        .send(MockConnectionEstablished {
+                            remote_pubkey: remote_key,
+                            connection_id: new_connection_id,
+                        })
+                        .await;
+                }
                 let client_tx = client_tx2.clone();
                 let ah = connection_set.spawn(async move {
                     loop {
@@ -163,7 +186,7 @@ impl MockedRemoteValidator {
                 );
             }
         });
-        (client_rx, connection_spy_rx, rx_server_handle)
+        (client_rx, rx_server_handle)
     }
 }
 
@@ -190,8 +213,11 @@ async fn send_buffer_should_land_properly() {
         gateway_join_handle: _,
     } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
 
-    let (mut client_rx, _, _rx_server_handle) =
-        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), rx_server_addr);
+    let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
+        rx_server_identity.insecure_clone(),
+        rx_server_addr,
+        Default::default(),
+    );
     let tx_sig = Signature::new_unique();
     transaction_sink
         .send(GatewayTransaction {
@@ -245,8 +271,11 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
     } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
     const MAX_TX: u64 = 5;
 
-    let (mut client_rx, _, _rx_server_handle) =
-        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), rx_server_addr);
+    let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
+        rx_server_identity.insecure_clone(),
+        rx_server_addr,
+        Default::default(),
+    );
 
     let tx_sig_vec = (0..MAX_TX)
         .map(|_| Signature::new_unique())
@@ -312,7 +341,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor::default()),
+        Arc::new(IgnorantLeaderPredictor),
     );
 
     let rx_server_handle = tokio::spawn(async move {
@@ -377,11 +406,14 @@ async fn it_should_update_gatway_identity() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor::default()),
+        Arc::new(IgnorantLeaderPredictor),
     );
 
-    let (mut client_rx, _, _rx_server_handle) =
-        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), rx_server_addr);
+    let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
+        rx_server_identity.insecure_clone(),
+        rx_server_addr,
+        Default::default(),
+    );
 
     transaction_sink
         .send(GatewayTransaction {
@@ -449,17 +481,19 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor::default()),
+        Arc::new(IgnorantLeaderPredictor),
     );
 
-    let (validator_rx1, _, _) = MockedRemoteValidator::spawn(
+    let (validator_rx1, _) = MockedRemoteValidator::spawn(
         remote_validator_identity1.insecure_clone(),
         remote_validator_addr1,
+        Default::default(),
     );
 
-    let (validator_rx2, _, _) = MockedRemoteValidator::spawn(
+    let (validator_rx2, _) = MockedRemoteValidator::spawn(
         remote_validator_identity2.insecure_clone(),
         remote_validator_addr2,
+        Default::default(),
     );
 
     let mut stream_map = StreamMap::new();
@@ -548,17 +582,29 @@ async fn it_should_evict_connection() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor::default()),
+        Arc::new(IgnorantLeaderPredictor),
     );
 
-    let (validator_rx1, mut validator_conn_spy1, _) = MockedRemoteValidator::spawn(
+    let (tx, mut validator_conn_spy1) = mpsc::channel(100);
+    let notifier = MockValidatorNotifiers {
+        connection_end_notify: Some(tx),
+        ..Default::default()
+    };
+    let (validator_rx1, _) = MockedRemoteValidator::spawn(
         remote_validator_identity1.insecure_clone(),
         remote_validator_addr1,
+        notifier,
     );
 
-    let (validator_rx2, mut validator_conn_spy2, _) = MockedRemoteValidator::spawn(
+    let (tx, mut validator_conn_spy2) = mpsc::channel(100);
+    let notifier = MockValidatorNotifiers {
+        connection_end_notify: Some(tx),
+        ..Default::default()
+    };
+    let (validator_rx2, _) = MockedRemoteValidator::spawn(
         remote_validator_identity2.insecure_clone(),
         remote_validator_addr2,
+        notifier,
     );
 
     let mut stream_map = StreamMap::new();
@@ -671,7 +717,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor::default()),
+        Arc::new(IgnorantLeaderPredictor),
     );
 
     let _rx_server_handle = tokio::spawn(async move {
@@ -741,11 +787,19 @@ async fn it_should_detect_remote_peer_address_change() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor::default()),
+        Arc::new(IgnorantLeaderPredictor),
     );
 
-    let (mut client_rx1, mut conn_spy_rx1, _rx_server_handle) =
-        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), rx_server_addr);
+    let (tx, mut conn_spy_rx1) = mpsc::channel(100);
+    let notifier = MockValidatorNotifiers {
+        connection_end_notify: Some(tx),
+        ..Default::default()
+    };
+    let (mut client_rx1, _rx_server_handle) = MockedRemoteValidator::spawn(
+        rx_server_identity.insecure_clone(),
+        rx_server_addr,
+        notifier,
+    );
     let tx_sig = Signature::new_unique();
     transaction_sink
         .send(GatewayTransaction {
@@ -769,8 +823,11 @@ async fn it_should_detect_remote_peer_address_change() {
     // Now we change the remote peer address
     let new_rx_server_addr = generate_random_local_addr();
     // keep the same pubkey, but change the address
-    let (mut client_rx2, _, _) =
-        MockedRemoteValidator::spawn(rx_server_identity.insecure_clone(), new_rx_server_addr);
+    let (mut client_rx2, _) = MockedRemoteValidator::spawn(
+        rx_server_identity.insecure_clone(),
+        new_rx_server_addr,
+        Default::default(),
+    );
 
     fake_tpu_info_service.update_addr(rx_server_identity.pubkey(), new_rx_server_addr);
 
@@ -796,4 +853,138 @@ async fn it_should_detect_remote_peer_address_change() {
         panic!("Expected GatewayResponse::TxSent, got something else");
     };
     assert_eq!(actual_resp.tx_sig, tx_sig2);
+}
+
+#[tokio::test]
+async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predictions() {
+    let gateway_kp = Keypair::new();
+    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let mut validator_rx_vec = vec![];
+    let mut validator_conn_ending_rx_vec = vec![];
+    let mut validator_conn_establ_rx_vec = vec![];
+    let mut validators_kp_vec = vec![];
+    let mut validators_addr_vec = vec![];
+    const NUM_VALIDATORS: usize = 3;
+
+    // We spawn NUM_VALIDATORS remote validators, each with its own address and identity.
+    for _ in 0..NUM_VALIDATORS {
+        let remote_validator_addr = generate_random_local_addr();
+        let remote_validator_identity = Keypair::new();
+        validators_kp_vec.push(remote_validator_identity.insecure_clone());
+        validators_addr_vec.push(remote_validator_addr);
+        let (tx, rx) = mpsc::channel(100);
+        let (tx_establish, rx_establish) = mpsc::channel(100);
+        let notifier = MockValidatorNotifiers {
+            connection_end_notify: Some(tx),
+            connection_established_notify: Some(tx_establish),
+        };
+        let (validator_rx, _) = MockedRemoteValidator::spawn(
+            remote_validator_identity.insecure_clone(),
+            remote_validator_addr,
+            notifier,
+        );
+        validator_rx_vec.push(validator_rx);
+        validator_conn_ending_rx_vec.push(rx);
+        validator_conn_establ_rx_vec.push(rx_establish);
+    }
+
+    let kp_to_addr_pairs = validators_kp_vec
+        .iter()
+        .zip(validators_addr_vec.iter())
+        .map(|(kp, addr)| (kp.pubkey(), *addr))
+        .collect::<Vec<_>>();
+
+    let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter(kp_to_addr_pairs);
+
+    let gateway_spawner = TokioQuicGatewaySpawner {
+        stake_info_map,
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        gateway_tx_channel_capacity: 100,
+    };
+
+    let gateway_config = QuicGatewayConfig {
+        // Keep it small so test runs fast.
+        remote_peer_addr_watch_interval: Duration::from_millis(10),
+        // Set the lookahead to the number of validators we have
+        leader_prediction_lookahead: Some(NonZeroUsize::new(NUM_VALIDATORS).unwrap()),
+        ..Default::default()
+    };
+
+    struct FakeLeaderPredictor {
+        validators: Vec<Pubkey>,
+        calls: Arc<StdRwLock<usize>>,
+    }
+
+    impl UpcomingLeaderPredictor for FakeLeaderPredictor {
+        fn try_predict_next_n_leaders(&self, n: usize) -> Vec<Pubkey> {
+            {
+                let mut calls = self.calls.write().expect("write lock");
+                *calls += 1;
+            }
+            self.validators
+                .iter()
+                .cycle()
+                .take(n)
+                .cloned()
+                .collect::<Vec<_>>()
+        }
+    }
+
+    impl FakeLeaderPredictor {
+        fn get_calls(&self) -> usize {
+            let calls = self.calls.read().expect("read lock");
+            *calls
+        }
+    }
+
+    let fake_predictor = Arc::new(FakeLeaderPredictor {
+        validators: validators_kp_vec.iter().map(|kp| kp.pubkey()).collect(),
+        calls: Arc::new(StdRwLock::new(0)),
+    });
+
+    let TokioQuicGatewaySession {
+        gateway_identity_updater: _,
+        gateway_tx_sink: transaction_sink,
+        gateway_response_source: _,
+        gateway_join_handle: _,
+    } = gateway_spawner.spawn(
+        gateway_kp.insecure_clone(),
+        gateway_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::clone(&fake_predictor) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>,
+    );
+
+    // Since we provided a predictor strategy and a lookahead, the gateway should preemptively connect to the upcoming leaders.
+    let mut validator_to_conn_id_map = HashMap::new();
+    for (i, rx) in validator_conn_establ_rx_vec.iter_mut().enumerate() {
+        let res = rx.recv().await.expect("recv connection end");
+        let validator_pk = validators_kp_vec[i].pubkey();
+        assert_eq!(res.remote_pubkey, gateway_kp.pubkey());
+        validator_to_conn_id_map.insert(validator_pk, res.connection_id);
+    }
+
+    // Now send a transaction to each of the validators, this should reuse the connections established by the predictor.
+    // Using each validator_rx receiver half, we will be notified on transaction reception with the connection id used.
+    // We should see it reuses the same connection id for each validator, previously set in `validator_to_conn_id_map`.
+
+    for (i, validator_rx) in validator_rx_vec.iter_mut().enumerate() {
+        let tx_sig = Signature::new_unique();
+        transaction_sink
+            .send(GatewayTransaction {
+                tx_sig,
+                wire: Bytes::copy_from_slice(format!("helloworld{i}").as_bytes()),
+                remote_peer: validators_kp_vec[i].pubkey(),
+            })
+            .await
+            .expect("send tx");
+
+        let spy_request = validator_rx.recv().await.expect("recv");
+        assert_eq!(spy_request.from, gateway_kp.pubkey());
+        assert_eq!(
+            spy_request.connection_id,
+            validator_to_conn_id_map[&validators_kp_vec[i].pubkey()]
+        );
+    }
+
+    assert!(fake_predictor.get_calls() >= 1);
 }

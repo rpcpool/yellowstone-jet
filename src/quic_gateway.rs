@@ -1626,44 +1626,44 @@ impl TokioQuicGatewayRuntime {
     }
 
     fn try_predict_upcoming_leaders_if_necessary(&mut self) {
+        // THIS BRANCH IS HIGHLY LIKELY TO BE TRUE
         if self.next_leader_prediction_deadline.elapsed() == Duration::ZERO {
             return;
         }
 
-        if self
+        if let Some(lh) = self
             .config
             .leader_prediction_lookahead
-            .map_or(0, |nz| nz.get())
-            == 0
+            .map(|nz| nz.get() as u64)
         {
-            // If we don't have leader prediction lookahead configured, we don't predict upcoming leaders.
-            // Next time we will try to predict upcoming leaders is in FOREVER.
-            self.next_leader_prediction_deadline = Instant::now() + FOREVER;
-            return;
-        }
+            let wait_dur_ms = lh * NUM_CONSECUTIVE_LEADER_SLOTS * DEFAULT_MS_PER_SLOT;
+            let wait_dur = Duration::from_millis(wait_dur_ms);
+            self.next_leader_prediction_deadline = Instant::now() + wait_dur;
 
-        let lh = self.config.leader_prediction_lookahead.unwrap().get() as u64;
-        let wait_dur_ms = lh * NUM_CONSECUTIVE_LEADER_SLOTS * DEFAULT_MS_PER_SLOT;
-        let wait_dur = Duration::from_millis(wait_dur_ms);
-        self.next_leader_prediction_deadline = Instant::now() + wait_dur;
+            let upcoming_leaders = self
+                .leader_predictor
+                .try_predict_next_n_leaders(lh as usize);
+            for upcoming_leader in upcoming_leaders {
+                let is_already_connectish =
+                    self.tx_worker_handle_map.contains_key(&upcoming_leader)
+                        || self.connecting_remote_peers.contains_key(&upcoming_leader);
 
-        let upcoming_leaders = self
-            .leader_predictor
-            .try_predict_next_n_leaders(lh as usize);
-        for upcoming_leader in upcoming_leaders {
-            let is_already_connectish = self.tx_worker_handle_map.contains_key(&upcoming_leader)
-                || self.connecting_remote_peers.contains_key(&upcoming_leader);
-
-            if !is_already_connectish {
-                metrics::jet::incr_quic_gw_leader_prediction_hit();
-                tracing::trace!(
-                    "Spawning connection for predicted upcoming leader: {}",
-                    upcoming_leader
-                );
-                self.spawn_connecting(upcoming_leader, self.config.max_connection_attempts);
-            } else {
-                metrics::jet::incr_quic_gw_leader_prediction_miss();
+                if !is_already_connectish {
+                    metrics::jet::incr_quic_gw_leader_prediction_hit();
+                    tracing::trace!(
+                        "Spawning connection for predicted upcoming leader: {}",
+                        upcoming_leader
+                    );
+                    self.spawn_connecting(upcoming_leader, self.config.max_connection_attempts);
+                } else {
+                    metrics::jet::incr_quic_gw_leader_prediction_miss();
+                }
             }
+        } else {
+            // If we don't have leader prediction lookahead configured, we don't predict upcoming leaders.
+            // Set the next prediction deadline to a long time in the future.
+            // So this function exit early next time it is called.
+            self.next_leader_prediction_deadline = Instant::now() + FOREVER;
         }
     }
 
@@ -1922,7 +1922,7 @@ impl TokioQuicGatewaySpawner {
             identity,
             Default::default(),
             Arc::new(StakeBasedEvictionStrategy::default()),
-            Arc::new(IgnorantLeaderPredictor::default()),
+            Arc::new(IgnorantLeaderPredictor),
         )
     }
 

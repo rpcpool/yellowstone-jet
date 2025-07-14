@@ -361,7 +361,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(StakeBasedEvictionStrategy {
             peer_idle_eviction_grace_period: config.quic.connection_idle_eviction_grace,
         }),
-        Arc::new(IgnorantLeaderPredictor::default()),
+        Arc::new(IgnorantLeaderPredictor),
     );
 
     tg.spawn_cancelable("gateway", async move {
