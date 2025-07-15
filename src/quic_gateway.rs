@@ -1645,8 +1645,22 @@ impl TokioQuicGatewayRuntime {
             .leader_prediction_lookahead
             .map(|nz| nz.get() as u64)
         {
-            let wait_dur_ms = lh * NUM_CONSECUTIVE_LEADER_SLOTS * DEFAULT_MS_PER_SLOT;
-            let wait_dur = Duration::from_millis(wait_dur_ms);
+            // Whatever the lookahead we are using, next prediction deadline should be equal to
+            // half of the lookahead period in combined slot time.
+            // Say we have 10 leaders LH, each leaders gets 4 consecutive slots,
+            // so we have 40 slots in total.
+            // Once we predicted the next leaders for next 40 slots, there is no need
+            // to predict them again for at least half of that time, thus the division by 2.
+            // We also don't wait the full 40 slots, so we can start predicting again earlier before any
+            // incoming transaction request arrives.
+            // Lastly, the floor is 200ms.
+            // You may be wondering why we don't use tokio sleep or tick,
+            // since this is a on the critical path of transaction sending, I don't want to add too much overhead.
+            // Tokio timed based primitives usually hides mutexes and other synchronization primitives behind
+            // a layer of abstraction, which can introduce latency and complexity.
+            // Mutex would be acquire on each sleep registration or cancelation (which happen alot when using tokio::select! macro).
+            let wait_dur_ms = (lh * NUM_CONSECUTIVE_LEADER_SLOTS * DEFAULT_MS_PER_SLOT) / 2;
+            let wait_dur = Duration::from_millis(wait_dur_ms.max(DEFAULT_MS_PER_SLOT / 2));
             self.next_leader_prediction_deadline = Instant::now() + wait_dur;
 
             let upcoming_leaders = self
