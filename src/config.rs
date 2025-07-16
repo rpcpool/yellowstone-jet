@@ -124,12 +124,8 @@ impl ConfigIdentity {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
-    /// Primary gRPC service
-    pub primary_grpc: ConfigUpstreamGrpc,
-
-    /// Secondary gRPC service, by default primary would be used
-    /// Used only for additional transaction status subscribe
-    pub secondary_grpc: Option<ConfigUpstreamGrpc>,
+    /// gRPC service
+    pub grpc: ConfigUpstreamGrpc,
 
     /// RPC endpoint
     #[serde(default = "ConfigUpstream::default_rpc")]
@@ -198,7 +194,7 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
     fn from(
         ConfigUpstream {
             rpc,
-            primary_grpc: ConfigUpstreamGrpc { endpoint, x_token },
+            grpc: ConfigUpstreamGrpc { endpoint, x_token },
             ..
         }: ConfigUpstream,
     ) -> Self {

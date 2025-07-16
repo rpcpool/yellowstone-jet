@@ -82,29 +82,6 @@ impl SlotStatus {
             Self::SlotDead => "dead",
         }
     }
-    const fn as_i32(self) -> i32 {
-        match self {
-            Self::SlotProcessed => 0,
-            Self::SlotConfirmed => 1,
-            Self::SlotFinalized => 2,
-            Self::SlotFirstShredReceived => 3,
-            Self::SlotCompleted => 4,
-            Self::SlotCreatedBank => 5,
-            Self::SlotDead => 6,
-        }
-    }
-}
-
-impl Ord for SlotStatus {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.as_i32().cmp(&other.as_i32())
-    }
-}
-
-impl PartialOrd for SlotStatus {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 impl From<i32> for SlotStatus {
