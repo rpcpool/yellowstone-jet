@@ -122,7 +122,8 @@ impl ConfigIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+// Commented this in case our users have old configs here
+// #[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
     /// gRPC service
     /// The `primary_grpc` alias is used to maintain compatibility with previous versions.
