@@ -1,8 +1,8 @@
 use {
     crate::{
-        blockhash_queue::BlockHeighService,
+        blockhash_queue::BlockHeightService,
         cluster_tpu_info::ClusterTpuInfo,
-        grpc_geyser::{GrpcUpdateMessage, SlotUpdateInfoWithCommitment, TransactionReceived},
+        grpc_geyser::{BlockMetaWithCommitment, GrpcUpdateMessage, TransactionReceived},
         metrics::jet as metrics,
         quic_gateway::{GatewayResponse, GatewayTransaction},
         util::CommitmentLevel,
@@ -30,7 +30,7 @@ use {
 #[derive(Debug, Default)]
 pub struct RootedTransactionsSlotInfo {
     transactions: HashSet<Signature>,
-    slot: Option<SlotUpdateInfoWithCommitment>,
+    blockmeta: Option<BlockMetaWithCommitment>,
 }
 
 pub type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
@@ -87,7 +87,7 @@ impl RootedTxReceiver for GrpcRootedTxReceiver {
             .transactions
             .get(&signature)
             .and_then(|slot| locked.slots.get(slot))
-            .and_then(|info| info.slot)
+            .and_then(|info| info.blockmeta)
             .map(|info| info.commitment)
     }
 
@@ -129,13 +129,17 @@ impl GrpcRootedTxReceiver {
     ) {
         let mut transactions_bulk = vec![];
         loop {
-            let slot_update = tokio::select! {
+            let blockmeta_update = tokio::select! {
                 message = grpc_rx.recv() => match message {
                     Some(GrpcUpdateMessage::Transaction(transaction)) => {
                         transactions_bulk.push(transaction);
                         continue;
                     }
-                    Some(GrpcUpdateMessage::Slot(slot)) => slot,
+                    Some(GrpcUpdateMessage::Slot(_)) => {
+                        // We don't need slot updates here
+                        continue;
+                    },
+                    Some(GrpcUpdateMessage::BlockMeta(blockmeta)) => blockmeta,
                     None => panic!("RootedTransactions: gRPC streamed closed"),
                 }
             };
@@ -151,12 +155,12 @@ impl GrpcRootedTxReceiver {
             } = locked.deref_mut();
 
             // Update slot commitment
-            let entry = slots.entry(slot_update.slot).or_default();
-            entry.slot = Some(slot_update);
+            let entry = slots.entry(blockmeta_update.slot).or_default();
+            entry.blockmeta = Some(blockmeta_update);
             for signature in entry.transactions.iter() {
                 if watch_signatures.contains(signature)
                     && signature_updates_tx
-                        .send((*signature, slot_update.commitment))
+                        .send((*signature, blockmeta_update.commitment))
                         .is_err()
                 {
                     // The loop shutdown when the receiver is closed
@@ -165,16 +169,16 @@ impl GrpcRootedTxReceiver {
             }
 
             // Removed outdated slots
-            if slot_update.commitment == CommitmentLevel::Finalized {
+            if blockmeta_update.commitment == CommitmentLevel::Finalized {
                 let mut removed = Vec::new();
                 slots.retain(|_slot, info| {
-                    let retain = if let Some(slot) = info.slot {
-                        if slot.commitment == CommitmentLevel::Finalized {
+                    let retain = if let Some(blockmeta) = info.blockmeta {
+                        if blockmeta.commitment == CommitmentLevel::Finalized {
                             // Keep more blocks than MAX_PROCESSING_AGE
-                            slot.block_height + MAX_RECENT_BLOCKHASHES as u64
-                                > slot_update.block_height
+                            blockmeta.block_height + MAX_RECENT_BLOCKHASHES as u64
+                                > blockmeta.block_height
                         } else {
-                            slot.slot > slot_update.slot
+                            blockmeta.slot > blockmeta_update.slot
                         }
                     } else {
                         true
@@ -195,10 +199,10 @@ impl GrpcRootedTxReceiver {
             for TransactionReceived { slot, signature } in transactions_bulk.drain(..) {
                 let entry = slots.entry(slot).or_default();
                 if entry.transactions.insert(signature) {
-                    if let Some(slot) = &entry.slot {
+                    if let Some(blockmeta) = &entry.blockmeta {
                         if watch_signatures.contains(&signature)
                             && signature_updates_tx
-                                .send((signature, slot.commitment))
+                                .send((signature, blockmeta.commitment))
                                 .is_err()
                         {
                             // The loop shutdown when the receiver is closed
@@ -232,7 +236,7 @@ struct RetryableTx {
 /// Transaction scheduler runtime that tracks which transaction landed and resends transactions that are not landed yet.
 ///
 pub struct TransactionRetrySchedulerRuntime {
-    block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+    block_height_service: Arc<dyn BlockHeightService + Send + Sync + 'static>,
     rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
     last_known_block_height: u64,
     tx_pool: HashMap<Signature, RetryableTx>,
@@ -464,7 +468,7 @@ pub struct TransactionNoRetryScheduler {
 }
 
 impl TransactionNoRetryScheduler {
-    pub fn new(blockheight_service: Arc<dyn BlockHeighService + Send + Sync + 'static>) -> Self {
+    pub fn new(blockheight_service: Arc<dyn BlockHeightService + Send + Sync + 'static>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let (scheduler_resp_tx, scheduler_resp_rx) =
             mpsc::unbounded_channel::<Arc<SendTransactionRequest>>();
@@ -479,7 +483,7 @@ impl TransactionNoRetryScheduler {
     }
 
     async fn fwd_loop(
-        blockheight_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+        blockheight_service: Arc<dyn BlockHeightService + Send + Sync + 'static>,
         mut incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
         response_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
     ) {
@@ -522,7 +526,7 @@ impl TransactionNoRetryScheduler {
 impl TransactionRetryScheduler {
     pub fn new(
         config: TransactionRetrySchedulerConfig,
-        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+        block_height_service: Arc<dyn BlockHeightService + Send + Sync + 'static>,
         rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
         dlq: Option<mpsc::UnboundedSender<TransactionRetrySchedulerDlqEvent>>,
     ) -> Self {
@@ -537,7 +541,7 @@ impl TransactionRetryScheduler {
 
     pub fn new_on(
         config: TransactionRetrySchedulerConfig,
-        block_height_service: Arc<dyn BlockHeighService + Send + Sync + 'static>,
+        block_height_service: Arc<dyn BlockHeightService + Send + Sync + 'static>,
         rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
         dlq: Option<mpsc::UnboundedSender<TransactionRetrySchedulerDlqEvent>>,
         runtime: tokio::runtime::Handle,
