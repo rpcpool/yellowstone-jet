@@ -10,6 +10,14 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+- Improved leader schedule and slot tracking by using `FirstShredReceived` events, resulting in 350-400ms faster TPU routing.
+- Refactored `grpc_geyser.rs `for better code clarity and testability.
+- Separated slot updates and block metadata into distinct types and channels for improved performance and maintainability.
+- Added `SlotStatus` enum to better represent slot states.
+- Internal: Renamed config `primary_grpc` and `secondary_grpc` to a single `grpc` field. `primary_grpc` is still supported for backward compatibility.
+- Minor internal renames and refactoring to clarify slot/block handling.
+- No breaking changes to public APIs.
+
 ## [14.1.0]
 
 - Moved away from solana-sdk for individuals solana crates instead.
