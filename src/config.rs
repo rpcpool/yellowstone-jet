@@ -122,14 +122,14 @@ impl ConfigIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+// Commented this in case our users have old configs here
+// #[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
-    /// Primary gRPC service
-    pub primary_grpc: ConfigUpstreamGrpc,
-
-    /// Secondary gRPC service, by default primary would be used
-    /// Used only for additional transaction status subscribe
-    pub secondary_grpc: Option<ConfigUpstreamGrpc>,
+    /// gRPC service
+    /// The `primary_grpc` alias is used to maintain compatibility with previous versions.
+    /// It is recommended to use `grpc` instead.
+    #[serde(alias = "primary_grpc")]
+    pub grpc: ConfigUpstreamGrpc,
 
     /// RPC endpoint
     #[serde(default = "ConfigUpstream::default_rpc")]
@@ -198,7 +198,7 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
     fn from(
         ConfigUpstream {
             rpc,
-            primary_grpc: ConfigUpstreamGrpc { endpoint, x_token },
+            grpc: ConfigUpstreamGrpc { endpoint, x_token },
             ..
         }: ConfigUpstream,
     ) -> Self {
@@ -437,9 +437,23 @@ pub struct ConfigQuic {
         with = "humantime_serde"
     )]
     pub connection_idle_eviction_grace: Duration,
+
+    ///
+    /// Connection prediction lookahead.
+    /// This is used to pre-emptively predict the next leader and establish a connection to it before transactions request to be forwarded to it.
+    ///
+    /// Prior to the leader prediction, we notice 8-10% of transactions could stalled due to the connection establishment time.
+    /// Default is `None`, which means that no connection prediction is done.
+    ///
+    #[serde(default = "ConfigQuic::default_connection_prediction_lookahead")]
+    pub connection_prediction_lookahead: Option<NonZeroUsize>,
 }
 
 impl ConfigQuic {
+    pub const fn default_connection_prediction_lookahead() -> Option<NonZeroUsize> {
+        None
+    }
+
     pub const fn default_connection_max_pools() -> NonZeroUsize {
         NonZeroUsize::new(1024).unwrap()
     }

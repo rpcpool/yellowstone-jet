@@ -11,15 +11,12 @@ identity:
 
 # RPC & gRPC for upstream validator
 upstream:
-  # Primary gRPC service
-  primary_grpc:
+  # gRPC service
+  grpc:
     # gRPC service endpoint
     endpoint: http://127.0.0.1:10000
     # Optional token for access to gRPC
     x_token: null
-  # Secondary gRPC service, by default primary would be used
-  # Used only for additional transaction status subscribe
-  secondary_grpc: null
   # RPC endpoint
   rpc: http://127.0.0.1:8899
   # Cluster nodes information update interval in milliseconds

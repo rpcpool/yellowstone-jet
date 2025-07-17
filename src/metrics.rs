@@ -75,7 +75,7 @@ pub fn collect_to_text() -> String {
 pub mod jet {
     use {
         super::{REGISTRY, init2},
-        crate::util::CommitmentLevel,
+        crate::util::{CommitmentLevel, SlotStatus},
         prometheus::{
             Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
             IntGaugeVec, Opts,
@@ -247,6 +247,23 @@ pub mod jet {
             "quic_gw_remote_peer_addr_changes_detected",
             "Number of detected changes in remote peer address"
         ).unwrap();
+
+        static ref QUIC_GW_LEADER_PREDICTION_HIT: IntCounter = IntCounter::new(
+            "quic_gw_leader_prediction_hit",
+            "Number of times the leader prediction was successfully used to proactively connect to a remote peer"
+        ).unwrap();
+
+        static ref QUIC_GW_LEADER_PREDICTION_MISS: IntCounter = IntCounter::new(
+            "quic_gw_leader_prediction_miss",
+            "Number of times the leader prediction was uselessly used to proactively connect to a remote peer"
+        ).unwrap();
+    }
+
+    pub fn incr_quic_gw_leader_prediction_hit() {
+        QUIC_GW_LEADER_PREDICTION_HIT.inc();
+    }
+    pub fn incr_quic_gw_leader_prediction_miss() {
+        QUIC_GW_LEADER_PREDICTION_MISS.inc();
     }
 
     pub fn incr_quic_gw_remote_peer_addr_changes_detected() {
@@ -352,6 +369,8 @@ pub mod jet {
             register!(QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE);
             register!(QUIC_GW_CONNECTION_TIME_HIST);
             register!(QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED);
+            register!(QUIC_GW_LEADER_PREDICTION_HIT);
+            register!(QUIC_GW_LEADER_PREDICTION_MISS);
         });
     }
 
@@ -434,9 +453,9 @@ pub mod jet {
             .set(slot as i64)
     }
 
-    pub fn grpc_slot_set(commitment: CommitmentLevel, slot: Slot) {
+    pub fn grpc_slot_set(slot_status: SlotStatus, slot: Slot) {
         GRPC_SLOT_RECEIVED
-            .with_label_values(&[commitment.as_str()])
+            .with_label_values(&[slot_status.as_str()])
             .set(slot as i64);
     }
 
