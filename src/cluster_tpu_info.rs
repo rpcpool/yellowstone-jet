@@ -1,9 +1,5 @@
 use {
-    crate::{
-        grpc_geyser::SlotUpdateWithStatus,
-        metrics::jet as metrics,
-        util::{IncrementalBackoff, SlotStatus},
-    },
+    crate::{grpc_geyser::SlotUpdateWithStatus, metrics::jet as metrics, util::IncrementalBackoff},
     futures::future::FutureExt,
     solana_client::{
         client_error::Result as ClientResult,
@@ -261,34 +257,37 @@ impl ClusterTpuInfo {
         };
 
         loop {
-            let mut new_latest_slot = None;
-
-            tokio::select! {
+            let mut new_latest_slot = tokio::select! {
                 message = slots_rx.recv() => match message {
                     Ok(slot_update) => {
-                        if slot_update.slot_status == SlotStatus::SlotFirstShredReceived {
-                            new_latest_slot = Some(slot_update.slot);
-                            debug!("Received FirstShredReceived for slot {}", slot_update.slot);
-                        }
+                        debug!("Received {} for slot {}", slot_update.slot_status.as_str(), slot_update.slot);
+                        Some(slot_update.slot)
                     },
                     Err(error) => {
                         anyhow::bail!("failed to receive slot: {error:?}");
                     }
                 }
-            }
+            };
 
-            // Consume all pending updates to get the latest slot
+            // Consume all pending updates to get the highest slot
             while let Ok(slot_update_next) = slots_rx.try_recv() {
-                if slot_update_next.slot_status == SlotStatus::SlotFirstShredReceived {
-                    new_latest_slot = Some(
-                        new_latest_slot
-                            .unwrap_or(slot_update_next.slot)
-                            .max(slot_update_next.slot),
-                    );
-                }
+                new_latest_slot = match new_latest_slot {
+                    Some(current) => Some(current.max(slot_update_next.slot)),
+                    None => Some(slot_update_next.slot),
+                };
             }
 
             if let Some(slot) = new_latest_slot {
+                // Check if this is actually a newer slot
+                let should_update = {
+                    let locked = inner.read().expect("rwlock epoch schedule poisoned");
+                    slot > locked.latest_seen_slot
+                };
+
+                if !should_update {
+                    continue;
+                }
+
                 let previous_slot = {
                     let mut locked = inner.write().expect("rwlock epoch schedule poisoned");
                     let previous = locked.latest_seen_slot;

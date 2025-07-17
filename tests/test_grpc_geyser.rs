@@ -1,19 +1,26 @@
 use {
-    futures::stream, solana_clock::Slot, solana_hash::Hash, solana_signature::Signature, tokio::sync::{broadcast, mpsc}, yellowstone_grpc_proto::{
+    futures::stream,
+    solana_clock::Slot,
+    solana_hash::Hash,
+    solana_signature::Signature,
+    tokio::sync::{broadcast, mpsc},
+    yellowstone_grpc_proto::{
         prelude::{
-            subscribe_update::UpdateOneof, BlockHeight, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot, SubscribeUpdateTransactionStatus
+            BlockHeight, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot,
+            SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
         },
         tonic::Status,
-    }, yellowstone_jet::{
+    },
+    yellowstone_jet::{
         grpc_geyser::{GeyserSubscriber, GrpcUpdateMessage, TransactionReceived},
         util::{CommitmentLevel, SlotStatus},
-    }
+    },
 };
 
 /*
  * Test helpers to create gRPC messages
  */
-fn create_slot_update(slot: Slot, status: i32) -> SubscribeUpdate {
+const fn create_slot_update(slot: Slot, status: i32) -> SubscribeUpdate {
     SubscribeUpdate {
         update_oneof: Some(UpdateOneof::Slot(SubscribeUpdateSlot {
             slot,
@@ -46,13 +53,15 @@ fn create_block_meta(slot: Slot, block_height: Option<u64>) -> SubscribeUpdate {
 
 fn create_transaction_status(slot: Slot, signature: &Signature) -> SubscribeUpdate {
     SubscribeUpdate {
-        update_oneof: Some(UpdateOneof::TransactionStatus(SubscribeUpdateTransactionStatus {
-            slot,
-            signature: signature.as_ref().to_vec(),
-            is_vote: false,
-            index: 0,
-            err: None,
-        })),
+        update_oneof: Some(UpdateOneof::TransactionStatus(
+            SubscribeUpdateTransactionStatus {
+                slot,
+                signature: signature.as_ref().to_vec(),
+                is_vote: false,
+                index: 0,
+                err: None,
+            },
+        )),
         filters: vec![],
         created_at: None,
     }
@@ -71,12 +80,9 @@ async fn test_block_meta_before_slot_update() {
     ];
     let stream = stream::iter(messages);
 
-    let _ = GeyserSubscriber::process_grpc_stream(
-        stream,
-        &slots_tx,
-        &block_meta_tx,
-        &transactions_tx,
-    ).await;
+    let _ =
+        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
+            .await;
 
     // Verify slot update
     let slot_update = slots_rx.recv().await.unwrap();
@@ -98,7 +104,10 @@ async fn test_non_commitment_status_no_block_meta() {
 
     // Non-commitment statuses should not emit block meta
     let messages = vec![
-        Ok(create_slot_update(100, SlotStatus::SlotFirstShredReceived as i32)),
+        Ok(create_slot_update(
+            100,
+            SlotStatus::SlotFirstShredReceived as i32,
+        )),
         Ok(create_block_meta(100, Some(1000))),
         Ok(create_slot_update(100, SlotStatus::SlotCompleted as i32)),
         Ok(create_slot_update(100, SlotStatus::SlotCreatedBank as i32)),
@@ -106,18 +115,27 @@ async fn test_non_commitment_status_no_block_meta() {
     ];
     let stream = stream::iter(messages);
 
-    let _ = GeyserSubscriber::process_grpc_stream(
-        stream,
-        &slots_tx,
-        &block_meta_tx,
-        &transactions_tx,
-    ).await;
+    let _ =
+        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
+            .await;
 
     // Verify we got all the slot updates
-    assert_eq!(slots_rx.recv().await.unwrap().slot_status, SlotStatus::SlotFirstShredReceived);
-    assert_eq!(slots_rx.recv().await.unwrap().slot_status, SlotStatus::SlotCompleted);
-    assert_eq!(slots_rx.recv().await.unwrap().slot_status, SlotStatus::SlotCreatedBank);
-    assert_eq!(slots_rx.recv().await.unwrap().slot_status, SlotStatus::SlotDead);
+    assert_eq!(
+        slots_rx.recv().await.unwrap().slot_status,
+        SlotStatus::SlotFirstShredReceived
+    );
+    assert_eq!(
+        slots_rx.recv().await.unwrap().slot_status,
+        SlotStatus::SlotCompleted
+    );
+    assert_eq!(
+        slots_rx.recv().await.unwrap().slot_status,
+        SlotStatus::SlotCreatedBank
+    );
+    assert_eq!(
+        slots_rx.recv().await.unwrap().slot_status,
+        SlotStatus::SlotDead
+    );
 
     // Verify NO block meta was sent
     assert!(block_meta_rx.try_recv().is_err());
@@ -127,7 +145,7 @@ async fn test_non_commitment_status_no_block_meta() {
 async fn test_multiple_commitment_statuses() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, mut block_meta_rx) = broadcast::channel(100);
-    let (transactions_tx, _) = mpsc::channel(100);
+    let (transactions_tx, _transaction_rx) = mpsc::channel(100);
 
     // All commitment statuses should emit block meta
     let messages = vec![
@@ -138,12 +156,9 @@ async fn test_multiple_commitment_statuses() {
     ];
     let stream = stream::iter(messages);
 
-    let _ = GeyserSubscriber::process_grpc_stream(
-        stream,
-        &slots_tx,
-        &block_meta_tx,
-        &transactions_tx,
-    ).await;
+    let _ =
+        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
+            .await;
 
     // Verify we get block meta for each commitment level
     let meta1 = block_meta_rx.recv().await.unwrap();
@@ -164,7 +179,7 @@ async fn test_multiple_commitment_statuses() {
 async fn test_slot_tracking_cleanup_on_finalized() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, mut block_meta_rx) = broadcast::channel(100);
-    let (transactions_tx, _) = mpsc::channel(100);
+    let (transactions_tx, _transactions_rx) = mpsc::channel(100);
 
     /*
      * Test that slots before finalized are cleaned up from tracking
@@ -183,21 +198,16 @@ async fn test_slot_tracking_cleanup_on_finalized() {
         Ok(create_slot_update(99, SlotStatus::SlotProcessed as i32)),
         Ok(create_block_meta(100, Some(1000))),
         Ok(create_slot_update(100, SlotStatus::SlotProcessed as i32)),
-
         // Finalize slot 98 - should clean up slots < 98
         Ok(create_slot_update(98, SlotStatus::SlotFinalized as i32)),
-
         // Now slot 99 should still work (it's >= 98)
         Ok(create_slot_update(99, SlotStatus::SlotConfirmed as i32)),
     ];
     let stream = stream::iter(messages);
 
-    let result = GeyserSubscriber::process_grpc_stream(
-        stream,
-        &slots_tx,
-        &block_meta_tx,
-        &transactions_tx,
-    ).await;
+    let result =
+        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
+            .await;
 
     // Stream ends, so we expect an error
     assert!(result.is_err());
@@ -228,12 +238,9 @@ async fn test_transaction_status_handling() {
     ];
     let stream = stream::iter(messages);
 
-    let _ = GeyserSubscriber::process_grpc_stream(
-        stream,
-        &slots_tx,
-        &block_meta_tx,
-        &transactions_tx,
-    ).await;
+    let _ =
+        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
+            .await;
 
     // Verify transactions were sent
     match transactions_rx.recv().await.unwrap() {
@@ -265,17 +272,14 @@ async fn test_stream_error_handling() {
     ];
     let stream = stream::iter(messages);
 
-    let result = GeyserSubscriber::process_grpc_stream(
-        stream,
-        &slots_tx,
-        &block_meta_tx,
-        &transactions_tx,
-    ).await;
+    let result =
+        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
+            .await;
 
     // Should return StreamError
     assert!(result.is_err());
     match result.unwrap_err() {
-        yellowstone_jet::grpc_geyser::GeyserError::StreamError(_) => {},
+        yellowstone_jet::grpc_geyser::GeyserError::StreamError(_) => {}
         e => panic!("Expected StreamError, got {:?}", e),
     }
 }
@@ -291,17 +295,14 @@ async fn test_invalid_block_meta() {
     let messages = vec![Ok(invalid_meta)];
     let stream = stream::iter(messages);
 
-    let result = GeyserSubscriber::process_grpc_stream(
-        stream,
-        &slots_tx,
-        &block_meta_tx,
-        &transactions_tx,
-    ).await;
+    let result =
+        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
+            .await;
 
     // Should return MissingBlockHeight error
     assert!(result.is_err());
     match result.unwrap_err() {
-        yellowstone_jet::grpc_geyser::GeyserError::MissingBlockHeight => {},
+        yellowstone_jet::grpc_geyser::GeyserError::MissingBlockHeight => {}
         e => panic!("Expected MissingBlockHeight, got {:?}", e),
     }
 }

@@ -178,7 +178,7 @@ async fn test_leader_schedule_update_after_slot_update() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let slot_update = SlotUpdateWithStatus {
-        slot: 0,
+        slot: 1,
         slot_status: SlotStatus::SlotFirstShredReceived,
     };
 
@@ -224,7 +224,7 @@ async fn deletes_old_slots() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let slot_update = SlotUpdateWithStatus {
-        slot: 0,
+        slot: 1,
         slot_status: SlotStatus::SlotFirstShredReceived,
     };
 

@@ -125,6 +125,9 @@ impl ConfigIdentity {
 #[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
     /// gRPC service
+    /// The `primary_grpc` alias is used to maintain compatibility with previous versions.
+    /// It is recommended to use `grpc` instead.
+    #[serde(alias = "primary_grpc")]
     pub grpc: ConfigUpstreamGrpc,
 
     /// RPC endpoint
