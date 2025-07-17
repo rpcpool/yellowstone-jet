@@ -39,8 +39,8 @@ use {
         jet_gateway::spawn_jet_gw_listener,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
         quic_gateway::{
-            QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
-            TokioQuicGatewaySpawner,
+            IgnorantLeaderPredictor, QuicGatewayConfig, StakeBasedEvictionStrategy,
+            TokioQuicGatewaySession, TokioQuicGatewaySpawner, UpcomingLeaderPredictor,
         },
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
@@ -336,14 +336,23 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         gateway_tx_channel_capacity: 10000,
         leader_tpu_info_service: Arc::new(cluster_tpu_info.clone()),
     };
+
+    let connection_predictor = if config.quic.connection_prediction_lookahead.is_none() {
+        Arc::new(cluster_tpu_info.clone()) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>
+    } else {
+        Arc::new(IgnorantLeaderPredictor)
+    };
+
     let quic_gateway_config = QuicGatewayConfig {
         port_range: config.quic.endpoint_port_range,
         max_idle_timeout: config.quic.max_idle_timeout.min(QUIC_MAX_TIMEOUT),
         connecting_timeout: config.quic.connection_handshake_timeout,
         num_endpoints: config.quic.endpoint_count,
         max_send_attempt: config.quic.send_retry_count,
+        leader_prediction_lookahead: config.quic.connection_prediction_lookahead,
         ..Default::default()
     };
+
     let TokioQuicGatewaySession {
         gateway_identity_updater,
         gateway_tx_sink,
@@ -355,6 +364,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(StakeBasedEvictionStrategy {
             peer_idle_eviction_grace_period: config.quic.connection_idle_eviction_grace,
         }),
+        connection_predictor,
     );
 
     tg.spawn_cancelable("gateway", async move {

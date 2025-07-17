@@ -437,9 +437,23 @@ pub struct ConfigQuic {
         with = "humantime_serde"
     )]
     pub connection_idle_eviction_grace: Duration,
+
+    ///
+    /// Connection prediction lookahead.
+    /// This is used to pre-emptively predict the next leader and establish a connection to it before transactions request to be forwarded to it.
+    ///
+    /// Prior to the leader prediction, we notice 8-10% of transactions could stalled due to the connection establishment time.
+    /// Default is `None`, which means that no connection prediction is done.
+    ///
+    #[serde(default = "ConfigQuic::default_connection_prediction_lookahead")]
+    pub connection_prediction_lookahead: Option<NonZeroUsize>,
 }
 
 impl ConfigQuic {
+    pub const fn default_connection_prediction_lookahead() -> Option<NonZeroUsize> {
+        None
+    }
+
     pub const fn default_connection_max_pools() -> NonZeroUsize {
         NonZeroUsize::new(1024).unwrap()
     }
