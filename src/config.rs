@@ -65,8 +65,8 @@ pub struct ConfigJet {
     /// Quic config
     pub quic: ConfigQuic,
 
-    /// Send metrics to lewis
-    pub metrics_upstream: Option<ConfigMetricsUpstream>,
+    /// Send events to Lewis
+    pub lewis_events: Option<ConfigLewisEvents>,
 
     /// Features Flags
     #[serde(default)]
@@ -535,18 +535,18 @@ impl ConfigExtraTpuForward {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ConfigMetricsUpstream {
-    /// lewis gRPC metrics endpoint
+pub struct ConfigLewisEvents {
+    /// Lewis gRPc endpoint
     pub endpoint: String,
     /// Events gRPC queue size
-    #[serde(default = "ConfigMetricsUpstream::default_queue_size_grpc")]
+    #[serde(default = "ConfigLewisEvents::default_queue_size_grpc")]
     pub queue_size_grpc: usize,
     /// Event buffer queue size
-    #[serde(default = "ConfigMetricsUpstream::default_queue_size_buffer")]
+    #[serde(default = "ConfigLewisEvents::default_queue_size_buffer")]
     pub queue_size_buffer: usize,
 }
 
-impl ConfigMetricsUpstream {
+impl ConfigLewisEvents {
     const fn default_queue_size_grpc() -> usize {
         1_000
     }

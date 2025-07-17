@@ -1,6 +1,6 @@
-// main.rs
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
+use yellowstone_jet::grpc_lewis::LewisEventClient;
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
@@ -29,7 +29,7 @@ use {
         sync::{Mutex, oneshot, watch},
         task::JoinHandle,
     },
-    tracing::{info, warn},
+    tracing::{info, warn, error},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
@@ -337,6 +337,9 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         GrpcRootedTxReceiver::new(rooted_tx_geyser_rx);
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
+
+    let (event_tracker, lewis_fut) = LewisEventClient::create_event_tracker(config.lewis_events);
+
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
         stake_info_map: stake_info_map.clone(),
         gateway_tx_channel_capacity: 10000,
@@ -489,9 +492,20 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         keep_stake_metrics_up_to_date_task(identity_observer.clone(), stake_info_map.clone()),
     );
 
-    // tg.spawn_cancelable("lewis", async move {
-    //     lewis.await.expect("lewis");
-    // });
+    if let Some(fut) = lewis_fut {
+        tg.spawn_with_shutdown("lewis_events", |mut stop| async move {
+            tokio::select! {
+                result = fut => {
+                    if let Err(e) = result {
+                        error!("Lewis event loop error: {}", e);
+                    }
+                }
+                _ = &mut stop => {
+                    info!("Shutting down Lewis event client");
+                }
+            }
+        });
+    }
 
     tg.spawn_with_shutdown("geyser", |mut stop| async move {
         tokio::select! {

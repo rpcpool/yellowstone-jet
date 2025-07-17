@@ -102,6 +102,13 @@ yellowstone-grpc-proto = "7"
 yellowstone-shield-store = "~0.5.2"
 yellowstone-vixen = "0.2.0"
 
+[[bin]]
+name = "jet-lewis-dummy-server"
+path = "src/bin/jet_lewis_dummy_server.rs"
+
+[[bin]]
+name = "jet-lewis-dummy-client"
+path = "src/bin/jet_lewis_dummy_client.rs"
 
 [build-dependencies]
 anyhow = "1.0.69"

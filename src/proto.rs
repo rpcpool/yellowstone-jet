@@ -5,6 +5,6 @@ pub mod jet {
     tonic::include_proto!("jet");
 }
 
-pub mod metrics {
-    tonic::include_proto!("metrics");
+pub mod lewis {
+    tonic::include_proto!("lewis");
 }

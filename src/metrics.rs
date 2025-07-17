@@ -127,11 +127,11 @@ pub mod jet {
         static ref QUIC_IDENTITY_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);
         static ref QUIC_IDENTITY_EXPECTED_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);
 
-        static ref METRICS_UPSTREAM_PUSH: IntCounterVec = IntCounterVec::new(
-            Opts::new("metrics_upstream_push_total", "Total number of events pushed to send queue"),
+        static ref METRICS_LEWIS_EVENTS_PUSH: IntCounterVec = IntCounterVec::new(
+            Opts::new("metrics_lewis_events_push_total", "Total number of events pushed to send queue"),
             &["status"]
         ).unwrap();
-        static ref METRICS_UPSTREAM_FEED: IntCounter = IntCounter::new("metrics_upstream_feed_total", "Total number of events feed to gRPC").unwrap();
+        static ref METRICS_LEWIS_EVENTS_FEED: IntCounter = IntCounter::new("metrics_lewis_events_feed_total", "Total number of events feed to gRPC").unwrap();
 
         static ref GATEWAY_CONNECTED: IntGaugeVec = IntGaugeVec::new(
             Opts::new("gateway_connected", "Connected gateway endpoint"),
@@ -321,8 +321,8 @@ pub mod jet {
             register!(GRPC_SLOT_RECEIVED);
             register!(LEADER_MTU);
             register!(LEADER_RTT);
-            register!(METRICS_UPSTREAM_FEED);
-            register!(METRICS_UPSTREAM_PUSH);
+            register!(METRICS_LEWIS_EVENTS_FEED);
+            register!(METRICS_LEWIS_EVENTS_PUSH);
             register!(QUIC_IDENTITY);
             register!(QUIC_IDENTITY_EXPECTED);
             register!(QUIC_SEND_ATTEMPTS);
@@ -535,14 +535,14 @@ pub mod jet {
             .inc();
     }
 
-    pub fn metrics_upstream_push_inc(status: Result<(), ()>) {
-        METRICS_UPSTREAM_PUSH
+    pub fn lewis_events_push_inc(status: Result<(), ()>) {
+        METRICS_LEWIS_EVENTS_PUSH
             .with_label_values(&[if status.is_ok() { "ok" } else { "overflow" }])
             .inc()
     }
 
-    pub fn metrics_upstream_feed_inc() {
-        METRICS_UPSTREAM_FEED.inc()
+    pub fn lewis_events_feed_inc() {
+        METRICS_LEWIS_EVENTS_FEED.inc()
     }
 
     pub fn gateway_set_connected(endpoints: &[String], endpoint: String) {
