@@ -10,6 +10,10 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+## [14.2.0]
+
+- Introduce connection prediction in quic-gateway to proactively identify potential leaders before forwarding transaction demands
+
 ## [14.1.0]
 
 - Moved away from solana-sdk for individuals solana crates instead.
