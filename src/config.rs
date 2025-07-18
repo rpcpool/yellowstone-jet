@@ -27,6 +27,7 @@ use {
     tokio::{fs, time::Duration},
     yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
     yellowstone_vixen::config::YellowstoneConfig,
+    tracing::info,
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -58,6 +59,10 @@ pub struct ConfigJet {
 
     /// Solana-like server listen options
     pub listen_solana_like: ConfigListenSolanaLike,
+
+    /// QUIC server listen options
+    #[serde(default)]
+    pub listen_quic: Option<ConfigListenQuic>,
 
     /// Send retry options
     pub send_transaction_service: ConfigSendTransactionService,
@@ -211,6 +216,31 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
             },
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigListenQuic {
+    /// QUIC listen address
+    #[serde(deserialize_with = "deserialize_listen")]
+    pub bind: Vec<SocketAddr>,
+    /// Whitelist of client public keys allowed to connect.
+    #[serde(default, deserialize_with = "deserialize_pubkey_set")]
+    pub client_whitelist: HashSet<Pubkey>,
+}
+
+fn deserialize_pubkey_set<'de, D>(deserializer: D) -> Result<HashSet<Pubkey>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let pubkey_strings = Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default();
+    pubkey_strings
+        .into_iter()
+        .map(|s| {
+            info!("Whitelist pubkey: {}", s);
+            s.parse().map_err(de::Error::custom)
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize)]

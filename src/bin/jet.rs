@@ -410,6 +410,20 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         config.send_transaction_service.leader_forward_count,
     );
 
+    if let Some(quic_config) = &config.listen_quic {
+        let quic_server_handle = yellowstone_jet::quic_server::spawn_quic_server(
+            quic_config.bind[0],
+            &initial_identity,
+            scheduler_in.clone(),
+            quic_config.client_whitelist.clone(),
+        )?;
+        tg.spawn_cancelable("quic_server", async move {
+            if let Err(e) = quic_server_handle.await {
+                tracing::error!("QUIC server task failed: {:?}", e);
+            }
+        });
+    }
+
     tg.spawn_cancelable(
         "transaction_forwarder",
         async move { tx_forwader.run().await },

@@ -21,6 +21,7 @@ pub mod proto;
 pub mod pubkey_challenger;
 // pub mod quic;
 pub mod quic_gateway;
+pub mod quic_server;
 // pub mod quic_solana;
 pub mod identity;
 pub mod jet_gateway;

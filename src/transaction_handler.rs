@@ -1,5 +1,6 @@
 use {
     crate::{
+        rpc::invalid_params,
         payload::JetRpcSendTransactionConfig, solana::decode_and_deserialize,
         transactions::SendTransactionRequest,
     },
@@ -13,15 +14,23 @@ use {
         rpc_request::{RpcError, RpcResponseErrorData},
         rpc_response::{Response as RpcResponse, RpcSimulateTransactionResult, RpcVersionInfo},
     },
-    solana_commitment_config::CommitmentConfig,
     solana_rpc_client_api::config::RpcSendTransactionConfig,
-    solana_transaction::versioned::VersionedTransaction,
+    solana_sdk::{
+        commitment_config::CommitmentConfig, transaction::VersionedTransaction,
+        pubkey::Pubkey,
+        system_instruction::SystemInstruction,
+    },
     solana_transaction_status_client_types::UiTransactionEncoding,
     solana_version::Version,
     std::sync::Arc,
     thiserror::Error,
     tokio::sync::mpsc,
 };
+
+const EVERTIPS_PROGRAMS: &[Pubkey] = &[
+    solana_sdk::pubkey!("3o1bcbWhNpXLUfgLgHWx4S9hLcc7vkaoELjRXF7GwD7r"),
+]; //test
+const MIN_TIP_LAMPORTS: u64 = 100_000;
 
 #[derive(Debug, Error)]
 pub enum TransactionHandlerError {
@@ -40,22 +49,27 @@ pub enum TransactionHandlerError {
     #[error("node unhealthy: {num_slots_behind} slots behind")]
     NodeUnhealthy { num_slots_behind: u64 },
 
+    // #[error("invalid parameters: {0}")]
+    // InvalidParams(String),
     #[error("invalid parameters: {0}")]
-    InvalidParams(String),
+    InvalidParams(#[from] ErrorObjectOwned),
 
     #[error("unsupported encoding")]
     UnsupportedEncoding,
 }
 
-impl From<ErrorObjectOwned> for TransactionHandlerError {
-    fn from(err: ErrorObjectOwned) -> Self {
-        TransactionHandlerError::InvalidParams(err.message().to_string())
-    }
-}
+// impl From<ErrorObjectOwned> for TransactionHandlerError {
+//     fn from(err: ErrorObjectOwned) -> Self {
+//         TransactionHandlerError::InvalidParams(err.message().to_string())
+//     }
+// }
 
 impl From<TransactionHandlerError> for ErrorObjectOwned {
     fn from(err: TransactionHandlerError) -> Self {
-        ErrorObject::owned(INTERNAL_ERROR_CODE, err.to_string(), None::<()>)
+        match err {
+            TransactionHandlerError::InvalidParams(e) => e,
+            _ => ErrorObject::owned(INTERNAL_ERROR_CODE, err.to_string(), None::<()>),
+        }
     }
 }
 
@@ -90,12 +104,42 @@ impl TransactionHandler {
         }
     }
 
+    fn filter_transaction(
+        &self,
+        transaction: &VersionedTransaction,
+    ) -> Result<(), ErrorObjectOwned> {
+        for instruction in transaction.message.instructions() {
+            if let Ok(SystemInstruction::Transfer { lamports }) =
+                bincode::deserialize(&instruction.data)
+            {
+                if lamports > MIN_TIP_LAMPORTS {
+                    if let Some(to_pubkey_index) = instruction.accounts.get(1) {
+                        if let Some(to_pubkey) = transaction
+                            .message
+                            .static_account_keys()
+                            .get(*to_pubkey_index as usize)
+                        {
+                            if EVERTIPS_PROGRAMS.contains(to_pubkey) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        let msg = "Transaction does not contain a valid tip to the required program.".to_string();
+        return Err(invalid_params(msg));
+    }
+
     pub async fn handle_versioned_transaction(
         &self,
         transaction: VersionedTransaction,
         config_with_forwarding_policies: JetRpcSendTransactionConfig,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         let config = config_with_forwarding_policies.config;
+
+        self.filter_transaction(&transaction)?;
 
         // Basic sanitize check first
         transaction
@@ -162,7 +206,7 @@ impl TransactionHandler {
                 .into_binary_encoding()
                 .ok_or(TransactionHandlerError::UnsupportedEncoding)?,
         )
-        .map_err(|e| TransactionHandlerError::InvalidParams(e.to_string()))?;
+        .map_err(|e| TransactionHandlerError::InvalidParams(e))?;
 
         if !config.skip_preflight && self.proxy_preflight_check {
             self.handle_preflight(&transaction, &config).await?;

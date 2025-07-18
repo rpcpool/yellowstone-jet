@@ -257,6 +257,39 @@ pub mod jet {
             "quic_gw_leader_prediction_miss",
             "Number of times the leader prediction was uselessly used to proactively connect to a remote peer"
         ).unwrap();
+
+        static ref QUIC_SERVER_TRANSACTIONS_RECEIVED_TOTAL: IntCounter = IntCounter::new(
+           "quic_server_transactions_received_total",
+           "Total number of transactions successfully completed and sent via the internal channel"
+        ).unwrap();
+
+        static ref QUIC_SERVER_STREAM_ERRORS: IntCounterVec = IntCounterVec::new(
+            Opts::new("quic_server_stream_errors_total", "Total QUIC stream handling errors by reason"),
+            &["reason"]
+        ).unwrap();
+
+        static ref QUIC_SERVER_ACTIVE_CONNECTIONS: IntGauge = IntGauge::new(
+            "quic_server_active_connections",
+            "active connections on the server"
+        ).unwrap();
+
+        static ref QUIC_SERVER_AUTH_FAILURES_TOTAL: IntCounterVec = IntCounterVec::new(
+            Opts::new("jet_quic_server_auth_failures_total", "Total authentication failures on the QUIC server by reason"),
+            &["reason"],
+        ).unwrap();
+
+        static ref QUIC_SERVER_TRANSACTIONS_BY_CLIENT_TOTAL: IntCounterVec = IntCounterVec::new(
+            Opts::new("jet_quic_server_transactions_total", "Total transactions received via QUIC server by client pubkey"),
+            &["pubkey"]
+        ).unwrap();
+
+        static ref JET_QUIC_SERVER_STREAM_DURATION: Histogram = Histogram::with_opts(
+            HistogramOpts::new(
+                "jet_quic_server_stream_duration_seconds",
+                "The duration of handling a single QUIC stream in seconds"
+            )
+            .buckets(vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0])
+        ).unwrap();
     }
 
     pub fn incr_quic_gw_leader_prediction_hit() {
@@ -303,6 +336,38 @@ pub mod jet {
     }
     pub fn incr_quic_gw_tx_connection_cache_miss_cnt() {
         QUIC_GW_TX_CONNECTION_CACHE_MISS_CNT.inc();
+    }
+
+    pub fn incr_quic_server_transactions_received_total() {
+        QUIC_SERVER_TRANSACTIONS_RECEIVED_TOTAL.inc();
+    }
+
+    pub fn incr_quic_server_stream_error(reason: &str) {
+        QUIC_SERVER_STREAM_ERRORS.with_label_values(&[reason]).inc();
+    }
+
+    pub fn incr_quic_server_active_connections() {
+        QUIC_SERVER_ACTIVE_CONNECTIONS.inc();
+    }
+
+    pub fn dec_quic_server_active_connections() {
+        QUIC_SERVER_ACTIVE_CONNECTIONS.dec();
+    }
+
+    pub fn incr_quic_server_auth_failures_total(reason: &str) {
+        QUIC_SERVER_AUTH_FAILURES_TOTAL
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    pub fn incr_quic_server_transactions_by_client_total(pubkey: &str) {
+        QUIC_SERVER_TRANSACTIONS_BY_CLIENT_TOTAL
+            .with_label_values(&[pubkey])
+            .inc();
+    }
+
+    pub fn observe_quic_server_stream_duration(duration: Duration) {
+        JET_QUIC_SERVER_STREAM_DURATION.observe(duration.as_secs_f64());
     }
 
     pub fn observe_leader_rtt(leader: Pubkey, rtt: Duration) {
@@ -371,6 +436,12 @@ pub mod jet {
             register!(QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED);
             register!(QUIC_GW_LEADER_PREDICTION_HIT);
             register!(QUIC_GW_LEADER_PREDICTION_MISS);
+            register!(QUIC_SERVER_TRANSACTIONS_RECEIVED_TOTAL);
+            register!(QUIC_SERVER_STREAM_ERRORS);
+            register!(QUIC_SERVER_ACTIVE_CONNECTIONS);
+            register!(QUIC_SERVER_AUTH_FAILURES_TOTAL);
+            register!(QUIC_SERVER_TRANSACTIONS_BY_CLIENT_TOTAL);
+            register!(JET_QUIC_SERVER_STREAM_DURATION);
         });
     }
 

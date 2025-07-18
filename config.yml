@@ -7,7 +7,7 @@ identity:
   # Do not send transactions if Quic identity doesn't match specified one
   expected: null # 3RY3bvCRoCoSTy5qSNL1ezeGQwt1ufToLSKdmEZZjb4Z
   # Load specified keypair from file
-  keypair: null
+  keypair: /home/sobl1403/yellowstone-jet/src/keypair.json
 
 # RPC & gRPC for upstream validator
 upstream:
@@ -52,7 +52,7 @@ listen_solana_like:
   # See https://github.com/rpcpool/solana-public/tree/v1.17.31-rpc-sanitize-tx
   proxy_sanitize_check: true
   # Allow to do preflight check on RPC server (simulateTransaction)
-  proxy_preflight_check: true
+  proxy_preflight_check: false
 
 # Send retry options
 send_transaction_service:
@@ -130,3 +130,9 @@ features:
 
 prometheus:
   url: http://127.0.0.1:8429/api/v1/import/prometheus
+
+listen_quic:
+  bind: 
+    - "127.0.0.1:1028"
+  client_whitelist:
+   - "5684vpV4q361L7vVsdGAtLPc3MuXmG1Lnq1Biw4oVyza" # test 
