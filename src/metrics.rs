@@ -127,11 +127,11 @@ pub mod jet {
         static ref QUIC_IDENTITY_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);
         static ref QUIC_IDENTITY_EXPECTED_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);
 
-        static ref METRICS_LEWIS_EVENTS_PUSH: IntCounterVec = IntCounterVec::new(
-            Opts::new("metrics_lewis_events_push_total", "Total number of events pushed to send queue"),
+        static ref LEWIS_EVENTS_PUSH: IntCounterVec = IntCounterVec::new(
+            Opts::new("lewis_events_push_total", "Total number of events pushed to lewis"),
             &["status"]
         ).unwrap();
-        static ref METRICS_LEWIS_EVENTS_FEED: IntCounter = IntCounter::new("metrics_lewis_events_feed_total", "Total number of events feed to gRPC").unwrap();
+        static ref LEWIS_EVENTS_FEED: IntCounter = IntCounter::new("lewis_events_feed_total", "Total number of events feed to lewis").unwrap();
 
         static ref GATEWAY_CONNECTED: IntGaugeVec = IntGaugeVec::new(
             Opts::new("gateway_connected", "Connected gateway endpoint"),
@@ -338,8 +338,8 @@ pub mod jet {
             register!(GRPC_SLOT_RECEIVED);
             register!(LEADER_MTU);
             register!(LEADER_RTT);
-            register!(METRICS_LEWIS_EVENTS_FEED);
-            register!(METRICS_LEWIS_EVENTS_PUSH);
+            register!(LEWIS_EVENTS_FEED);
+            register!(LEWIS_EVENTS_PUSH);
             register!(QUIC_IDENTITY);
             register!(QUIC_IDENTITY_EXPECTED);
             register!(QUIC_SEND_ATTEMPTS);
@@ -555,13 +555,13 @@ pub mod jet {
     }
 
     pub fn lewis_events_push_inc(status: Result<(), ()>) {
-        METRICS_LEWIS_EVENTS_PUSH
+        LEWIS_EVENTS_PUSH
             .with_label_values(&[if status.is_ok() { "ok" } else { "overflow" }])
             .inc()
     }
 
     pub fn lewis_events_feed_inc() {
-        METRICS_LEWIS_EVENTS_FEED.inc()
+        LEWIS_EVENTS_FEED.inc()
     }
 
     pub fn gateway_set_connected(endpoints: &[String], endpoint: String) {
