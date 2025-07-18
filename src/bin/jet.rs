@@ -343,7 +343,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         leader_tpu_info_service: Arc::new(cluster_tpu_info.clone()),
     };
 
-    let connection_predictor = if config.quic.connection_prediction_lookahead.is_none() {
+    let connection_predictor = if config.quic.connection_prediction_lookahead.is_some() {
         Arc::new(cluster_tpu_info.clone()) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>
     } else {
         Arc::new(IgnorantLeaderPredictor)
