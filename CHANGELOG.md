@@ -10,6 +10,10 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+## [14.3.1]
+
+- Fixed connection prediction ignore.
+
 ## [14.3.0]
 
 - Improved leader schedule and slot tracking by using `FirstShredReceived` events, resulting in 350-400ms faster TPU routing.
