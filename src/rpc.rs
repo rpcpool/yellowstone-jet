@@ -135,6 +135,7 @@ impl RpcServer {
 pub mod rpc_admin {
     use {
         super::invalid_params,
+        crate::transaction_handler::ENABLE_TIP_CHECK,
         jsonrpsee::{
             core::{RpcResult, async_trait},
             proc_macros::rpc,
@@ -142,7 +143,10 @@ pub mod rpc_admin {
         solana_keypair::{Keypair, read_keypair_file},
         solana_pubkey::Pubkey,
         solana_signer::Signer,
-        std::sync::Arc,
+        std::sync::{
+            atomic::Ordering,
+            Arc,
+        },
         tokio::sync::Mutex,
         tracing::info,
     };
@@ -164,6 +168,9 @@ pub mod rpc_admin {
 
         #[method(name = "resetIdentity")]
         async fn reset_identity(&self) -> RpcResult<()>;
+
+        #[method(name = "setTipCheck")]
+        async fn set_tip_check(&self, enabled: bool) -> RpcResult<()>;
     }
 
     #[async_trait::async_trait]
@@ -225,6 +232,12 @@ pub mod rpc_admin {
                 .await
                 .update_identity(random_identity)
                 .await;
+            Ok(())
+        }
+
+        async fn set_tip_check(&self, enabled: bool) -> RpcResult<()> {
+            ENABLE_TIP_CHECK.store(enabled, Ordering::Relaxed);
+            info!("Tip check enabled: {}", enabled);
             Ok(())
         }
     }

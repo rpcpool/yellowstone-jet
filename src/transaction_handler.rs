@@ -22,7 +22,7 @@ use {
     },
     solana_transaction_status_client_types::UiTransactionEncoding,
     solana_version::Version,
-    std::sync::Arc,
+    std::sync::{Arc, atomic::{AtomicBool, Ordering,}},
     thiserror::Error,
     tokio::sync::mpsc,
 };
@@ -31,6 +31,8 @@ const EVERTIPS_PROGRAMS: &[Pubkey] = &[
     solana_sdk::pubkey!("3o1bcbWhNpXLUfgLgHWx4S9hLcc7vkaoELjRXF7GwD7r"),
 ]; //test
 const MIN_TIP_LAMPORTS: u64 = 100_000;
+
+pub static ENABLE_TIP_CHECK: AtomicBool = AtomicBool::new(true);
 
 #[derive(Debug, Error)]
 pub enum TransactionHandlerError {
@@ -108,6 +110,9 @@ impl TransactionHandler {
         &self,
         transaction: &VersionedTransaction,
     ) -> Result<(), ErrorObjectOwned> {
+        if !ENABLE_TIP_CHECK.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         for instruction in transaction.message.instructions() {
             if let Ok(SystemInstruction::Transfer { lamports }) =
                 bincode::deserialize(&instruction.data)
