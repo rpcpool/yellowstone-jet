@@ -409,7 +409,6 @@ mod memory_leak_tests {
         let slow_consumer = tokio::spawn(async move {
             let mut received = 0;
             loop {
-                // Simulate slow processing
                 tokio::time::sleep(Duration::from_millis(100)).await;
 
                 match slots_rx.recv().await {
@@ -427,7 +426,6 @@ mod memory_leak_tests {
             }
         });
 
-        // Fast producer
         let producer = tokio::spawn(async move {
             for slot in 0..50_000 {
                 let _ = slots_tx.send(SlotUpdateWithStatus {
@@ -435,7 +433,6 @@ mod memory_leak_tests {
                     slot_status: SlotStatus::SlotFirstShredReceived,
                 });
 
-                // Check if channel is backing up
                 if slot % 1000 == 0 {
                     let lag = slots_tx.len();
                     let current_memory = get_memory_usage();
@@ -448,7 +445,6 @@ mod memory_leak_tests {
                     );
                 }
 
-                // Small delay to prevent overwhelming
                 if slot % 100 == 0 {
                     tokio::time::sleep(Duration::from_micros(10)).await;
                 }
@@ -456,10 +452,8 @@ mod memory_leak_tests {
             println!("Producer finished sending");
         });
 
-        // Wait for producer to finish
         let _ = producer.await;
 
-        // Give consumer time to catch up
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         let elapsed = start_time.elapsed().as_secs();
@@ -479,27 +473,29 @@ mod memory_leak_tests {
     async fn test_grpc_stream_with_realistic_pattern() {
         let start_memory = get_memory_usage();
 
-        // Create a stream that mimics real gRPC patterns
         let messages: Vec<_> = (0..10_000)
             .flat_map(|slot| {
                 let mut updates = vec![];
 
-                // Typical mainnet pattern for a slot with interslot_updates
                 updates.push(Ok(create_slot_update(slot, SlotStatus::SlotFirstShredReceived as i32)));
-                updates.push(Ok(create_slot_update(slot, SlotStatus::SlotCreatedBank as i32)));
-                updates.push(Ok(create_block_meta(slot, Some(slot * 2))));
-                updates.push(Ok(create_slot_update(slot, SlotStatus::SlotProcessed as i32)));
-                updates.push(Ok(create_slot_update(slot, SlotStatus::SlotCompleted as i32)));
-                updates.push(Ok(create_slot_update(slot - 31, SlotStatus::SlotConfirmed as i32)));
 
-                // Add some transactions
+                if slot % 20 == 19 {
+                    updates.push(Ok(create_slot_update(slot, SlotStatus::SlotDead as i32)));
+                    return updates;
+                }
+
+                updates.push(Ok(create_slot_update(slot, SlotStatus::SlotCreatedBank as i32)));
+                updates.push(Ok(create_block_meta(slot, Some(slot - slot / 100 * 6))));
+                updates.push(Ok(create_slot_update(slot, SlotStatus::SlotProcessed as i32)));
+                updates.push(Ok(create_slot_update(slot, SlotStatus::SlotConfirmed as i32)));
+                updates.push(Ok(create_slot_update(slot, SlotStatus::SlotCompleted as i32)));
+
                 for _ in 0..5 {
                     updates.push(Ok(create_transaction_status(slot, &Signature::new_unique())));
                 }
 
-                // Finalization happens around ~31 slots later
                 if slot > 31 {
-                    updates.push(Ok(create_slot_update(slot - 64, SlotStatus::SlotFinalized as i32)));
+                    updates.push(Ok(create_slot_update(slot - 31, SlotStatus::SlotFinalized as i32)));
                 }
 
                 updates
@@ -516,12 +512,10 @@ mod memory_leak_tests {
         let slots_tx_monitor = slots_tx.clone();
         let block_meta_tx_monitor = block_meta_tx.clone();
 
-        // Simulate slow slot consumer
         let slot_consumer = tokio::spawn(async move {
             let mut count = 0;
             while let Ok(_msg) = slots_rx.recv().await {
                 count += 1;
-                // Simulate processing delay every 1000 messages
                 if count % 1000 == 0 {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     println!("Slot consumer processed {} messages", count);
@@ -529,7 +523,6 @@ mod memory_leak_tests {
             }
         });
 
-        // Simulate slow block meta consumer
         let block_consumer = tokio::spawn(async move {
             let mut count = 0;
             while let Ok(_msg) = block_meta_rx.recv().await {
@@ -540,7 +533,6 @@ mod memory_leak_tests {
             }
         });
 
-        // Drain transactions to prevent channel backup
         let tx_consumer = tokio::spawn(async move {
             let mut count = 0;
             while transactions_rx.recv().await.is_some() {
@@ -628,7 +620,7 @@ mod memory_leak_tests {
                 let elapsed = start_time.elapsed().as_secs();
                 let memory_growth = (current_memory as i64 - start_memory as i64) / 1_048_576;
                 let growth_rate = if elapsed > 0 {
-                    (memory_growth as f64 / elapsed as f64) * 3600.0 // MB per hour
+                    (memory_growth as f64 / elapsed as f64) * 3600.0
                 } else {
                     0.0
                 };
@@ -650,6 +642,7 @@ mod memory_leak_tests {
         let producer = tokio::spawn(async move {
             let mut slot = 0u64;
             let mut interval = interval(Duration::from_millis(400));
+            let mut slot_hashes = std::collections::HashMap::new();
 
             for _ in 0..30_000 {
                 interval.tick().await;
@@ -659,20 +652,30 @@ mod memory_leak_tests {
                     slot_status: SlotStatus::SlotFirstShredReceived,
                 });
 
+                if slot % 20 == 19 {
+                    let _ = slots_tx.send(SlotUpdateWithStatus {
+                        slot,
+                        slot_status: SlotStatus::SlotDead,
+                    });
+                    slot += 1;
+                    continue;
+                }
+
+                let block_hash = Hash::new_unique();
+                slot_hashes.insert(slot, block_hash);
+
                 let _ = slots_tx.send(SlotUpdateWithStatus {
                     slot,
                     slot_status: SlotStatus::SlotCreatedBank,
                 });
 
-                // Send block meta
                 let _ = block_meta_tx.send(BlockMetaWithCommitment {
                     slot,
-                    block_height: slot - slot / 100 * 20, // -20% because some slots are dead
-                    block_hash: Hash::new_unique(),
+                    block_height: slot - slot / 100 * 6,
+                    block_hash,
                     commitment: CommitmentLevel::Processed,
                 });
 
-                // More slot updates
                 let _ = slots_tx.send(SlotUpdateWithStatus {
                     slot,
                     slot_status: SlotStatus::SlotProcessed,
@@ -680,10 +683,40 @@ mod memory_leak_tests {
 
                 let _ = slots_tx.send(SlotUpdateWithStatus {
                     slot,
+                    slot_status: SlotStatus::SlotConfirmed,
+                });
+
+                let _ = block_meta_tx.send(BlockMetaWithCommitment {
+                    slot,
+                    block_height: slot - slot / 100 * 6,
+                    block_hash,
+                    commitment: CommitmentLevel::Confirmed,
+                });
+
+                let _ = slots_tx.send(SlotUpdateWithStatus {
+                    slot,
                     slot_status: SlotStatus::SlotCompleted,
                 });
 
-                // Send 10 transactions per slot
+                if slot > 31 {
+                    let finalized_slot = slot - 31;
+                    let _ = slots_tx.send(SlotUpdateWithStatus {
+                        slot: finalized_slot,
+                        slot_status: SlotStatus::SlotFinalized,
+                    });
+
+                    if let Some(&hash) = slot_hashes.get(&finalized_slot) {
+                        let _ = block_meta_tx.send(BlockMetaWithCommitment {
+                            slot: finalized_slot,
+                            block_height: finalized_slot - finalized_slot / 100 * 6,
+                            block_hash: hash,
+                            commitment: CommitmentLevel::Finalized,
+                        });
+                    }
+
+                    slot_hashes.remove(&finalized_slot);
+                }
+
                 for _ in 0..10 {
                     let _ = transactions_tx.send(GrpcUpdateMessage::Transaction(TransactionReceived {
                         slot,
@@ -695,10 +728,8 @@ mod memory_leak_tests {
             }
         });
 
-        // Run for 2 minutes
         tokio::time::sleep(Duration::from_secs(120)).await;
 
-        // Cleanup
         producer.abort();
         monitor_handle.abort();
         tx_consumer.abort();
