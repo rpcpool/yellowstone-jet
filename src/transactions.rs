@@ -176,7 +176,7 @@ impl GrpcRootedTxReceiver {
                         if blockmeta.commitment == CommitmentLevel::Finalized {
                             // Keep more blocks than MAX_PROCESSING_AGE
                             blockmeta.block_height + MAX_RECENT_BLOCKHASHES as u64
-                                > blockmeta.block_height
+                                > blockmeta_update.block_height
                         } else {
                             blockmeta.slot > blockmeta_update.slot
                         }
