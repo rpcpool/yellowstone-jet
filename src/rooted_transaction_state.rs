@@ -140,6 +140,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_max_recent_blockhashes() {
+        assert_eq!(MAX_RECENT_BLOCKHASHES, 300);
+    }
+
+    #[test]
     fn test_transaction_lifecycle_and_cleanup() {
         let mut machine = RootedTxStateMachine::new();
         let old_sig = Signature::new_unique();
