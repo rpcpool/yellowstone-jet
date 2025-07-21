@@ -200,7 +200,7 @@ pub mod jet {
         ).unwrap();
 
         static ref QUIC_GW_CONNECTION_SUCCESS_CNT: IntCounter = IntCounter::new(
-            "quic_wg_connection_success", "Number of successful connections to remote peer validators"
+            "quic_gw_connection_success", "Number of successful connections to remote peer validators"
         ).unwrap();
 
         static ref QUIC_GW_CONNECTION_FAILURE_CNT: IntCounter = IntCounter::new(
@@ -257,11 +257,61 @@ pub mod jet {
             "quic_gw_leader_prediction_miss",
             "Number of times the leader prediction was uselessly used to proactively connect to a remote peer"
         ).unwrap();
+
+        static ref QUIC_GW_DROP_TX_CNT: IntCounterVec = IntCounterVec::new(
+            Opts::new(
+                "quic_gw_drop_tx_cnt",
+                "Number of transactions dropped due to worker queue being full"
+            ),
+            &["leader"]
+        ).unwrap();
+
+        ///
+        /// Number of transactions processed by the worker
+        /// status is either success/error.
+        ///
+        /// Unlike `quic_send_attempts`, it removes duplicate attempt for the same transaction and summarizes them.
+        static ref QUIC_GW_WORKER_TX_PROCESS_CNT: IntCounterVec = IntCounterVec::new(
+            Opts::new(
+                "quic_gw_worker_tx_process_cnt",
+                "Number of transactions processed by the worker"
+            ),
+            &["remote_peer", "status"]
+        ).unwrap();
+
+
+        static ref QUIC_GW_TX_RELAYED_TO_WORKER_CNT: IntCounterVec = IntCounterVec::new(
+            Opts::new(
+                "quic_gw_tx_relayed_to_worker_cnt",
+                "Number of transactions successfully relayed to installed transaction worker"
+            ),
+            &["remote_peer"]
+        ).unwrap();
+
+    }
+
+    pub fn incr_quic_gw_tx_relayed_to_worker(remote_peer: Pubkey) {
+        QUIC_GW_TX_RELAYED_TO_WORKER_CNT
+            .with_label_values(&[&remote_peer.to_string()])
+            .inc();
+    }
+
+    pub fn incr_quic_gw_worker_tx_process_cnt(remote_peer: Pubkey, status: &str) {
+        QUIC_GW_WORKER_TX_PROCESS_CNT
+            .with_label_values(&[&remote_peer.to_string(), status])
+            .inc_by(1);
+    }
+
+    pub fn incr_quic_gw_drop_tx_cnt(leader: Pubkey, count: u64) {
+        QUIC_GW_DROP_TX_CNT
+            .with_label_values(&[&leader.to_string()])
+            .inc_by(count);
     }
 
     pub fn incr_quic_gw_leader_prediction_hit() {
         QUIC_GW_LEADER_PREDICTION_HIT.inc();
     }
+
     pub fn incr_quic_gw_leader_prediction_miss() {
         QUIC_GW_LEADER_PREDICTION_MISS.inc();
     }
@@ -371,6 +421,9 @@ pub mod jet {
             register!(QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED);
             register!(QUIC_GW_LEADER_PREDICTION_HIT);
             register!(QUIC_GW_LEADER_PREDICTION_MISS);
+            register!(QUIC_GW_DROP_TX_CNT);
+            register!(QUIC_GW_WORKER_TX_PROCESS_CNT);
+            register!(QUIC_GW_TX_RELAYED_TO_WORKER_CNT);
         });
     }
 
