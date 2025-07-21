@@ -18,6 +18,7 @@ pub mod grpc_metrics;
 pub mod metrics;
 pub mod payload;
 pub mod proto;
+pub mod rooted_transaction_state;
 pub mod pubkey_challenger;
 // pub mod quic;
 pub mod quic_gateway;
