@@ -293,6 +293,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
 
     let mut connection_id_spy = vec![];
     for i in 0..MAX_TX {
+        tracing::trace!("Waiting for tx response {i}");
         let GatewayResponse::TxSent(actual_resp) =
             gateway_response_source.recv().await.expect("recv response")
         else {
@@ -307,6 +308,12 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         assert_eq!(
             actual_resp.remote_peer_identity,
             rx_server_identity.pubkey()
+        );
+        tracing::info!(
+            "received tx: {} from remote peer: {} with connection id: {}",
+            actual_resp.tx_sig,
+            rx_server_identity.pubkey(),
+            spy_request.connection_id
         );
     }
 }
@@ -363,11 +370,11 @@ async fn gateway_should_handle_connection_refused_by_peer() {
 
     let resp = gateway_response_source.recv().await.expect("recv response");
 
-    let GatewayResponse::TxDrop(actual_resp) = resp else {
+    let GatewayResponse::TxDrop(mut actual_resp) = resp else {
         panic!("Expected GatewayResponse::TxSent, got something {resp:?}");
     };
-
-    assert_eq!(actual_resp.tx_sig, tx_sig);
+    let (actual_tx_sig, _curr_attempt) = actual_resp.dropped_gateway_tx_vec.pop_front().unwrap();
+    assert_eq!(actual_tx_sig.tx_sig, tx_sig);
     assert!(matches!(
         actual_resp.drop_reason,
         TxDropReason::RemotePeerUnreachable

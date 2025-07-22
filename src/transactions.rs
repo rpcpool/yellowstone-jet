@@ -2,20 +2,20 @@ use {
     crate::{
         blockhash_queue::BlockHeightService,
         cluster_tpu_info::ClusterTpuInfo,
-        grpc_geyser::{BlockMetaWithCommitment, GrpcUpdateMessage, TransactionReceived},
+        grpc_geyser::GrpcUpdateMessage,
         metrics::jet as metrics,
         quic_gateway::{GatewayResponse, GatewayTransaction},
+        rooted_transaction_state::{RootedTxEffect, RootedTxEvent, RootedTxStateMachine},
         util::CommitmentLevel,
     },
     bytes::Bytes,
-    solana_clock::{MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES, Slot},
+    solana_clock::MAX_PROCESSING_AGE,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_transaction::versioned::VersionedTransaction,
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         future::Future,
-        ops::DerefMut,
         sync::{Arc, RwLock as StdRwLock},
     },
     tokio::{
@@ -26,12 +26,6 @@ use {
     tracing::error,
     yellowstone_shield_store::{CheckError, PolicyStoreTrait},
 };
-
-#[derive(Debug, Default)]
-pub struct RootedTransactionsSlotInfo {
-    transactions: HashSet<Signature>,
-    blockmeta: Option<BlockMetaWithCommitment>,
-}
 
 pub type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
 
@@ -63,42 +57,41 @@ pub trait RootedTxReceiver {
     async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)>;
 }
 
-#[derive(Debug, Default)]
-pub struct RootedTransactionsInner {
-    slots: HashMap<Slot, RootedTransactionsSlotInfo>,
-    transactions: HashMap<Signature, Slot>,
-    watch_signatures: HashSet<Signature>,
-}
-
 ///
-/// Rooted transaction receiver that uses gRPC dragonsmouth API to receive transaction updates
+/// Processes transaction commitment updates from gRPC stream.
+///
+/// Uses a state machine to track transaction locations and commitment levels,
+/// notifying subscribers when transactions reach new commitment levels.
+/// The state machine is thread-safe (Arc<RwLock>) as trait methods can be
+/// called from different threads than the processing loop.
 ///
 #[derive(Debug)]
 pub struct GrpcRootedTxReceiver {
-    inner: Arc<StdRwLock<RootedTransactionsInner>>,
+    state_machine: Arc<StdRwLock<RootedTxStateMachine>>,
     rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
 }
 
 #[async_trait::async_trait]
 impl RootedTxReceiver for GrpcRootedTxReceiver {
     fn get_transaction_commitment(&mut self, signature: Signature) -> Option<CommitmentLevel> {
-        let locked = self.inner.read().expect("RwLock poisoned");
-        locked
+        let state_machine = self.state_machine.read().expect("RwLock poisoned");
+        state_machine
+            .state
             .transactions
             .get(&signature)
-            .and_then(|slot| locked.slots.get(slot))
+            .and_then(|slot| state_machine.state.slots.get(slot))
             .and_then(|info| info.blockmeta)
-            .map(|info| info.commitment)
+            .map(|meta| meta.commitment)
     }
 
     fn subscribe_signature(&mut self, signature: Signature) {
-        let mut locked = self.inner.write().expect("RwLock poisoned");
-        locked.watch_signatures.insert(signature);
+        let mut state_machine = self.state_machine.write().expect("RwLock poisoned");
+        state_machine.state.watched_signatures.insert(signature);
     }
 
     fn unsubscribe_signature(&mut self, signature: Signature) {
-        let mut locked = self.inner.write().expect("RwLock poisoned");
-        locked.watch_signatures.remove(&signature);
+        let mut state_machine = self.state_machine.write().expect("RwLock poisoned");
+        state_machine.state.watched_signatures.remove(&signature);
     }
 
     async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)> {
@@ -107,27 +100,21 @@ impl RootedTxReceiver for GrpcRootedTxReceiver {
 }
 
 impl GrpcRootedTxReceiver {
-    ///
-    /// Creates a new rooted transactions service
-    ///
-    /// Arguments:
-    ///
-    /// * `grpc_rx` - gRPC sending transaction updates
-    ///
     pub fn new(grpc_rx: mpsc::Receiver<GrpcUpdateMessage>) -> (Self, impl Future) {
-        let shared = Default::default();
+        let state_machine = Arc::new(StdRwLock::new(RootedTxStateMachine::new()));
         let (tx, rx) = mpsc::unbounded_channel();
-        let loop_fut = Self::start_loop(grpc_rx, Arc::clone(&shared), tx);
-        let this = Self { inner: shared, rx };
+        let loop_fut = Self::start_loop(grpc_rx, Arc::clone(&state_machine), tx);
+        let this = Self { state_machine, rx };
         (this, loop_fut)
     }
 
     async fn start_loop(
         mut grpc_rx: mpsc::Receiver<GrpcUpdateMessage>,
-        inner: Arc<StdRwLock<RootedTransactionsInner>>,
+        state_machine: Arc<StdRwLock<RootedTxStateMachine>>,
         signature_updates_tx: mpsc::UnboundedSender<RootedTransactionsUpdateSignature>,
     ) {
         let mut transactions_bulk = vec![];
+
         loop {
             let blockmeta_update = tokio::select! {
                 message = grpc_rx.recv() => match message {
@@ -144,76 +131,45 @@ impl GrpcRootedTxReceiver {
                 }
             };
 
-            // Acquire write lock
-            // IMPORTANT: Don't hold lock across await points
-            let mut locked = inner.write().expect("RwLock poisoned");
-            let RootedTransactionsInner {
-                slots,
-                transactions,
-                watch_signatures,
-                ..
-            } = locked.deref_mut();
+            // Process events with the state machine locked
+            let effects = {
+                let mut state_machine = state_machine.write().expect("RwLock poisoned");
 
-            // Update slot commitment
-            let entry = slots.entry(blockmeta_update.slot).or_default();
-            entry.blockmeta = Some(blockmeta_update);
-            for signature in entry.transactions.iter() {
-                if watch_signatures.contains(signature)
-                    && signature_updates_tx
-                        .send((*signature, blockmeta_update.commitment))
-                        .is_err()
-                {
-                    // The loop shutdown when the receiver is closed
+                // Process buffered transactions first
+                let mut all_effects = Vec::new();
+                for tx in transactions_bulk.drain(..) {
+                    all_effects.extend(
+                        state_machine.process_event(RootedTxEvent::TransactionReceived(tx)),
+                    );
+                }
+
+                // Process block meta update
+                all_effects.extend(
+                    state_machine.process_event(RootedTxEvent::BlockMetaUpdate(blockmeta_update)),
+                );
+
+                all_effects
+            }; // Lock is released here
+
+            // Send notifications (outside the lock)
+            for effect in effects {
+                let RootedTxEffect::NotifyWatcher {
+                    signature,
+                    commitment,
+                } = effect;
+                if signature_updates_tx.send((signature, commitment)).is_err() {
                     return;
                 }
             }
 
-            // Removed outdated slots
-            if blockmeta_update.commitment == CommitmentLevel::Finalized {
-                let mut removed = Vec::new();
-                slots.retain(|_slot, info| {
-                    let retain = if let Some(blockmeta) = info.blockmeta {
-                        if blockmeta.commitment == CommitmentLevel::Finalized {
-                            // Keep more blocks than MAX_PROCESSING_AGE
-                            blockmeta.block_height + MAX_RECENT_BLOCKHASHES as u64
-                                > blockmeta.block_height
-                        } else {
-                            blockmeta.slot > blockmeta_update.slot
-                        }
-                    } else {
-                        true
-                    };
-
-                    if !retain {
-                        removed.push(std::mem::take(&mut info.transactions));
-                    }
-
-                    retain
-                });
-                for signature in removed.into_iter().flatten() {
-                    transactions.remove(&signature);
-                }
-            }
-
-            // Add transactions
-            for TransactionReceived { slot, signature } in transactions_bulk.drain(..) {
-                let entry = slots.entry(slot).or_default();
-                if entry.transactions.insert(signature) {
-                    if let Some(blockmeta) = &entry.blockmeta {
-                        if watch_signatures.contains(&signature)
-                            && signature_updates_tx
-                                .send((signature, blockmeta.commitment))
-                                .is_err()
-                        {
-                            // The loop shutdown when the receiver is closed
-                            return;
-                        }
-                    }
-                    transactions.insert(signature, slot);
-                }
-            }
-
-            metrics::rooted_transactions_pool_set_size(transactions.len());
+            // Update metrics
+            let transaction_count = state_machine
+                .read()
+                .expect("RwLock poisoned")
+                .state
+                .transactions
+                .len();
+            metrics::rooted_transactions_pool_set_size(transaction_count);
         }
     }
 }
@@ -726,9 +682,11 @@ impl TransactionFanout {
                 self.inflight_transactions.remove(&tx_sig);
             }
             GatewayResponse::TxDrop(tx_drop) => {
-                let tx_sig = tx_drop.tx_sig;
-                tracing::trace!("transaction {tx_sig} dropped by QUIC gateway");
-                self.inflight_transactions.remove(&tx_sig);
+                for (gw_tx, _curr_attempt) in tx_drop.dropped_gateway_tx_vec {
+                    let tx_sig = gw_tx.tx_sig;
+                    tracing::trace!("transaction {tx_sig} dropped by QUIC gateway");
+                    self.inflight_transactions.remove(&tx_sig);
+                }
             }
         }
         metrics::sts_inflight_set_size(self.inflight_transactions.len());
