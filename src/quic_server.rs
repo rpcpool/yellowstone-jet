@@ -34,7 +34,7 @@ use {
     tracing::{error, info, warn},
 };
 
-const ALPN_JET_TX_PROTOCOL: &[u8] = b"tx-quic-jet";
+const ALPN_JET_TX_PROTOCOL: &[&[u8]] = &[b"tx-quic-jet", b"solana-tpu"];
 
 #[derive(Debug)]
 struct WhitelistVerifier {
@@ -141,7 +141,7 @@ pub fn spawn_quic_server(
     let mut server_tls_config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(WhitelistVerifier::new(client_whitelist))
         .with_single_cert(vec![cert.clone()], key)?;
-    server_tls_config.alpn_protocols = vec![ALPN_JET_TX_PROTOCOL.to_vec()];
+    server_tls_config.alpn_protocols = ALPN_JET_TX_PROTOCOL.iter().map(|p| p.to_vec()).collect();
     let quic_server_config = QuicServerConfig::try_from(server_tls_config)?;
 
     let mut server_config = quinn_proto::ServerConfig::with_crypto(Arc::new(quic_server_config));

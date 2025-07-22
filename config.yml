@@ -7,18 +7,18 @@ identity:
   # Do not send transactions if Quic identity doesn't match specified one
   expected: null # 3RY3bvCRoCoSTy5qSNL1ezeGQwt1ufToLSKdmEZZjb4Z
   # Load specified keypair from file
-  keypair: /home/sobl1403/yellowstone-jet/test-keypair.json
+  keypair: /mnt/operational/solana-jito/keys/dummy.json
 
 # RPC & gRPC for upstream validator
 upstream:
   # gRPC service
   grpc:
     # gRPC service endpoint
-    endpoint: http://127.0.0.1:10000
+    endpoint: https://solana-testnet-yellowstone-grpc.publicnode.com:443
     # Optional token for access to gRPC
     x_token: null
   # RPC endpoint
-  rpc: http://127.0.0.1:8899
+  rpc: https://solana-testnet-rpc.publicnode.com
   # Cluster nodes information update interval in milliseconds
   cluster_nodes_update_interval: 30s
   # Stake update interval
@@ -39,14 +39,14 @@ listen_admin:
   # RPC listen address
   bind:
     # - env: JET_ADMIN_ADDR
-    - 127.0.0.1:8001
+    - 127.0.0.1:1741
 
 # Solana-like server listen options
 listen_solana_like:
   # Solana like RPC listen address
   bind:
     # - env: JET_SOLANA_LIKE_ADDR
-    - 127.0.0.1:8000
+    - 93.115.25.190:6281
   # Allow to do sanitize check on RPC server (required for ALTs), supported only on patched nodes
   # If option set to `true`` then Jet would check `sanitizeTransaction` method before start
   # See https://github.com/rpcpool/solana-public/tree/v1.17.31-rpc-sanitize-tx
@@ -82,7 +82,7 @@ quic:
   # Solana do not retry, atlas doing 4 retries, by default we keep same limit as Solana
   send_retry_count: 1
   # Kind of Quic port: `normal` or `forwards`
-  tpu_port: normal
+  tpu_port: forwards
   # Quic handshake timeout.
   # Default is `solana_sdk::quic::QUIC_CONNECTION_HANDSHAKE_TIMEOUT` -- 60s
   connection_handshake_timeout: 2s
@@ -129,9 +129,9 @@ features:
     - yellowstone_shield
 
 prometheus:
-  url: http://127.0.0.1:8429/api/v1/import/prometheus
+  url:  http://127.0.0.1:2936/api/v1/import/prometheus
 
 listen_quic:
-  bind: 
-    - "127.0.0.1:1028"
-  client_whitelist: ["5684vpV4q361L7vVsdGAtLPc3MuXmG1Lnq1Biw4oVyza"]
+  bind:
+   - "93.115.25.190:2914"
+  client_whitelist: ["GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis"]
