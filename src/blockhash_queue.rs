@@ -1,6 +1,6 @@
 use {
     crate::{
-        grpc_geyser::{GeyserStreams, SlotUpdateInfoWithCommitment},
+        grpc_geyser::{BlockMetaWithCommitment, GeyserStreams},
         metrics::jet as metrics,
         util::{
             BlockHeight, CommitmentLevel, WaitShutdown, WaitShutdownJoinHandleResult,
@@ -18,11 +18,11 @@ use {
     tracing::debug,
 };
 
-type SharedSlots = Arc<StdRwLock<HashMap<Hash, SlotUpdateInfoWithCommitment>>>;
+type BlockMetaMap = Arc<StdRwLock<HashMap<Hash, BlockMetaWithCommitment>>>;
 
 #[derive(Debug, Clone)]
 pub struct BlockhashQueue {
-    slots: SharedSlots,
+    blockmeta_map: BlockMetaMap,
     shutdown: Arc<Notify>,
     join_handle: WaitShutdownSharedJoinHandle,
 }
@@ -44,65 +44,81 @@ impl BlockhashQueue {
         G: GeyserStreams + Send + Sync + 'static,
     {
         let shutdown = Arc::new(Notify::new());
-        let slots = Arc::new(StdRwLock::new(HashMap::new()));
+        let blockmeta_map = Arc::new(StdRwLock::new(HashMap::new()));
         Self {
-            slots: Arc::clone(&slots),
+            blockmeta_map: Arc::clone(&blockmeta_map),
             shutdown: Arc::clone(&shutdown),
-            join_handle: Self::spawn(Self::subscribe(shutdown, slots, grpc.subscribe_slots())),
+            join_handle: Self::spawn(Self::subscribe(
+                shutdown,
+                blockmeta_map,
+                grpc.subscribe_block_meta(),
+            )),
         }
     }
 
     async fn subscribe(
         shutdown: Arc<Notify>,
-        slots: SharedSlots,
-        mut slots_rx: broadcast::Receiver<SlotUpdateInfoWithCommitment>,
+        blockmeta_map: BlockMetaMap,
+        mut block_meta_rx: broadcast::Receiver<BlockMetaWithCommitment>,
     ) -> anyhow::Result<()> {
         loop {
-            let slot_update = tokio::select! {
+            let block_meta = tokio::select! {
                 _ = shutdown.notified() => return Ok(()),
-                message = slots_rx.recv() => message,
+                message = block_meta_rx.recv() => message,
             }
             .map_err(|error| anyhow::anyhow!("BlockhashQueue: grpc stream finished: {error:?}"))?;
 
             // IMPORTANT Don't hold the lock across await points
-            let mut slots = slots
+            let mut blockmeta_map = blockmeta_map
                 .write()
-                .expect("Failed to acquire write lock on slots");
-            slots.insert(slot_update.block_hash, slot_update);
+                .expect("Failed to acquire write lock on blockmeta_map");
 
-            if slot_update.commitment == CommitmentLevel::Finalized {
-                slots.retain(|_hash, slot| {
+            // Store block metadata for ALL commitment levels
+            blockmeta_map.insert(block_meta.block_hash, block_meta);
+
+            // Only clean up when we get a finalized block
+            if block_meta.commitment == CommitmentLevel::Finalized {
+                blockmeta_map.retain(|_hash, slot| {
                     if slot.commitment == CommitmentLevel::Finalized {
-                        slot.block_height + MAX_RECENT_BLOCKHASHES as u64 > slot_update.block_height
+                        // Keep finalized blocks based on block height
+                        slot.block_height + MAX_RECENT_BLOCKHASHES as u64 > block_meta.block_height
                     } else {
-                        slot.slot > slot_update.slot
+                        // Keep non-finalized blocks based on slot number
+                        slot.slot > block_meta.slot
                     }
                 });
             }
-            debug!(slot = slot_update.slot, "add slot to the queue");
 
-            metrics::blockhash_queue_set_size(slots.len());
-            metrics::blockhash_queue_set_slot(slot_update.commitment, slot_update.slot);
+            debug!(
+                slot = block_meta.slot,
+                commitment = ?block_meta.commitment,
+                "add block to the queue"
+            );
+
+            metrics::blockhash_queue_set_size(blockmeta_map.len());
+            metrics::blockhash_queue_set_slot(block_meta.commitment, block_meta.slot);
         }
     }
 
     pub fn get_block_height(&self, block_hash: &Hash) -> Option<BlockHeight> {
-        let slots = self
-            .slots
+        let blockmeta_map = self
+            .blockmeta_map
             .read()
-            .expect("Failed to acquire read lock on slots");
-        slots.get(block_hash).map(|slot| slot.block_height)
+            .expect("Failed to acquire read lock on blockmeta_map");
+        blockmeta_map
+            .get(block_hash)
+            .map(|block_meta| block_meta.block_height)
     }
 
     pub fn get_block_height_latest(&self, commitment: CommitmentLevel) -> Option<BlockHeight> {
-        let slots = self
-            .slots
+        let blockmeta_map = self
+            .blockmeta_map
             .read()
-            .expect("Failed to acquire read lock on slots");
-        slots
+            .expect("Failed to acquire read lock on blockmeta_map");
+        blockmeta_map
             .values()
-            .filter(|info| info.commitment == commitment)
-            .map(|info| info.block_height)
+            .filter(|block_meta| block_meta.commitment == commitment)
+            .map(|block_meta| block_meta.block_height)
             .max()
     }
 }
@@ -110,7 +126,8 @@ impl BlockhashQueue {
 ///
 /// Interface to query block height information
 ///
-pub trait BlockHeighService {
+#[async_trait::async_trait]
+pub trait BlockHeightService {
     ///
     /// Get the block height for the given blockhash
     ///
@@ -122,7 +139,7 @@ pub trait BlockHeighService {
     fn get_block_height_for_commitment(&self, commitment: CommitmentLevel) -> Option<BlockHeight>;
 }
 
-impl BlockHeighService for BlockhashQueue {
+impl BlockHeightService for BlockhashQueue {
     fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
         self.get_block_height(blockhash)
     }
@@ -133,11 +150,10 @@ impl BlockHeighService for BlockhashQueue {
 }
 
 pub mod testkit {
-
     use {
-        super::{BlockHeighService, SharedSlots},
+        super::{BlockHeightService, BlockMetaMap},
         crate::{
-            grpc_geyser::SlotUpdateInfoWithCommitment,
+            grpc_geyser::BlockMetaWithCommitment,
             util::{BlockHeight, CommitmentLevel},
         },
         solana_hash::Hash,
@@ -149,32 +165,32 @@ pub mod testkit {
 
     #[derive(Default, Clone)]
     pub struct MockBlockhashQueue {
-        slots: SharedSlots,
+        blockmeta_map: BlockMetaMap,
     }
 
     impl MockBlockhashQueue {
         pub fn new() -> Self {
             Self {
-                slots: Arc::new(StdRwLock::new(HashMap::new())),
+                blockmeta_map: Arc::new(StdRwLock::new(HashMap::new())),
             }
         }
 
         pub fn increase_block_height(&self, hash: Hash) {
-            let mut slots = self
-                .slots
+            let mut blockmeta_map = self
+                .blockmeta_map
                 .write()
-                .expect("Failed to acquire write lock on slots");
-            let last_block = slots.values().last();
+                .expect("Failed to acquire write lock on blockmeta_map");
+            let last_block = blockmeta_map.values().last();
 
             let new_last_block = if let Some(last_block) = last_block {
-                SlotUpdateInfoWithCommitment {
+                BlockMetaWithCommitment {
                     block_hash: hash,
                     block_height: last_block.block_height + 1,
                     commitment: CommitmentLevel::Confirmed,
                     slot: last_block.slot + 1,
                 }
             } else {
-                SlotUpdateInfoWithCommitment {
+                BlockMetaWithCommitment {
                     block_hash: hash,
                     block_height: 1,
                     commitment: CommitmentLevel::Confirmed,
@@ -182,42 +198,44 @@ pub mod testkit {
                 }
             };
 
-            slots.insert(new_last_block.block_hash, new_last_block);
+            blockmeta_map.insert(new_last_block.block_hash, new_last_block);
         }
 
         pub fn change_last_block_confirmation(&self) {
-            let mut slots = self
-                .slots
+            let mut blockmeta_map = self
+                .blockmeta_map
                 .write()
-                .expect("Failed to acquire write lock on slots");
-            let last_block = slots.values_mut().last();
+                .expect("Failed to acquire write lock on blockmeta_map");
+            let last_block = blockmeta_map.values_mut().last();
             if let Some(last_block) = last_block {
                 last_block.commitment = CommitmentLevel::Finalized;
             }
         }
     }
 
-    impl BlockHeighService for MockBlockhashQueue {
+    impl BlockHeightService for MockBlockhashQueue {
         fn get_block_height(&self, blockhash: &Hash) -> Option<BlockHeight> {
-            let slots = self
-                .slots
+            let blockmeta_map = self
+                .blockmeta_map
                 .read()
-                .expect("Failed to acquire read lock on slots");
-            slots.get(blockhash).map(|slot| slot.block_height)
+                .expect("Failed to acquire read lock on blockmeta_map");
+            blockmeta_map
+                .get(blockhash)
+                .map(|block_meta| block_meta.block_height)
         }
 
         fn get_block_height_for_commitment(
             &self,
             commitment: CommitmentLevel,
         ) -> Option<BlockHeight> {
-            let slots = self
-                .slots
+            let blockmeta_map = self
+                .blockmeta_map
                 .read()
-                .expect("Failed to acquire read lock on slots");
-            slots
+                .expect("Failed to acquire read lock on blockmeta_map");
+            blockmeta_map
                 .values()
-                .filter(|info| info.commitment == commitment)
-                .map(|info| info.block_height)
+                .filter(|block_meta| block_meta.commitment == commitment)
+                .map(|block_meta| block_meta.block_height)
                 .max()
         }
     }

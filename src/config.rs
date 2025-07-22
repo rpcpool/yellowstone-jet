@@ -27,6 +27,7 @@ use {
     tokio::{fs, time::Duration},
     yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
     yellowstone_vixen::config::YellowstoneConfig,
+    tracing::info,
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -58,6 +59,10 @@ pub struct ConfigJet {
 
     /// Solana-like server listen options
     pub listen_solana_like: ConfigListenSolanaLike,
+
+    /// QUIC server listen options
+    #[serde(default)]
+    pub listen_quic: Option<ConfigListenQuic>,
 
     /// Send retry options
     pub send_transaction_service: ConfigSendTransactionService,
@@ -122,14 +127,14 @@ impl ConfigIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+// Commented this in case our users have old configs here
+// #[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
-    /// Primary gRPC service
-    pub primary_grpc: ConfigUpstreamGrpc,
-
-    /// Secondary gRPC service, by default primary would be used
-    /// Used only for additional transaction status subscribe
-    pub secondary_grpc: Option<ConfigUpstreamGrpc>,
+    /// gRPC service
+    /// The `primary_grpc` alias is used to maintain compatibility with previous versions.
+    /// It is recommended to use `grpc` instead.
+    #[serde(alias = "primary_grpc")]
+    pub grpc: ConfigUpstreamGrpc,
 
     /// RPC endpoint
     #[serde(default = "ConfigUpstream::default_rpc")]
@@ -198,7 +203,7 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
     fn from(
         ConfigUpstream {
             rpc,
-            primary_grpc: ConfigUpstreamGrpc { endpoint, x_token },
+            grpc: ConfigUpstreamGrpc { endpoint, x_token },
             ..
         }: ConfigUpstream,
     ) -> Self {
@@ -211,6 +216,31 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
             },
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigListenQuic {
+    /// QUIC listen address
+    #[serde(deserialize_with = "deserialize_listen")]
+    pub bind: Vec<SocketAddr>,
+    /// Whitelist of client public keys allowed to connect.
+    #[serde(default, deserialize_with = "deserialize_pubkey_set")]
+    pub client_whitelist: HashSet<Pubkey>,
+}
+
+fn deserialize_pubkey_set<'de, D>(deserializer: D) -> Result<HashSet<Pubkey>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let pubkey_strings = Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default();
+    pubkey_strings
+        .into_iter()
+        .map(|s| {
+            info!("Whitelist pubkey: {}", s);
+            s.parse().map_err(de::Error::custom)
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -437,9 +467,23 @@ pub struct ConfigQuic {
         with = "humantime_serde"
     )]
     pub connection_idle_eviction_grace: Duration,
+
+    ///
+    /// Connection prediction lookahead.
+    /// This is used to pre-emptively predict the next leader and establish a connection to it before transactions request to be forwarded to it.
+    ///
+    /// Prior to the leader prediction, we notice 8-10% of transactions could stalled due to the connection establishment time.
+    /// Default is `None`, which means that no connection prediction is done.
+    ///
+    #[serde(default = "ConfigQuic::default_connection_prediction_lookahead")]
+    pub connection_prediction_lookahead: Option<NonZeroUsize>,
 }
 
 impl ConfigQuic {
+    pub const fn default_connection_prediction_lookahead() -> Option<NonZeroUsize> {
+        None
+    }
+
     pub const fn default_connection_max_pools() -> NonZeroUsize {
         NonZeroUsize::new(1024).unwrap()
     }
