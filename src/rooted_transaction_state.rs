@@ -28,7 +28,7 @@ pub struct SlotInfo {
     pub blockmeta: Option<BlockMetaWithCommitment>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RootedTransactionsState {
     pub slots: HashMap<Slot, SlotInfo>,
     pub transactions: HashMap<Signature, Slot>,
@@ -44,6 +44,7 @@ pub struct RootedTransactionsState {
  *
  * Pure functions with no async operations for easy testing.
  */
+#[derive(Debug, Default)]
 pub struct RootedTxStateMachine {
     pub state: RootedTransactionsState,
 }
@@ -104,10 +105,7 @@ impl RootedTxStateMachine {
         self.state.slots.retain(|_slot, info| {
             let should_retain = if let Some(blockmeta) = info.blockmeta {
                 if blockmeta.commitment == CommitmentLevel::Finalized {
-                    should_retain_finalized_slot(
-                        blockmeta.block_height,
-                        finalized_block_height,
-                    )
+                    should_retain_finalized_slot(blockmeta.block_height, finalized_block_height)
                 } else {
                     blockmeta.slot > finalized_slot
                 }
@@ -127,13 +125,12 @@ impl RootedTxStateMachine {
     }
 }
 
-pub fn should_retain_finalized_slot(
+pub const fn should_retain_finalized_slot(
     slot_block_height: BlockHeight,
     finalized_block_height: BlockHeight,
 ) -> bool {
     slot_block_height + MAX_RECENT_BLOCKHASHES as u64 > finalized_block_height
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -158,45 +155,43 @@ mod tests {
             slot: 100,
             signature: old_sig,
         }));
-        let effects = machine.process_event(RootedTxEvent::BlockMetaUpdate(
-            BlockMetaWithCommitment {
+        let effects =
+            machine.process_event(RootedTxEvent::BlockMetaUpdate(BlockMetaWithCommitment {
                 slot: 100,
                 block_height: 1000,
                 block_hash: solana_hash::Hash::new_unique(),
                 commitment: CommitmentLevel::Finalized,
-            },
-        ));
+            }));
         assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0], RootedTxEffect::NotifyWatcher {
-            signature: old_sig,
-            commitment: CommitmentLevel::Finalized,
-        });
+        assert_eq!(
+            effects[0],
+            RootedTxEffect::NotifyWatcher {
+                signature: old_sig,
+                commitment: CommitmentLevel::Finalized,
+            }
+        );
 
         // Recent transaction at slot 200, height 1300
         machine.process_event(RootedTxEvent::TransactionReceived(TransactionReceived {
             slot: 200,
             signature: recent_sig,
         }));
-        machine.process_event(RootedTxEvent::BlockMetaUpdate(
-            BlockMetaWithCommitment {
-                slot: 200,
-                block_height: 1300,
-                block_hash: solana_hash::Hash::new_unique(),
-                commitment: CommitmentLevel::Finalized,
-            },
-        ));
+        machine.process_event(RootedTxEvent::BlockMetaUpdate(BlockMetaWithCommitment {
+            slot: 200,
+            block_height: 1300,
+            block_hash: solana_hash::Hash::new_unique(),
+            commitment: CommitmentLevel::Finalized,
+        }));
 
         // Trigger cleanup with slot 300 at height 1400
         // Old: 1000 + 300 = 1300 < 1400 (cleaned up)
         // Recent: 1300 + 300 = 1600 > 1400 (kept)
-        machine.process_event(RootedTxEvent::BlockMetaUpdate(
-            BlockMetaWithCommitment {
-                slot: 300,
-                block_height: 1400,
-                block_hash: solana_hash::Hash::new_unique(),
-                commitment: CommitmentLevel::Finalized,
-            },
-        ));
+        machine.process_event(RootedTxEvent::BlockMetaUpdate(BlockMetaWithCommitment {
+            slot: 300,
+            block_height: 1400,
+            block_hash: solana_hash::Hash::new_unique(),
+            commitment: CommitmentLevel::Finalized,
+        }));
 
         // Old slot cleaned up, recent slot remains
         assert!(!machine.state.slots.contains_key(&100));
