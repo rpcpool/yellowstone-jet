@@ -53,6 +53,11 @@ listen_solana_like:
   proxy_sanitize_check: true
   # Allow to do preflight check on RPC server (simulateTransaction)
   proxy_preflight_check: true
+  default_signer_limit: 10
+  signer_limits:
+    GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 100
+    # Add other signer pubkeys and their limits here
+    # 4DoN4A5xPj2g9G3dLPg2psP2R2V52w1TTCy1Tf1a1b1c: 50
 
 # Send retry options
 send_transaction_service:
@@ -80,7 +85,7 @@ quic:
   connection_pool_size: 1
   # Number of immediate retries in case of failed send (not applied to timedout)
   # Solana do not retry, atlas doing 4 retries, by default we keep same limit as Solana
-  send_retry_count: 1
+  send_retry_count: 2
   # Kind of Quic port: `normal` or `forwards`
   tpu_port: forwards
   # Quic handshake timeout.
@@ -134,4 +139,5 @@ prometheus:
 listen_quic:
   bind:
    - "93.115.25.190:2914"
-  client_whitelist: ["GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis"]
+  client_limits:
+    GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 2000000

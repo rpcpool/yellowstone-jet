@@ -1,6 +1,5 @@
 use {
     crate::metrics::{
-        self,
         jet::{
             dec_quic_server_active_connections, incr_quic_server_active_connections,
             incr_quic_server_auth_failures_total, incr_quic_server_stream_error,
@@ -9,32 +8,73 @@ use {
         },
     },
     crate::transactions::SendTransactionRequest,
+    dashmap::DashMap,
+    governor::{
+        clock::DefaultClock,
+        middleware::NoOpMiddleware,
+        state::{InMemoryState, NotKeyed},
+        Quota, RateLimiter,
+    },
     bytes::Bytes,
     quinn_proto::crypto::rustls::QuicServerConfig,
     rustls::{
-        Error as TlsError, RootCertStore,
+        Error as TlsError,
         server::danger::{ClientCertVerified, ClientCertVerifier},
     },
     solana_sdk::{
-        pubkey::Pubkey, signature::Signature, signer::Signer, transaction::VersionedTransaction,
+        pubkey::Pubkey, transaction::VersionedTransaction,
     },
     solana_tls_utils::{
       get_pubkey_from_tls_certificate,
       new_dummy_x509_certificate,
     },
     std::{
-        collections::HashSet,
-        fs,
+        collections::{HashSet, HashMap},
         net::SocketAddr,
-        path::PathBuf,
+        num::NonZeroU32,
         sync::Arc,
         time::{Duration, Instant},
     },
     tokio::sync::mpsc,
     tracing::{error, info, warn},
+    solana_streamer::nonblocking::quic::get_remote_pubkey,
 };
 
 const ALPN_JET_TX_PROTOCOL: &[&[u8]] = &[b"tx-quic-jet", b"solana-tpu"];
+
+type PubkeyLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
+
+#[derive(Clone)]
+struct QuicRateLimiter {
+    limiters: Arc<DashMap<Pubkey, Arc<PubkeyLimiter>>>,
+    limits_config: Arc<HashMap<Pubkey, u32>>,
+}
+
+impl QuicRateLimiter {
+    fn new(limits_config: HashMap<Pubkey, u32>) -> Self {
+        Self {
+            limiters: Arc::new(DashMap::new()),
+            limits_config: Arc::new(limits_config),
+        }
+    }
+
+    fn check(&self, pubkey: &Pubkey) -> Result<(), ()> {
+        match self.limits_config.get(pubkey) {
+            Some(&limit) if limit > 0 => {
+                let limiter = self.limiters.entry(*pubkey).or_insert_with(|| {
+                    let quota = Quota::per_second(NonZeroU32::new(limit).unwrap());
+                    Arc::new(RateLimiter::direct(quota))
+                });
+                if limiter.check().is_err() {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct WhitelistVerifier {
@@ -59,8 +99,8 @@ impl ClientCertVerifier for WhitelistVerifier {
     fn verify_client_cert(
         &self,
         end_entity: &tonic::transport::CertificateDer<'_>,
-        intermediates: &[tonic::transport::CertificateDer<'_>],
-        now: rustls::pki_types::UnixTime,
+        _intermediates: &[tonic::transport::CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
     ) -> Result<ClientCertVerified, TlsError> {
         let pubkey =
             if let Some(pubkey) = get_pubkey_from_tls_certificate(&end_entity) {
@@ -134,9 +174,13 @@ pub fn spawn_quic_server(
     listen_addr: SocketAddr,
     identity: &solana_sdk::signature::Keypair,
     transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
-    client_whitelist: HashSet<solana_sdk::pubkey::Pubkey>,
+    max_retries: usize,
+    client_limits: HashMap<Pubkey, u32>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let (cert, key) = new_dummy_x509_certificate(identity);
+    
+    let client_whitelist = client_limits.keys().cloned().collect();
+    let rate_limiter = QuicRateLimiter::new(client_limits);
 
     let mut server_tls_config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(WhitelistVerifier::new(client_whitelist))
@@ -157,32 +201,34 @@ pub fn spawn_quic_server(
         info!("QUIC server listening on {}", listen_addr);
         while let Some(conn) = endpoint.accept().await {
             let transaction_sink = transaction_sink.clone();
+            let rate_limiter = rate_limiter.clone();
             tokio::spawn(async move {
                 incr_quic_server_active_connections();
                 match conn.await {
                     Ok(connection) => {
-                        let peer_identity = connection
-                            .peer_identity()
-                            .and_then(|identity| {
-                                identity
-                                    .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
-                                    .ok()
-                            })
-                            .and_then(|cert| cert.first().cloned())
-                            .and_then(|cert| {
-                                get_pubkey_from_tls_certificate(&cert)
-                            });
+                        let peer_identity = get_remote_pubkey(&connection);
                         let remote_address = connection.remote_address();
                         info!("QUIC connection established from: {}", remote_address);
                         loop {
                             match connection.accept_uni().await {
-                                Ok(stream) => {
+                                Ok(mut stream) => {
+                                    if let Some(pubkey) = peer_identity {
+                                        if rate_limiter.check(&pubkey).is_err() {
+                                            warn!(
+                                                "Rate limit exceeded for peer: {}, ip: {}",
+                                                pubkey,
+                                                remote_address.ip()
+                                            );
+                                            let _ = stream.stop(0u32.into());
+                                            continue;
+                                        }
+                                    }
                                     let sink = transaction_sink.clone();
                                     let pubkey = peer_identity;
                                     let start_time = Instant::now();
                                     tokio::spawn(async move {
                                         if let Err(e) =
-                                            handle_stream(stream, sink, remote_address, pubkey)
+                                            handle_stream(stream, sink, remote_address, pubkey, max_retries)
                                                 .await
                                         {
                                             let reason = {
@@ -237,6 +283,7 @@ async fn handle_stream(
     transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
     remote_address: SocketAddr,
     peer_pubkey: Option<Pubkey>,
+    max_retries: usize,
 ) -> anyhow::Result<()> {
     // It's recommended to set a max size to prevent OOM attacks.
     const MAX_TX_SIZE: usize = 1232 * 2;
@@ -258,7 +305,7 @@ async fn handle_stream(
         signature,
         transaction,
         wire_transaction,
-        max_retries: None,    // Use scheduler's default
+        max_retries: Some(max_retries),    // Use scheduler's default
         policies: Vec::new(), // No policies for raw QUIC submission
     });
 

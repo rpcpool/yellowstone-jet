@@ -18,7 +18,7 @@ use {
     },
     solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
     std::{
-        collections::HashSet,
+        collections::{HashSet, HashMap},
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
         num::{NonZeroU64, NonZeroUsize},
         ops::Range,
@@ -225,20 +225,22 @@ pub struct ConfigListenQuic {
     #[serde(deserialize_with = "deserialize_listen")]
     pub bind: Vec<SocketAddr>,
     /// Whitelist of client public keys allowed to connect.
-    #[serde(default, deserialize_with = "deserialize_pubkey_set")]
-    pub client_whitelist: HashSet<Pubkey>,
+    #[serde(default, deserialize_with = "deserialize_pubkey_limit_map")]
+    pub client_limits: HashMap<Pubkey, u32>,
 }
 
-fn deserialize_pubkey_set<'de, D>(deserializer: D) -> Result<HashSet<Pubkey>, D::Error>
+fn deserialize_pubkey_limit_map<'de, D>(deserializer: D) -> Result<HashMap<Pubkey, u32>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let pubkey_strings = Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default();
-    pubkey_strings
+    let pubkey_limit_map = Option::<HashMap<String, u32>>::deserialize(deserializer)?.unwrap_or_default();
+    pubkey_limit_map
         .into_iter()
-        .map(|s| {
-            info!("Whitelist pubkey: {}", s);
-            s.parse().map_err(de::Error::custom)
+        .map(|(s, limit)| {
+            info!("Whitelist pubkey: {}, limit: {} tps", s, limit);
+            s.parse()
+                .map(|pubkey| (pubkey, limit))
+                .map_err(de::Error::custom)
         })
         .collect()
 }
@@ -293,6 +295,18 @@ pub struct ConfigListenSolanaLike {
     /// Allow to do preflight check on RPC server (simulateTransaction)
     #[serde(default)]
     pub proxy_preflight_check: bool,
+
+    #[serde(default = "ConfigListenSolanaLike::default_default_signer_limit")]
+    pub default_signer_limit: u32,
+
+    #[serde(default, deserialize_with = "deserialize_pubkey_limit_map")]
+    pub signer_limits: HashMap<Pubkey, u32>,
+}
+
+impl ConfigListenSolanaLike {
+    const fn default_default_signer_limit() -> u32 {
+        100
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]

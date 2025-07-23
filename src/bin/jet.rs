@@ -42,7 +42,7 @@ use {
             IgnorantLeaderPredictor, QuicGatewayConfig, StakeBasedEvictionStrategy,
             TokioQuicGatewaySession, TokioQuicGatewaySpawner, UpcomingLeaderPredictor,
         },
-        rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
+        rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient, RpcRateLimiter},
         setup_tracing,
         solana::sanitize_transaction_support_check,
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
@@ -415,7 +415,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             quic_config.bind[0],
             &initial_identity,
             scheduler_in.clone(),
-            quic_config.client_whitelist.clone(),
+            config.send_transaction_service.service_max_retries,
+            quic_config.client_limits.clone(),
         )?;
         tg.spawn_cancelable("quic_server", async move {
             if let Err(e) = quic_server_handle.await {
@@ -447,10 +448,16 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         proxy_preflight_check: config.listen_solana_like.proxy_preflight_check,
     };
 
+    let rate_limiter = RpcRateLimiter::new(
+        config.listen_solana_like.signer_limits.clone(),
+        config.listen_solana_like.default_signer_limit,
+    );
+
     let rpc_solana_like = RpcServer::new(
         config.listen_solana_like.bind[0],
         RpcServerType::SolanaLike {
             tx_handler: tx_handler.clone(),
+            rate_limiter: rate_limiter.clone(),
         },
     )
     .await?;
@@ -467,7 +474,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                 info!("starting jet-gateway listener");
                 let stake_info = stake_info_map.clone();
                 let jet_gw_identity = initial_identity.insecure_clone();
-                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(tx_handler.clone());
+                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(tx_handler.clone(), rate_limiter);
                 let (jet_gw_identity_updater, jet_gw_fut) = spawn_jet_gw_listener(
                     stake_info,
                     jet_gw_config,
