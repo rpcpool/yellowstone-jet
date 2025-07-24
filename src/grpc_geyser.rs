@@ -472,11 +472,11 @@ impl GeyserSubscriber {
 
             let (slots, blocks_meta) = if full {
                 (
-                    hashmap! { "".to_owned() => SubscribeRequestFilterSlots {
+                    hashmap! { "slots".to_owned() => SubscribeRequestFilterSlots {
                         filter_by_commitment: Some(false),
                         interslot_updates: Some(true), // Get all slot updates
                     } },
-                    hashmap! { "".to_owned() => SubscribeRequestFilterBlocksMeta::default() },
+                    hashmap! { "blocks_meta".to_owned() => SubscribeRequestFilterBlocksMeta::default() },
                 )
             } else {
                 (hashmap! {}, hashmap! {})
@@ -484,7 +484,7 @@ impl GeyserSubscriber {
 
             match client.subscribe_once(SubscribeRequest {
                 slots,
-                transactions_status: hashmap! { "".to_owned() => SubscribeRequestFilterTransactions::default() },
+                transactions_status: hashmap! { "transactions".to_owned() => SubscribeRequestFilterTransactions::default() },
                 blocks_meta,
                 commitment: Some(GrpcCommitmentLevel::Processed as i32),
                 ..SubscribeRequest::default()
