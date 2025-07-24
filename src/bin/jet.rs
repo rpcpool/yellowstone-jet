@@ -39,8 +39,8 @@ use {
         jet_gateway::spawn_jet_gw_listener,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
         quic_gateway::{
-            QuicGatewayConfig, StakeBasedEvictionStrategy,
-            TokioQuicGatewaySession, TokioQuicGatewaySpawner,
+            QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
+            TokioQuicGatewaySpawner,
         },
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,

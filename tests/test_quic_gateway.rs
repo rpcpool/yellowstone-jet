@@ -24,9 +24,9 @@ use {
     tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream},
     yellowstone_jet::{
         quic_gateway::{
-            GatewayResponse, GatewayTransaction, LeaderTpuInfoService,
-            QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
-            TokioQuicGatewaySpawner, TxDropReason, UpcomingLeaderPredictor,
+            GatewayResponse, GatewayTransaction, LeaderTpuInfoService, QuicGatewayConfig,
+            StakeBasedEvictionStrategy, TokioQuicGatewaySession, TokioQuicGatewaySpawner,
+            TxDropReason, UpcomingLeaderPredictor,
         },
         stake::StakeInfoMap,
     },

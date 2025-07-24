@@ -406,7 +406,6 @@ pub(crate) struct TokioQuicGatewayRuntime {
     connecting_blocked_by_eviction_list: VecDeque<WaitingEviction>,
 
     remote_peer_addr_watcher: RemotePeerAddrWatcher,
-
     // ///
     // /// Upcoming leader predictor to use.
     // ///
