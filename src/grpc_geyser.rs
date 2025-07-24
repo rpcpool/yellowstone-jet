@@ -484,7 +484,10 @@ impl GeyserSubscriber {
 
             match client.subscribe_once(SubscribeRequest {
                 slots,
-                transactions_status: hashmap! { "transactions".to_owned() => SubscribeRequestFilterTransactions::default() },
+                transactions_status: hashmap! { "transactions".to_owned() => SubscribeRequestFilterTransactions{
+                    vote: Some(false),
+                    ..Default::default()
+                }},
                 blocks_meta,
                 commitment: Some(GrpcCommitmentLevel::Processed as i32),
                 ..SubscribeRequest::default()
