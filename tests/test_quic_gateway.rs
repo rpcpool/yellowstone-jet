@@ -24,7 +24,7 @@ use {
     tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream},
     yellowstone_jet::{
         quic_gateway::{
-            GatewayResponse, GatewayTransaction, IgnorantLeaderPredictor, LeaderTpuInfoService,
+            GatewayResponse, GatewayTransaction, LeaderTpuInfoService,
             QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
             TokioQuicGatewaySpawner, TxDropReason, UpcomingLeaderPredictor,
         },
@@ -348,7 +348,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor),
+        // Arc::new(IgnorantLeaderPredictor),
     );
 
     let rx_server_handle = tokio::spawn(async move {
@@ -413,7 +413,7 @@ async fn it_should_update_gatway_identity() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor),
+        // Arc::new(IgnorantLeaderPredictor),
     );
 
     let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
@@ -488,7 +488,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor),
+        // Arc::new(IgnorantLeaderPredictor),
     );
 
     let (validator_rx1, _) = MockedRemoteValidator::spawn(
@@ -589,7 +589,7 @@ async fn it_should_evict_connection() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor),
+        // Arc::new(IgnorantLeaderPredictor),
     );
 
     let (tx, mut validator_conn_spy1) = mpsc::channel(100);
@@ -724,7 +724,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor),
+        // Arc::new(IgnorantLeaderPredictor),
     );
 
     let _rx_server_handle = tokio::spawn(async move {
@@ -794,7 +794,7 @@ async fn it_should_detect_remote_peer_address_change() {
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::new(IgnorantLeaderPredictor),
+        // Arc::new(IgnorantLeaderPredictor),
     );
 
     let (tx, mut conn_spy_rx1) = mpsc::channel(100);
@@ -958,7 +958,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
-        Arc::clone(&fake_predictor) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>,
+        // Arc::clone(&fake_predictor) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>,
     );
 
     // Since we provided a predictor strategy and a lookahead, the gateway should preemptively connect to the upcoming leaders.
