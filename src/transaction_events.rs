@@ -46,7 +46,7 @@ use {
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     std::{
-        collections::{HashMap, HashSet, hash_map::Entry},
+        collections::{HashMap, hash_map::Entry},
         future::Future,
         net::SocketAddr,
         sync::Arc,
@@ -280,10 +280,10 @@ struct TransactionTracking {
     signature: Signature,
     slot: Slot,
     ts_received: i64,
-    leaders: Vec<Pubkey>,
     events: Vec<TransactionEvent>,
     created_at: Instant,
-    completed_validators: HashSet<Pubkey>,
+    expected_per_validator: HashMap<Pubkey, usize>,
+    received_per_validator: HashMap<Pubkey, usize>,
     validator_attempt_count: HashMap<Pubkey, usize>,
 }
 
@@ -294,16 +294,35 @@ impl TransactionTracking {
                 leaders,
                 slot,
                 timestamp,
-            } => Some(Self {
-                signature,
-                slot: *slot,
-                ts_received: *timestamp,
-                leaders: leaders.clone(),
-                events: vec![event],
-                created_at: Instant::now(),
-                completed_validators: HashSet::new(),
-                validator_attempt_count: HashMap::new(),
-            }),
+            } => {
+                // Count expected events per validator
+                let mut expected_per_validator = HashMap::new();
+                for leader in leaders {
+                    *expected_per_validator.entry(*leader).or_insert(0) += 1;
+                }
+
+                // Add metric if we have duplicate leaders
+                let has_duplicates = expected_per_validator.values().any(|&count| count > 1);
+                if has_duplicates {
+                    metrics::lewis_event_aggregator_duplicate_leaders_inc();
+                    tracing::debug!(
+                        "Transaction {} has duplicate leaders in schedule: {:?}",
+                        signature,
+                        expected_per_validator
+                    );
+                }
+
+                Some(Self {
+                    signature,
+                    slot: *slot,
+                    ts_received: *timestamp,
+                    events: vec![event],
+                    created_at: Instant::now(),
+                    expected_per_validator,
+                    received_per_validator: HashMap::new(),
+                    validator_attempt_count: HashMap::new(),
+                })
+            }
             _ => {
                 tracing::warn!("First event must be TransactionReceived for {}", signature);
                 None
@@ -316,22 +335,24 @@ impl TransactionTracking {
         self.events.push(event.clone());
 
         match &event {
-            TransactionEvent::PolicySkipped { validator, .. } => {
-                self.completed_validators.insert(*validator);
-            }
-            TransactionEvent::ConnectionFailed { validator, .. } => {
-                self.completed_validators.insert(*validator);
+            TransactionEvent::PolicySkipped { validator, .. }
+            | TransactionEvent::ConnectionFailed { validator, .. } => {
+                // Increment received count for this validator
+                *self.received_per_validator.entry(*validator).or_insert(0) += 1;
             }
             TransactionEvent::SendAttempt {
                 validator, result, ..
             } => {
                 if result.is_ok() {
-                    self.completed_validators.insert(*validator);
+                    // Success - increment received count
+                    *self.received_per_validator.entry(*validator).or_insert(0) += 1;
                 } else {
+                    // Failed - track retry attempts
                     let count = self.validator_attempt_count.entry(*validator).or_insert(0);
                     *count += 1;
                     if *count >= max_retries {
-                        self.completed_validators.insert(*validator);
+                        // Max retries reached - increment received count
+                        *self.received_per_validator.entry(*validator).or_insert(0) += 1;
                     }
                 }
             }
@@ -340,8 +361,15 @@ impl TransactionTracking {
             }
         }
 
-        // Transaction is complete when all leaders have been handled
-        self.completed_validators.len() == self.leaders.len()
+        // Check if all expected events have been received
+        for (validator, expected_count) in &self.expected_per_validator {
+            let received_count = self.received_per_validator.get(validator).unwrap_or(&0);
+            if received_count < expected_count {
+                return false; // Still waiting for events
+            }
+        }
+
+        true // All expected events received
     }
 }
 

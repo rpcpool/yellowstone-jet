@@ -299,6 +299,11 @@ pub mod jet {
             "lewis_event_aggregator_duplicate_transaction_total",
             "Number of duplicate TransactionReceived events"
         ).unwrap();
+
+        static ref LEWIS_EVENT_AGGREGATOR_DUPLICATE_LEADERS: IntCounter = IntCounter::new(
+            "lewis_event_aggregator_duplicate_leaders_total",
+            "Number of transactions with duplicate leaders in schedule"
+        ).unwrap();
     }
 
     pub fn incr_quic_gw_leader_prediction_hit() {
@@ -423,6 +428,7 @@ pub mod jet {
             register!(LEWIS_EVENT_AGGREGATOR_COMPLETED_TOTAL);
             register!(LEWIS_EVENT_AGGREGATOR_ORPHANED_EVENTS);
             register!(LEWIS_EVENT_AGGREGATOR_DUPLICATE_TRANSACTION);
+            register!(LEWIS_EVENT_AGGREGATOR_DUPLICATE_LEADERS);
         });
     }
 
@@ -664,5 +670,9 @@ pub mod jet {
 
     pub fn lewis_event_aggregator_duplicate_transaction_inc() {
         LEWIS_EVENT_AGGREGATOR_DUPLICATE_TRANSACTION.inc();
+    }
+
+    pub fn lewis_event_aggregator_duplicate_leaders_inc() {
+        LEWIS_EVENT_AGGREGATOR_DUPLICATE_LEADERS.inc();
     }
 }
