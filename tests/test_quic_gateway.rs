@@ -1000,8 +1000,10 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 
 #[tokio::test]
 async fn it_should_emit_events_through_event_reporter() {
-    use std::sync::{Arc, Mutex};
-    use yellowstone_jet::transaction_events::EventReporter;
+    use {
+        std::sync::{Arc, Mutex},
+        yellowstone_jet::transaction_events::EventReporter,
+    };
 
     #[derive(Clone, Default)]
     struct MockEventReporter {
@@ -1009,21 +1011,55 @@ async fn it_should_emit_events_through_event_reporter() {
     }
 
     impl EventReporter for MockEventReporter {
-        fn report_transaction_received(&self, signature: Signature, _leaders: Vec<Pubkey>, _slot: solana_clock::Slot) {
-            self.events.lock().unwrap().push((signature, "received".to_string()));
+        fn report_transaction_received(
+            &self,
+            signature: Signature,
+            _leaders: Vec<Pubkey>,
+            _slot: solana_clock::Slot,
+        ) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((signature, "received".to_string()));
         }
 
-        fn report_send_attempt(&self, signature: Signature, _validator: Pubkey, _tpu_addr: SocketAddr, _attempt_num: u8, result: Result<(), String>) {
-            let event_type = if result.is_ok() { "send_success" } else { "send_failed" };
-            self.events.lock().unwrap().push((signature, event_type.to_string()));
+        fn report_send_attempt(
+            &self,
+            signature: Signature,
+            _validator: Pubkey,
+            _tpu_addr: SocketAddr,
+            _attempt_num: u8,
+            result: Result<(), String>,
+        ) {
+            let event_type = if result.is_ok() {
+                "send_success"
+            } else {
+                "send_failed"
+            };
+            self.events
+                .lock()
+                .unwrap()
+                .push((signature, event_type.to_string()));
         }
 
-        fn report_connection_failed(&self, signature: Signature, _validator: Pubkey, _tpu_addr: SocketAddr, _error: String) {
-            self.events.lock().unwrap().push((signature, "connection_failed".to_string()));
+        fn report_connection_failed(
+            &self,
+            signature: Signature,
+            _validator: Pubkey,
+            _tpu_addr: SocketAddr,
+            _error: String,
+        ) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((signature, "connection_failed".to_string()));
         }
 
         fn report_policy_skip(&self, signature: Signature, _validator: Pubkey) {
-            self.events.lock().unwrap().push((signature, "policy_skip".to_string()));
+            self.events
+                .lock()
+                .unwrap()
+                .push((signature, "policy_skip".to_string()));
         }
     }
 
@@ -1033,7 +1069,8 @@ async fn it_should_emit_events_through_event_reporter() {
         let rx_server_identity = Keypair::new();
         let gateway_kp = Keypair::new();
         let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
-        let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+        let fake_tpu_info_service =
+            FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
         let event_reporter = Arc::new(MockEventReporter::default());
 
@@ -1041,7 +1078,7 @@ async fn it_should_emit_events_through_event_reporter() {
             stake_info_map,
             leader_tpu_info_service: Arc::new(fake_tpu_info_service),
             gateway_tx_channel_capacity: 100,
-            event_reporter: Some(event_reporter.clone()),
+            event_reporter: Some(Arc::<MockEventReporter>::clone(&event_reporter)),
         };
 
         let TokioQuicGatewaySession {
@@ -1090,7 +1127,8 @@ async fn it_should_emit_events_through_event_reporter() {
         let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
 
         // Don't spawn a server - connection will fail
-        let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+        let fake_tpu_info_service =
+            FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
         let event_reporter = Arc::new(MockEventReporter::default());
 
@@ -1098,7 +1136,7 @@ async fn it_should_emit_events_through_event_reporter() {
             stake_info_map,
             leader_tpu_info_service: Arc::new(fake_tpu_info_service),
             gateway_tx_channel_capacity: 100,
-            event_reporter: Some(event_reporter.clone()),
+            event_reporter: Some(Arc::<MockEventReporter>::clone(&event_reporter)),
         };
 
         let gateway_config = QuicGatewayConfig {
@@ -1132,7 +1170,10 @@ async fn it_should_emit_events_through_event_reporter() {
         let resp = gateway_response_source.recv().await.expect("recv response");
 
         // Should get a drop or failed response
-        assert!(matches!(resp, GatewayResponse::TxDrop(_) | GatewayResponse::TxFailed(_)));
+        assert!(matches!(
+            resp,
+            GatewayResponse::TxDrop(_) | GatewayResponse::TxFailed(_)
+        ));
 
         // Give a moment for event to be recorded
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1150,7 +1191,8 @@ async fn it_should_emit_events_through_event_reporter() {
         let rx_server_identity = Keypair::new();
         let gateway_kp = Keypair::new();
         let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
-        let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+        let fake_tpu_info_service =
+            FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
         let event_reporter = Arc::new(MockEventReporter::default());
 
@@ -1158,7 +1200,7 @@ async fn it_should_emit_events_through_event_reporter() {
             stake_info_map,
             leader_tpu_info_service: Arc::new(fake_tpu_info_service),
             gateway_tx_channel_capacity: 100,
-            event_reporter: Some(event_reporter.clone()),
+            event_reporter: Some(Arc::<MockEventReporter>::clone(&event_reporter)),
         };
 
         let gateway_config = QuicGatewayConfig {

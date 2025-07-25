@@ -303,7 +303,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         config.send_transaction_service.service_max_retries,
     );
 
-
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
         stake_info_map: stake_info_map.clone(),
         gateway_tx_channel_capacity: 10000,

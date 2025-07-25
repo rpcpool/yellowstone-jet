@@ -606,7 +606,6 @@ pub mod jet {
             .inc();
     }
 
-
     pub fn gateway_set_connected(endpoints: &[String], endpoint: String) {
         for endpoint in endpoints {
             GATEWAY_CONNECTED

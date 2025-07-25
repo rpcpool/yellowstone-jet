@@ -281,7 +281,11 @@ struct TransactionTracking {
 impl TransactionTracking {
     fn new(signature: Signature, event: TransactionEvent) -> Option<Self> {
         match &event {
-            TransactionEvent::TransactionReceived { leaders, slot, timestamp } => Some(Self {
+            TransactionEvent::TransactionReceived {
+                leaders,
+                slot,
+                timestamp,
+            } => Some(Self {
                 signature,
                 slot: *slot,
                 ts_received: *timestamp,
@@ -437,6 +441,11 @@ pub async fn transaction_event_aggregator_loop(
 
     // Send all remaining on shutdown
     for (_, tracker) in trackers.drain() {
-        lewis_client.track_transaction_send(&tracker.signature, tracker.slot, tracker.ts_received, tracker.events);
+        lewis_client.track_transaction_send(
+            &tracker.signature,
+            tracker.slot,
+            tracker.ts_received,
+            tracker.events,
+        );
     }
 }
