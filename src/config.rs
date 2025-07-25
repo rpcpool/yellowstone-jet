@@ -549,6 +549,12 @@ pub struct ConfigLewisEvents {
     /// Jet ID to use for events
     #[serde(default)]
     pub jet_id: Option<String>,
+    /// Aggregation timeout - how long to wait for all attempts events to be received
+    #[serde(default = "ConfigLewisEvents::default_aggregation_timeout", with = "humantime_serde")]
+    pub aggregation_timeout: Duration,
+    /// Check interval for timeouts only (not for completion)
+    #[serde(default = "ConfigLewisEvents::default_check_interval", with = "humantime_serde")]
+    pub check_interval: Duration,
 }
 
 impl ConfigLewisEvents {
@@ -558,6 +564,14 @@ impl ConfigLewisEvents {
 
     const fn default_queue_size_buffer() -> usize {
         100_000
+    }
+
+    const fn default_aggregation_timeout() -> Duration {
+        Duration::from_secs(30)
+    }
+
+    const fn default_check_interval() -> Duration {
+        Duration::from_secs(1)
     }
 }
 

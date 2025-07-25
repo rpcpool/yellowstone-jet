@@ -1,9 +1,6 @@
 use {
     crate::{
-        config::ConfigLewisEvents,
-        event_tracker::{SendAttempt, SendResult, TransactionEventTracker},
-        metrics::jet as metrics,
-        proto::lewis::{transaction_tracker_client::TransactionTrackerClient, Event, EventAck},
+        config::ConfigLewisEvents, metrics::jet as metrics, proto::lewis::{transaction_tracker_client::TransactionTrackerClient, Event, EventAck}, transaction_events::{TransactionEvent, TransactionEventTracker}
     },
     anyhow::Context,
     futures::SinkExt,
@@ -15,9 +12,44 @@ use {
     tracing::{debug, info, warn},
 };
 
+/// Internal trait for Lewis event client implementations
+pub trait LewisEventClientImpl: Send + Sync {
+    fn emit(&self, event: Event);
+}
+
+/// Real implementation that sends events to Lewis via gRPC
+struct RealLewisClient {
+    tx: Option<mpsc::Sender<Event>>,
+}
+
+impl LewisEventClientImpl for RealLewisClient {
+    fn emit(&self, event: Event) {
+        if let Some(tx) = &self.tx {
+            match tx.try_send(event) {
+                Ok(()) => {
+                    debug!("Queued Lewis event");
+                    metrics::lewis_events_push_inc(Ok(()));
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!("Lewis event queue full, dropping event");
+                    metrics::lewis_events_push_inc(Err(()));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    debug!("Lewis event channel closed");
+                    metrics::lewis_events_push_inc(Err(()));
+                }
+            }
+        }
+    }
+}
+
+/// Client for sending transaction events to Lewis tracking service.
+///
+/// This client maintains a background task that streams events to Lewis
+/// via gRPC. Events are buffered and sent in batches for efficiency.
 #[derive(Clone)]
 pub struct LewisEventClient {
-    tx: Option<mpsc::Sender<Event>>,
+    inner: Arc<dyn LewisEventClientImpl>,
     jet_id: Option<String>,
 }
 
@@ -25,7 +57,7 @@ impl LewisEventClient {
     pub fn create_event_tracker(
         config: Option<ConfigLewisEvents>,
     ) -> (
-        Option<Arc<dyn TransactionEventTracker + Send + Sync>>,
+        Option<Arc<LewisEventClient>>,
         Option<impl Future<Output = anyhow::Result<()>> + Send>,
     ) {
         let Some(config) = config else {
@@ -33,9 +65,15 @@ impl LewisEventClient {
         };
 
         let (tx, rx) = mpsc::channel(config.queue_size_buffer);
-        let client = Self { tx: Some(tx), jet_id: config.jet_id.clone() };
+        let inner = Arc::new(RealLewisClient {
+            tx: Some(tx),
+        });
+        let client = Arc::new(Self {
+            inner,
+            jet_id: config.jet_id.clone()
+        });
 
-        let tracker = Arc::new(client) as Arc<dyn TransactionEventTracker + Send + Sync>;
+        let tracker = client;
         info!(
             "Lewis event tracker created for endpoint: {}",
             config.endpoint
@@ -43,6 +81,10 @@ impl LewisEventClient {
 
         let fut = Self::run_event_loop(config, rx);
         (Some(tracker), Some(fut))
+    }
+
+    pub fn new_mock(mock_impl: Arc<dyn LewisEventClientImpl>, jet_id: Option<String>) -> Self {
+        Self { inner: mock_impl, jet_id }
     }
 
     async fn run_event_loop(
@@ -59,6 +101,7 @@ impl LewisEventClient {
                     "Lewis connection failed: {}. Continuing without event tracking.",
                     e
                 );
+                // Drain the channel to prevent blocking
                 while rx.recv().await.is_some() {}
                 Ok(())
             }
@@ -102,6 +145,7 @@ impl LewisEventClient {
                             pending += 1;
                             metrics::lewis_events_feed_inc();
 
+                            // Batch events for efficiency
                             if pending >= 10 || last_flush.elapsed() > Duration::from_millis(100) {
                                 tx.flush().await.context("Failed to flush stream")?;
                                 debug!("Flushed {} events", pending);
@@ -110,6 +154,7 @@ impl LewisEventClient {
                             }
                         }
                         None => {
+                            // Channel closed, flush remaining and exit
                             if pending > 0 {
                                 tx.flush().await.context("Failed to flush final events")?;
                             }
@@ -138,22 +183,7 @@ impl LewisEventClient {
     }
 
     fn emit(&self, event: Event) {
-        if let Some(tx) = &self.tx {
-            match tx.try_send(event) {
-                Ok(()) => {
-                    debug!("Queued Lewis event");
-                    metrics::lewis_events_push_inc(Ok(()));
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    warn!("Lewis event queue full, dropping event");
-                    metrics::lewis_events_push_inc(Err(()));
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    debug!("Lewis event channel closed");
-                    metrics::lewis_events_push_inc(Err(()));
-                }
-            }
-        }
+        self.inner.emit(event);
     }
 }
 
@@ -163,11 +193,11 @@ impl TransactionEventTracker for LewisEventClient {
         &self,
         signature: &Signature,
         slot: Slot,
-        send_attempts: Vec<SendAttempt>,
+        events: Vec<TransactionEvent>,
     ) {
         let mut builder = event_builders::JetEventBuilder::new(
-            // TODO: we need to define these.
-            String::new(), // req_id - we'll leave these empty for now
+            // TODO: These fields are not currently used by Lewis
+            String::new(), // req_id
             String::new(), // cascade_id
             String::new(), // jet_gateway_id
             self.jet_id.clone().unwrap_or_default(),
@@ -175,27 +205,9 @@ impl TransactionEventTracker for LewisEventClient {
             slot,
         );
 
-        for attempt in send_attempts {
-            builder = match attempt.result {
-                SendResult::Success => builder.add_send(
-                    attempt.validator.to_string(),
-                    attempt.tpu_addr.to_string(),
-                    false,
-                    None,
-                ),
-                SendResult::Skipped { reason } => builder.add_send(
-                    attempt.validator.to_string(),
-                    attempt.tpu_addr.to_string(),
-                    true,
-                    Some(reason),
-                ),
-                SendResult::Failed { error } => builder.add_send(
-                    attempt.validator.to_string(),
-                    attempt.tpu_addr.to_string(),
-                    false,
-                    Some(error),
-                ),
-            };
+        // Convert TransactionEvents to proto JetSend messages
+        for event in events {
+            builder = builder.add_event(event);
         }
 
         let event = builder.build();
@@ -203,11 +215,14 @@ impl TransactionEventTracker for LewisEventClient {
     }
 }
 
+/// Builders for constructing Lewis protocol buffer events from transaction events
 pub mod event_builders {
     use {
         super::*,
-        crate::proto::lewis::{Event, EventJet, JetSend},
-        std::time::SystemTime,
+        crate::{
+            proto::lewis::{Event, EventJet, JetSend},
+            transaction_events::TransactionEvent,
+        },
     };
 
     pub struct JetEventBuilder {
@@ -240,23 +255,51 @@ pub mod event_builders {
             }
         }
 
-        pub fn add_send(
-            mut self,
-            validator: String,
-            tpu_addr: String,
-            skipped: bool,
-            error: Option<String>,
-        ) -> Self {
-            self.jet_sends.push(JetSend {
-                validator,
-                ts: SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64,
-                skipped,
-                tpu_addr,
-                error: error.unwrap_or_default(),
-            });
+        /// Convert a TransactionEvent into a proto JetSend and add to builder
+        pub fn add_event(mut self, event: TransactionEvent) -> Self {
+            match event {
+                TransactionEvent::TransactionReceived { .. } => {
+                    // Skip - this is metadata, not a send attempt
+                }
+                TransactionEvent::PolicySkipped { validator, timestamp } => {
+                    self.jet_sends.push(JetSend {
+                        validator: validator.to_string(),
+                        ts: timestamp,
+                        skipped: true,
+                        tpu_addr: String::new(), // No address for skipped
+                        error: "Policy denied".to_string(),
+                    });
+                }
+                TransactionEvent::SendAttempt {
+                    validator,
+                    tpu_addr,
+                    result,
+                    timestamp,
+                    ..
+                } => {
+                    self.jet_sends.push(JetSend {
+                        validator: validator.to_string(),
+                        ts: timestamp,
+                        skipped: false,
+                        tpu_addr: tpu_addr.to_string(),
+                        error: result.err().unwrap_or_default(),
+                    });
+                }
+                TransactionEvent::ConnectionFailed {
+                    validator,
+                    tpu_addr,
+                    error,
+                    timestamp
+                } => {
+                    self.jet_sends.push(JetSend {
+                        validator: validator.to_string(),
+                        ts: timestamp,
+                        skipped: false,
+                        tpu_addr: tpu_addr.to_string(),
+                        error,
+                    });
+                }
+            }
             self
         }
 
@@ -277,114 +320,128 @@ pub mod event_builders {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use {
         super::*,
+        crate::{
+            proto::lewis::event::Event as ProtoEvent,
+            transaction_events::TransactionEvent,
+        },
         solana_pubkey::Pubkey,
-        std::net::{IpAddr, Ipv4Addr, SocketAddr},
+        std::{
+            net::{IpAddr, Ipv4Addr, SocketAddr},
+            sync::Mutex,
+        },
     };
 
-    #[tokio::test]
-    async fn test_transaction_lifecycle() {
-        let (tx, mut rx) = mpsc::channel(10);
-        let client = Arc::new(LewisEventClient { tx: Some(tx), jet_id: Some("jet-test-id".to_string()) });
+    /// Mock implementation for testing
+    struct MockLewisClientImpl {
+        events: Arc<Mutex<Vec<Event>>>,
+    }
 
-        let signature = Signature::from([1u8; 64]);
-        let slot = 98765;
+    impl LewisEventClientImpl for MockLewisClientImpl {
+        fn emit(&self, event: Event) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
 
-        let send_attempts = vec![
-            SendAttempt::success(
-                Pubkey::from([1u8; 32]),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8001),
-            ),
-            SendAttempt::failed(
-                Pubkey::from([2u8; 32]),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 8002),
-                "Connection timeout".to_string(),
-            ),
-            SendAttempt::skipped(
-                Pubkey::from([3u8; 32]),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3)), 8003),
-                "Rate limited".to_string(),
-            ),
+    #[test]
+    fn test_lewis_event_builder() {
+        let sig = Signature::new_unique();
+        let validator = Pubkey::new_unique();
+        let slot = 12345;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000);
+
+        let mut builder = event_builders::JetEventBuilder::new(
+            "req-123".to_string(),
+            "cascade-456".to_string(),
+            "gateway-789".to_string(),
+            "jet-abc".to_string(),
+            &sig,
+            slot,
+        );
+
+        // Add successful send attempt
+        builder = builder.add_event(TransactionEvent::SendAttempt {
+            validator,
+            tpu_addr: addr,
+            attempt_num: 1,
+            result: Ok(()),
+            timestamp: 1000,
+        });
+
+        // Add policy skip
+        builder = builder.add_event(TransactionEvent::PolicySkipped {
+            validator,
+            timestamp: 2000,
+        });
+
+        let event = builder.build();
+
+        match event.event {
+            Some(ProtoEvent::Jet(jet_event)) => {
+                assert_eq!(jet_event.req_id, "req-123");
+                assert_eq!(jet_event.cascade_id, "cascade-456");
+                assert_eq!(jet_event.jet_gateway_id, "gateway-789");
+                assert_eq!(jet_event.jet_id, "jet-abc");
+                assert_eq!(jet_event.sig, sig.as_ref());
+                assert_eq!(jet_event.slot, slot);
+                assert_eq!(jet_event.jet_sends.len(), 2);
+
+                // Check first send (successful)
+                assert_eq!(jet_event.jet_sends[0].validator, validator.to_string());
+                assert_eq!(jet_event.jet_sends[0].tpu_addr, addr.to_string());
+                assert!(!jet_event.jet_sends[0].skipped);
+                assert!(jet_event.jet_sends[0].error.is_empty());
+
+                // Check second send (policy skip)
+                assert_eq!(jet_event.jet_sends[1].validator, validator.to_string());
+                assert!(jet_event.jet_sends[1].skipped);
+                assert_eq!(jet_event.jet_sends[1].error, "Policy denied");
+            }
+            _ => panic!("Expected Jet event"),
+        }
+    }
+
+    #[test]
+    fn test_mock_lewis_client() {
+        let mock_impl = Arc::new(MockLewisClientImpl {
+            events: Arc::new(Mutex::new(Vec::new())),
+        });
+        let client = LewisEventClient::new_mock(mock_impl.clone(), Some("test-jet".to_string()));
+
+        let sig = Signature::new_unique();
+        let validator = Pubkey::new_unique();
+        let slot = 12345;
+
+        let events = vec![
+            TransactionEvent::TransactionReceived {
+                leaders: vec![validator],
+                slot,
+                timestamp: 1000,
+            },
+            TransactionEvent::SendAttempt {
+                validator,
+                tpu_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000),
+                attempt_num: 1,
+                result: Ok(()),
+                timestamp: 2000,
+            },
         ];
 
-        client.track_transaction_send(&signature, slot, send_attempts);
+        client.track_transaction_send(&sig, slot, events);
 
-        let event = rx.recv().await.unwrap();
-        let jet_event = match event.event {
-            Some(crate::proto::lewis::event::Event::Jet(jet)) => jet,
+        // Verify event was emitted
+        let captured_events = mock_impl.events.lock().unwrap();
+        assert_eq!(captured_events.len(), 1);
+
+        match &captured_events[0].event {
+            Some(ProtoEvent::Jet(jet_event)) => {
+                assert_eq!(jet_event.sig, sig.as_ref());
+                assert_eq!(jet_event.slot, slot);
+                assert_eq!(jet_event.jet_sends.len(), 1); // TransactionReceived is skipped
+            }
             _ => panic!("Expected Jet event"),
-        };
-
-        assert_eq!(jet_event.sig, signature.as_ref());
-        assert_eq!(jet_event.slot, slot);
-        assert_eq!(jet_event.jet_sends.len(), 3);
-
-        assert!(!jet_event.jet_sends[0].skipped);
-        assert!(jet_event.jet_sends[0].error.is_empty());
-
-        assert_eq!(jet_event.jet_id, "jet-test-id".to_string());
-
-        assert!(!jet_event.jet_sends[1].skipped);
-        assert_eq!(jet_event.jet_sends[1].error, "Connection timeout");
-
-        assert!(jet_event.jet_sends[2].skipped);
-        assert_eq!(jet_event.jet_sends[2].error, "Rate limited");
-    }
-
-    #[tokio::test]
-    async fn test_event_emission() {
-        let (tx, mut rx) = mpsc::channel(10);
-        let client = LewisEventClient { tx: Some(tx), jet_id: None };
-
-        let event = event_builders::JetEventBuilder::new(
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            &Signature::default(),
-            12345,
-        )
-        .build();
-
-        client.emit(event);
-
-        assert!(rx.recv().await.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_full_queue_drops_events() {
-        let (tx, mut rx) = mpsc::channel(1);
-        let client = LewisEventClient { tx: Some(tx), jet_id: None };
-
-        let event1 = event_builders::JetEventBuilder::new(
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            &Signature::default(),
-            1,
-        )
-        .build();
-        client.emit(event1);
-
-        let event2 = event_builders::JetEventBuilder::new(
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            &Signature::default(),
-            2,
-        )
-        .build();
-        client.emit(event2);
-
-        drop(client);
-        let mut count = 0;
-        while rx.try_recv().is_ok() {
-            count += 1;
         }
-        assert_eq!(count, 1);
     }
 }

@@ -1,6 +1,6 @@
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
-use yellowstone_jet::grpc_lewis::LewisEventClient;
+use yellowstone_jet::transaction_events::create_lewis_event_pipeline;
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
@@ -171,42 +171,6 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
     Ok(())
 }
 
-// fn spawn_lewis_metric_subscriber(
-//     config: Option<ConfigMetricsUpstream>,
-//     mut rx: broadcast::Receiver<QuicClientMetric>,
-// ) -> JoinHandle<()> {
-//     let grpc_metrics = GrpcMetricsClient::new(config);
-//     tokio::spawn(async move {
-//         loop {
-//             match rx.recv().await {
-//                 Ok(metric) => match metric {
-//                     QuicClientMetric::SendAttempts {
-//                         sig,
-//                         leader,
-//                         leader_tpu_addr,
-//                         slots,
-//                         error,
-//                     } => {
-//                         grpc_metrics.emit_send_attempt(
-//                             &sig,
-//                             &leader,
-//                             slots.as_slice(),
-//                             leader_tpu_addr,
-//                             error,
-//                         );
-//                     }
-//                 },
-//                 Err(broadcast::error::RecvError::Closed) => {
-//                     break;
-//                 }
-//                 Err(broadcast::error::RecvError::Lagged(_)) => {
-//                     warn!("lewis metrics subscriber lagged behind");
-//                 }
-//             }
-//         }
-//     })
-// }
-
 ///
 /// This task keeps the stake metrics up to date for the current identity.
 ///
@@ -332,12 +296,32 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
 
-    let (event_tracker, lewis_fut) = LewisEventClient::create_event_tracker(config.lewis_events);
+    // Set up Lewis event tracking pipeline
+    // Tracks transaction lifecycle: attempts, failures, and policy decisions
+    let (event_reporter, aggregator_fut, lewis_fut) = create_lewis_event_pipeline(
+        config.lewis_events.clone(),
+        config.send_transaction_service.service_max_retries,
+    );
+
+    // Spawn aggregator if Lewis is enabled
+    if let Some(aggregator_fut) = aggregator_fut {
+        tg.spawn_with_shutdown("lewis_event_aggregator", |mut stop| async move {
+            tokio::select! {
+                _ = aggregator_fut => {
+                    info!("Lewis event aggregator completed");
+                }
+                _ = &mut stop => {
+                    info!("Shutting down Lewis event aggregator");
+                }
+            }
+        });
+    }
 
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
         stake_info_map: stake_info_map.clone(),
         gateway_tx_channel_capacity: 10000,
         leader_tpu_info_service: Arc::new(cluster_tpu_info.clone()),
+        event_reporter: event_reporter.clone(),
     };
 
     let connection_predictor = if config.quic.connection_prediction_lookahead.is_none() {
@@ -411,16 +395,13 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         scheduler_out,
         quic_gateway_bidi,
         config.send_transaction_service.leader_forward_count,
+        event_reporter.clone(),
     );
 
     tg.spawn_cancelable(
         "transaction_forwarder",
         async move { tx_forwader.run().await },
     );
-
-    // TODO check if really need lewis
-    // let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
-    // let lewis = spawn_lewis_metric_subscriber(config.metrics_upstream, quic_tx_metrics_listener);
 
     let mut jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
         vec![Box::new(gateway_identity_updater)];

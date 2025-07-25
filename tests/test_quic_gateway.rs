@@ -204,6 +204,7 @@ async fn send_buffer_should_land_properly() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
+        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -261,6 +262,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
+        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -325,6 +327,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
+        event_reporter: None,
     };
     let gateway_config = QuicGatewayConfig {
         max_connection_attempts: 1,
@@ -395,6 +398,7 @@ async fn it_should_update_gatway_identity() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
+        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -470,6 +474,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
+        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -571,6 +576,7 @@ async fn it_should_evict_connection() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
+        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -689,7 +695,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     // the remote peer closed the uni stream right after it opened it.
     // If we send a too little payload, even if the remote peer closed the uni stream, it will not trigger a connection lost,
     // because quinn will be so fast that it will send the payload before the remote peer closes the stream.
-    let huge_payload = Bytes::from(vec![0u8; 1024 * 1024 * 100]); // 100MB payload 
+    let huge_payload = Bytes::from(vec![0u8; 1024 * 1024 * 100]); // 100MB payload
     let gateway_kp = Keypair::new();
     let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =
@@ -699,6 +705,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
+        event_reporter: None,
     };
     const MAX_CONN_ATTEMPT: NonZeroUsize = NonZeroUsize::new(1).unwrap();
     let gateway_config = QuicGatewayConfig {
@@ -770,6 +777,7 @@ async fn it_should_detect_remote_peer_address_change() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
+        event_reporter: None,
     };
 
     let gateway_config = QuicGatewayConfig {
@@ -900,6 +908,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
+        event_reporter: None,
     };
 
     let gateway_config = QuicGatewayConfig {

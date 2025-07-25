@@ -71,6 +71,11 @@ impl UpcomingLeaderSchedule for FakeLeaderSchedule {
         let schedule = self.share.read().unwrap();
         schedule[..leader_forward_lookahead].to_vec()
     }
+    fn get_current_slot(&self) -> solana_clock::Slot {
+        // For testing purposes, we can return a dummy slot.
+        // In a real implementation, this would return the current slot.
+        0
+    }
 }
 
 #[tokio::test]

@@ -15,7 +15,7 @@ pub mod feature_flags;
 pub mod grpc_geyser;
 pub mod grpc_jet;
 pub mod grpc_lewis;
-pub mod event_tracker;
+pub mod transaction_events;
 pub mod metrics;
 pub mod payload;
 pub mod proto;

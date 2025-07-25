@@ -1,14 +1,9 @@
 use {
     crate::{
-        blockhash_queue::BlockHeightService,
-        cluster_tpu_info::ClusterTpuInfo,
-        grpc_geyser::{BlockMetaWithCommitment, GrpcUpdateMessage, TransactionReceived},
-        metrics::jet as metrics,
-        quic_gateway::{GatewayResponse, GatewayTransaction},
-        util::CommitmentLevel,
+        blockhash_queue::BlockHeightService, cluster_tpu_info::ClusterTpuInfo, transaction_events::EventReporter, grpc_geyser::{BlockMetaWithCommitment, GrpcUpdateMessage, TransactionReceived}, metrics::jet as metrics, quic_gateway::{GatewayResponse, GatewayTransaction}, util::CommitmentLevel
     },
     bytes::Bytes,
-    solana_clock::{MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES, Slot},
+    solana_clock::{Slot, MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES},
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_transaction::versioned::VersionedTransaction,
@@ -40,6 +35,7 @@ pub type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
 ///
 pub trait UpcomingLeaderSchedule {
     fn leader_lookahead(&self, leader_forward_lookahead: usize) -> Vec<Pubkey>;
+    fn get_current_slot(&self) -> Slot;
 }
 
 impl UpcomingLeaderSchedule for ClusterTpuInfo {
@@ -48,6 +44,10 @@ impl UpcomingLeaderSchedule for ClusterTpuInfo {
             .into_iter()
             .map(|tpu| tpu.leader)
             .collect()
+    }
+
+    fn get_current_slot(&self) -> Slot {
+        self.latest_seen_slot()
     }
 }
 
@@ -592,6 +592,7 @@ pub struct TransactionFanout {
     transaction_send_set: JoinSet<Result<Signature, SendTransactionError>>,
     transaction_send_set_meta: HashMap<task::Id, Signature>,
     inflight_transactions: HashSet<Signature>,
+    event_reporter: Option<Arc<dyn EventReporter>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -663,6 +664,7 @@ impl TransactionFanout {
         incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
         quic_gateway_bidi: QuicGatewayBidi,
         leader_fwd_count: usize,
+        event_reporter: Option<Arc<dyn EventReporter>>,
     ) -> Self {
         Self {
             leader_schedule_service,
@@ -674,6 +676,7 @@ impl TransactionFanout {
             transaction_send_set: JoinSet::new(),
             transaction_send_set_meta: HashMap::new(),
             inflight_transactions: HashSet::new(),
+            event_reporter,
         }
     }
 
@@ -771,11 +774,22 @@ impl TransactionFanout {
         let leader_fwd = self.leader_fwd_count;
         let gateway_sink = self.tx_gateway_sender.clone();
         let signature = tx.signature;
+        let event_reporter = self.event_reporter.clone();
         let send_fut = async move {
             let next_leaders = leader_schedule_service.leader_lookahead(leader_fwd);
+            let current_slot = leader_schedule_service.get_current_slot();
+
+            // Emit transaction received event
+            if let Some(reporter) = &event_reporter {
+                reporter.report_transaction_received(signature, next_leaders.clone(), current_slot);
+            }
 
             for dest in next_leaders {
                 if !policy_store_service.is_allowed(&tx.policies, &dest)? {
+                    // Report a skip event if lewis is enabled.
+                    if let Some(reporter) = &event_reporter {
+                        reporter.report_policy_skip(tx.signature, dest);
+                    }
                     metrics::sts_tpu_denied_inc_by(1);
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
                     continue;

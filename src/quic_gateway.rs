@@ -43,25 +43,19 @@
 //!
 use {
     crate::{
-        cluster_tpu_info::ClusterTpuInfo,
-        config::ConfigQuicTpuPort,
-        crypto_provider::crypto_provider,
-        identity::JetIdentitySyncMember,
-        metrics::{
+        cluster_tpu_info::ClusterTpuInfo, config::ConfigQuicTpuPort, crypto_provider::crypto_provider, transaction_events::EventReporter, identity::JetIdentitySyncMember, metrics::{
             self,
             jet::{
                 observe_leader_rtt, observe_send_transaction_e2e_latency, quic_send_attempts_inc,
                 set_leader_mtu,
             },
-        },
-        stake::StakeInfoMap,
+        }, stake::StakeInfoMap
     },
     bytes::Bytes,
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
-        ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
-        WriteError, crypto::rustls::QuicClientConfig,
+        crypto::rustls::QuicClientConfig, ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt, WriteError
     },
     solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
@@ -71,20 +65,19 @@ use {
     solana_signature::Signature,
     solana_signer::Signer,
     solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
-    solana_tls_utils::{QuicClientCertificate, SkipServerVerification, new_dummy_x509_certificate},
+    solana_tls_utils::{new_dummy_x509_certificate, QuicClientCertificate, SkipServerVerification},
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroUsize,
-        sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, Mutex as StdMutex},
         task::Poll,
         time::{Duration, Instant},
     },
     tokio::{
         runtime::Handle,
         sync::{
-            Barrier, Notify,
-            mpsc::{self},
+            mpsc::{self}, Barrier, Notify
         },
         task::{self, Id, JoinError, JoinHandle, JoinSet},
         time::interval,
@@ -416,6 +409,8 @@ pub(crate) struct TokioQuicGatewayRuntime {
     /// Next leader prediction deadline.
     ///
     next_leader_prediction_deadline: Instant,
+
+    event_reporter: Option<Arc<dyn EventReporter>>,
 }
 
 pub trait LeaderTpuInfoService {
@@ -614,6 +609,7 @@ struct QuicTxSenderWorker {
     // and if a connection is idle for 2s it will be closed anyway, moreover remote validator could technically decide to kick us off
     #[allow(dead_code)]
     tx_send_timeout: Duration,
+    event_reporter: Option<Arc<dyn EventReporter>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -636,6 +632,7 @@ impl QuicTxSenderWorker {
         let tx = self.tx_map.get(&tx_sig).expect("tx should be in tx_map");
         let remote_peer_identity = tx.remote_peer;
         let t = Instant::now();
+
         for attempt in 1..=self.max_tx_attempt.get() {
             let mut uni = self.connection.open_uni().await?;
             let result = uni.write_all(&tx.wire).await.map_err(|e| match e {
@@ -646,6 +643,17 @@ impl QuicTxSenderWorker {
                 WriteError::ClosedStream => SendTxError::StreamClosed,
                 WriteError::ZeroRttRejected => SendTxError::ZeroRttRejected,
             });
+
+            // Report the send attempt to the lewis event reporter if enabled.
+            if let Some(reporter) = &self.event_reporter {
+                reporter.report_send_attempt(
+                    tx_sig,
+                    remote_peer_identity,
+                    self.connection.remote_address(),
+                    attempt as u8,
+                    result.as_ref().map(|_| ()).map_err(|e| e.to_string()),
+                );
+            }
 
             if let Err(e) = result {
                 if attempt == self.max_tx_attempt.get()
@@ -827,7 +835,7 @@ pub trait ConnectionEvictionStrategy {
     ///
     /// Post Conditions:
     ///
-    /// 0 <= eviction plan length <= `plan_ahead_size`.  
+    /// 0 <= eviction plan length <= `plan_ahead_size`.
     ///
     fn plan_eviction(
         &self,
@@ -942,37 +950,37 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
 
 /// Here's the simplified flow of a transaction through the QUIC gateway:
 ///
-///  ┌────────────┐      ┌────────────┐       ┌───────────────┐                           
+///  ┌────────────┐      ┌────────────┐       ┌───────────────┐
 ///  │Transaction │      │  QUIC      │       │ TxSenderWorker│        (Remote Validator)
-///  │ Source     ┼──1──►│ Gateway    ┼──2────►               ┼──3────►                   
-///  └────────────┘      └────▲───────┘       └─────┬─────────┘                           
-///                           │                     │                                     
-///                           │                     │                                     
+///  │ Source     ┼──1──►│ Gateway    ┼──2────►               ┼──3────►
+///  └────────────┘      └────▲───────┘       └─────┬─────────┘
+///                           │                     │
+///                           │                     │
 ///                           └───────4*─Failure────┘
 ///
 ///
 /// Lazy connection establishment:
-///                                                        
-///  ┌───────────────┐                                     
-///  │New Transaction│                                     
-///  │  for Peer "X" │                                     
-///  └───────┬───────┘                                     
-///          forward                                        
-///          │                                             
+///
+///  ┌───────────────┐
+///  │New Transaction│
+///  │  for Peer "X" │
+///  └───────┬───────┘
+///          forward
+///          │
 ///   ┌──────▼─────────┐           ┌─────────────────────┐
 ///   │ Do I have a    │           │    Send it to       │
 ///   │a TxSenderWorker┼───Yes─────►TxSenderWork(#peer X)│
 ///   │ for Peer "X"?  │           └─────────────────────┘
-///   └──────┬─────────┘                                   
-///          No                                            
-///          │                                             
-///   ┌──────▼────────────┐                                
-///   │  Queue the        │                                
-///   │ transaction       │                                
-///   │  and schedule     │                                
-///   │ connection attempt│                                
-///   │  to peer "X"      │                                
-///   └───────────────────┘                     
+///   └──────┬─────────┘
+///          No
+///          │
+///   ┌──────▼────────────┐
+///   │  Queue the        │
+///   │ transaction       │
+///   │  and schedule     │
+///   │ connection attempt│
+///   │  to peer "X"      │
+///   └───────────────────┘
 ///
 impl TokioQuicGatewayRuntime {
     ///
@@ -1159,6 +1167,7 @@ impl TokioQuicGatewayRuntime {
             max_tx_attempt: self.config.max_send_attempt,
             tx_send_timeout: self.config.send_timeout,
             tx_map: Default::default(),
+            event_reporter: self.event_reporter.clone(),
         };
 
         let worker_fut = worker.run();
@@ -1219,6 +1228,25 @@ impl TokioQuicGatewayRuntime {
                     }
                     Err(connect_err) => {
                         metrics::jet::incr_quic_gw_connection_failure_cnt();
+
+                        // Report the connection failure to the event reporter if available.
+                        if let Some(reporter) = &self.event_reporter {
+                            if let Some(tpu_addr) = self.leader_tpu_info_service
+                                .get_quic_dest_addr(remote_peer_identity, self.config.tpu_port_kind)
+                            {
+                                if let Some(tx_queue) = self.tx_queues.get(&remote_peer_identity) {
+                                    for tx in tx_queue {
+                                        reporter.report_connection_failed(
+                                            tx.tx_sig,
+                                            remote_peer_identity,
+                                            tpu_addr,
+                                            format!("Connection failed: {:?}", connect_err),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         match connect_err {
                             ConnectingError::ConnectError(
                                 quinn::ConnectError::EndpointStopping,
@@ -1364,6 +1392,13 @@ impl TokioQuicGatewayRuntime {
                     .tx_worker_task_meta_map
                     .remove(&id)
                     .expect("tx worker meta");
+
+                let worker_handle = self
+                    .tx_worker_handle_map
+                    .get(&remote_peer_identity)
+                    .expect("tx worker sender");
+                let remote_peer_addr = worker_handle.remote_peer_addr;
+
                 self.active_staked_sorted_remote_peer
                     .remove(&remote_peer_identity);
                 self.remote_peer_addr_watcher.forget(remote_peer_identity);
@@ -1384,6 +1419,32 @@ impl TokioQuicGatewayRuntime {
                     worker_completed.canceled,
                     is_evicted_conn
                 );
+
+                if let Some(TxSenderWorkerError::ConnectionLost(ref err)) = worker_completed.err {
+                    if let Some(reporter) = &self.event_reporter {
+                        // Emit for pending transactions that were in flight
+                        for tx in &worker_completed.pending_tx {
+                            reporter.report_connection_failed(
+                                tx.tx_sig,
+                                remote_peer_identity,
+                                remote_peer_addr,
+                                format!("Connection lost: {:?}", err),
+                            );
+                        }
+
+                        // Also check for any transactions still in the worker's channel
+                        while let Ok(tx) = worker_completed.rx.try_recv() {
+                            reporter.report_connection_failed(
+                                tx.tx_sig,
+                                remote_peer_identity,
+                                remote_peer_addr,
+                                format!("Connection lost: {:?}", err),
+                            );
+                            // Add to pending_tx so it gets rescued below
+                            worker_completed.pending_tx.push_back(tx);
+                        }
+                    }
+                }
 
                 // It's possible that the worker failed while having pending transactions.
                 // We need to "rescue" those transactions if any and if the worker didn't fail due to fatal errors.
@@ -1937,6 +1998,7 @@ pub struct TokioQuicGatewaySpawner {
     pub stake_info_map: StakeInfoMap,
     pub leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     pub gateway_tx_channel_capacity: usize,
+    pub event_reporter: Option<Arc<dyn EventReporter>>,
 }
 
 impl TokioQuicGatewaySpawner {
@@ -2042,6 +2104,7 @@ impl TokioQuicGatewaySpawner {
             remote_peer_addr_watcher,
             leader_predictor,
             next_leader_prediction_deadline: Instant::now(),
+            event_reporter: self.event_reporter.clone(),
         };
 
         let jh = gateway_rt.spawn(gateway_runtime.run());

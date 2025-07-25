@@ -257,6 +257,49 @@ pub mod jet {
             "quic_gw_leader_prediction_miss",
             "Number of times the leader prediction was uselessly used to proactively connect to a remote peer"
         ).unwrap();
+
+        // Lewis Metrics
+        static ref LEWIS_EVENT_CHANNEL_CLOSED: IntCounter = IntCounter::new(
+            "lewis_event_channel_closed_total",
+            "Number of times lewis event channel was closed when trying to send"
+        ).unwrap();
+
+        static ref LEWIS_EVENT_AGGREGATOR_QUEUE_SIZE: IntGauge = IntGauge::new(
+            "lewis_event_aggregator_queue_size",
+            "Number of events waiting in aggregator queue"
+        ).unwrap();
+
+        static ref LEWIS_EVENT_AGGREGATOR_TRACKING_SIZE: IntGauge = IntGauge::new(
+            "lewis_event_aggregator_tracking_size",
+            "Number of transactions being tracked"
+        ).unwrap();
+
+        static ref LEWIS_EVENT_AGGREGATOR_TIMEOUT_TOTAL: IntCounter = IntCounter::new(
+            "lewis_event_aggregator_timeout_total",
+            "Number of transactions sent due to timeout"
+        ).unwrap();
+
+        static ref LEWIS_EVENT_AGGREGATOR_COMPLETED_TOTAL: IntCounter = IntCounter::new(
+            "lewis_event_aggregator_completed_total",
+            "Number of transactions completed normally"
+        ).unwrap();
+
+        static ref LEWIS_EVENT_AGGREGATOR_DROPPED_TOTAL: IntCounter = IntCounter::new(
+            "lewis_event_aggregator_dropped_total",
+            "Number of events dropped due to buffer full"
+        ).unwrap();
+        static ref LEWIS_EVENT_AGGREGATOR_ORPHANED_EVENTS: IntCounterVec = IntCounterVec::new(
+            Opts::new(
+                "lewis_event_aggregator_orphaned_events_total",
+                "Number of events received without a preceding TransactionReceived event"
+            ),
+            &["event_type"]
+        ).unwrap();
+
+        static ref LEWIS_EVENT_AGGREGATOR_DUPLICATE_TRANSACTION: IntCounter = IntCounter::new(
+            "lewis_event_aggregator_duplicate_transaction_total",
+            "Number of duplicate TransactionReceived events"
+        ).unwrap();
     }
 
     pub fn incr_quic_gw_leader_prediction_hit() {
@@ -371,6 +414,16 @@ pub mod jet {
             register!(QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED);
             register!(QUIC_GW_LEADER_PREDICTION_HIT);
             register!(QUIC_GW_LEADER_PREDICTION_MISS);
+
+            // Lewis Metrics
+            register!(LEWIS_EVENT_CHANNEL_CLOSED);
+            register!(LEWIS_EVENT_AGGREGATOR_QUEUE_SIZE);
+            register!(LEWIS_EVENT_AGGREGATOR_TRACKING_SIZE);
+            register!(LEWIS_EVENT_AGGREGATOR_TIMEOUT_TOTAL);
+            register!(LEWIS_EVENT_AGGREGATOR_COMPLETED_TOTAL);
+            register!(LEWIS_EVENT_AGGREGATOR_DROPPED_TOTAL);
+            register!(LEWIS_EVENT_AGGREGATOR_ORPHANED_EVENTS);
+            register!(LEWIS_EVENT_AGGREGATOR_DUPLICATE_TRANSACTION);
         });
     }
 
@@ -581,5 +634,40 @@ pub mod jet {
                 .with_label_values(&[endpoint.as_ref()])
                 .set(0);
         }
+    }
+
+    // Lewis Metrics
+    pub fn lewis_event_channel_closed_inc() {
+        LEWIS_EVENT_CHANNEL_CLOSED.inc();
+    }
+
+    pub fn lewis_event_aggregator_queue_size_set(size: usize) {
+        LEWIS_EVENT_AGGREGATOR_QUEUE_SIZE.set(size as i64);
+    }
+
+    pub fn lewis_event_aggregator_tracking_size_set(size: usize) {
+        LEWIS_EVENT_AGGREGATOR_TRACKING_SIZE.set(size as i64);
+    }
+
+    pub fn lewis_event_aggregator_timeout_inc() {
+        LEWIS_EVENT_AGGREGATOR_TIMEOUT_TOTAL.inc();
+    }
+
+    pub fn lewis_event_aggregator_completed_inc() {
+        LEWIS_EVENT_AGGREGATOR_COMPLETED_TOTAL.inc();
+    }
+
+    pub fn lewis_event_aggregator_dropped_inc() {
+        LEWIS_EVENT_AGGREGATOR_DROPPED_TOTAL.inc();
+    }
+
+    pub fn lewis_event_aggregator_orphaned_events_inc(event_type: &str) {
+        LEWIS_EVENT_AGGREGATOR_ORPHANED_EVENTS
+            .with_label_values(&[event_type])
+            .inc();
+    }
+
+    pub fn lewis_event_aggregator_duplicate_transaction_inc() {
+        LEWIS_EVENT_AGGREGATOR_DUPLICATE_TRANSACTION.inc();
     }
 }
