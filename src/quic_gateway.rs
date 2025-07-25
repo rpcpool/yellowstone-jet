@@ -418,6 +418,9 @@ pub(crate) struct TokioQuicGatewayRuntime {
     ///
     next_leader_prediction_deadline: Instant,
 
+    ///
+    /// Event reporter to report events to lewis.
+    ///
     event_reporter: Option<Arc<dyn EventReporter>>,
 }
 
