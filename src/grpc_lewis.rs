@@ -1,6 +1,9 @@
 use {
     crate::{
-        config::ConfigLewisEvents, metrics::jet as metrics, proto::lewis::{transaction_tracker_client::TransactionTrackerClient, Event, EventAck}, transaction_events::{TransactionEvent, TransactionEventTracker}
+        config::ConfigLewisEvents,
+        metrics::jet as metrics,
+        proto::lewis::{Event, EventAck, transaction_tracker_client::TransactionTrackerClient},
+        transaction_events::{TransactionEvent, TransactionEventTracker},
     },
     anyhow::Context,
     futures::SinkExt,
@@ -65,12 +68,10 @@ impl LewisEventClient {
         };
 
         let (tx, rx) = mpsc::channel(config.queue_size_buffer);
-        let inner = Arc::new(RealLewisClient {
-            tx: Some(tx),
-        });
+        let inner = Arc::new(RealLewisClient { tx: Some(tx) });
         let client = Arc::new(Self {
             inner,
-            jet_id: config.jet_id.clone()
+            jet_id: config.jet_id.clone(),
         });
 
         let tracker = client;
@@ -84,7 +85,10 @@ impl LewisEventClient {
     }
 
     pub fn new_mock(mock_impl: Arc<dyn LewisEventClientImpl>, jet_id: Option<String>) -> Self {
-        Self { inner: mock_impl, jet_id }
+        Self {
+            inner: mock_impl,
+            jet_id,
+        }
     }
 
     async fn run_event_loop(
@@ -261,7 +265,10 @@ pub mod event_builders {
                 TransactionEvent::TransactionReceived { .. } => {
                     // Skip - this is metadata, not a send attempt
                 }
-                TransactionEvent::PolicySkipped { validator, timestamp } => {
+                TransactionEvent::PolicySkipped {
+                    validator,
+                    timestamp,
+                } => {
                     self.jet_sends.push(JetSend {
                         validator: validator.to_string(),
                         ts: timestamp,
@@ -289,7 +296,7 @@ pub mod event_builders {
                     validator,
                     tpu_addr,
                     error,
-                    timestamp
+                    timestamp,
                 } => {
                     self.jet_sends.push(JetSend {
                         validator: validator.to_string(),
@@ -323,10 +330,7 @@ pub mod event_builders {
 mod tests {
     use {
         super::*,
-        crate::{
-            proto::lewis::event::Event as ProtoEvent,
-            transaction_events::TransactionEvent,
-        },
+        crate::{proto::lewis::event::Event as ProtoEvent, transaction_events::TransactionEvent},
         solana_pubkey::Pubkey,
         std::{
             net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -408,7 +412,10 @@ mod tests {
         let mock_impl = Arc::new(MockLewisClientImpl {
             events: Arc::new(Mutex::new(Vec::new())),
         });
-        let client = LewisEventClient::new_mock(mock_impl.clone(), Some("test-jet".to_string()));
+        let client = LewisEventClient::new_mock(
+            Arc::<MockLewisClientImpl>::clone(&mock_impl),
+            Some("test-jet".to_string()),
+        );
 
         let sig = Signature::new_unique();
         let validator = Pubkey::new_unique();

@@ -43,19 +43,26 @@
 //!
 use {
     crate::{
-        cluster_tpu_info::ClusterTpuInfo, config::ConfigQuicTpuPort, crypto_provider::crypto_provider, transaction_events::EventReporter, identity::JetIdentitySyncMember, metrics::{
+        cluster_tpu_info::ClusterTpuInfo,
+        config::ConfigQuicTpuPort,
+        crypto_provider::crypto_provider,
+        identity::JetIdentitySyncMember,
+        metrics::{
             self,
             jet::{
                 observe_leader_rtt, observe_send_transaction_e2e_latency, quic_send_attempts_inc,
                 set_leader_mtu,
             },
-        }, stake::StakeInfoMap
+        },
+        stake::StakeInfoMap,
+        transaction_events::EventReporter,
     },
     bytes::Bytes,
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
-        crypto::rustls::QuicClientConfig, ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt, WriteError
+        ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
+        WriteError, crypto::rustls::QuicClientConfig,
     },
     solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
@@ -65,19 +72,20 @@ use {
     solana_signature::Signature,
     solana_signer::Signer,
     solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
-    solana_tls_utils::{new_dummy_x509_certificate, QuicClientCertificate, SkipServerVerification},
+    solana_tls_utils::{QuicClientCertificate, SkipServerVerification, new_dummy_x509_certificate},
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroUsize,
-        sync::{atomic::AtomicBool, Arc, Mutex as StdMutex},
+        sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
         task::Poll,
         time::{Duration, Instant},
     },
     tokio::{
         runtime::Handle,
         sync::{
-            mpsc::{self}, Barrier, Notify
+            Barrier, Notify,
+            mpsc::{self},
         },
         task::{self, Id, JoinError, JoinHandle, JoinSet},
         time::interval,
@@ -1231,7 +1239,8 @@ impl TokioQuicGatewayRuntime {
 
                         // Report the connection failure to the event reporter if available.
                         if let Some(reporter) = &self.event_reporter {
-                            if let Some(tpu_addr) = self.leader_tpu_info_service
+                            if let Some(tpu_addr) = self
+                                .leader_tpu_info_service
                                 .get_quic_dest_addr(remote_peer_identity, self.config.tpu_port_kind)
                             {
                                 if let Some(tx_queue) = self.tx_queues.get(&remote_peer_identity) {

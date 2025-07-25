@@ -24,14 +24,12 @@
 //! memory leaks from transactions that never complete.
 
 use {
-    crate::{
-        config::ConfigLewisEvents, grpc_lewis::LewisEventClient, metrics::jet as metrics
-    },
+    crate::{config::ConfigLewisEvents, grpc_lewis::LewisEventClient, metrics::jet as metrics},
     solana_clock::Slot,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     std::{
-        collections::{HashMap, HashSet},
+        collections::{HashMap, HashSet, hash_map::Entry},
         net::SocketAddr,
         sync::Arc,
         time::{Instant, SystemTime},
@@ -52,10 +50,7 @@ pub enum TransactionEvent {
         timestamp: i64,
     },
     /// Transaction skipped for a validator due to policy
-    PolicySkipped {
-        validator: Pubkey,
-        timestamp: i64,
-    },
+    PolicySkipped { validator: Pubkey, timestamp: i64 },
     /// Attempt to send transaction to a validator
     SendAttempt {
         validator: Pubkey,
@@ -100,7 +95,7 @@ impl TransactionEvent {
         validator: Pubkey,
         tpu_addr: SocketAddr,
         attempt_num: u8,
-        result: Result<(), String>
+        result: Result<(), String>,
     ) -> Self {
         Self::SendAttempt {
             validator,
@@ -130,14 +125,14 @@ pub trait EventReporter: Send + Sync {
         validator: Pubkey,
         tpu_addr: SocketAddr,
         attempt_num: u8,
-        result: Result<(), String>
+        result: Result<(), String>,
     );
     fn report_connection_failed(
         &self,
         signature: Signature,
         validator: Pubkey,
         tpu_addr: SocketAddr,
-        error: String
+        error: String,
     );
 }
 
@@ -155,21 +150,32 @@ pub struct EventChannelReporter {
 }
 
 impl EventChannelReporter {
-    pub fn new(tx: mpsc::UnboundedSender<(Signature, TransactionEvent)>) -> Self {
+    pub const fn new(tx: mpsc::UnboundedSender<(Signature, TransactionEvent)>) -> Self {
         Self { tx }
     }
 }
 
 impl EventReporter for EventChannelReporter {
     fn report_transaction_received(&self, signature: Signature, leaders: Vec<Pubkey>, slot: Slot) {
-        if let Err(_) = self.tx.send((signature, TransactionEvent::transaction_received(leaders, slot))) {
+        if self
+            .tx
+            .send((
+                signature,
+                TransactionEvent::transaction_received(leaders, slot),
+            ))
+            .is_err()
+        {
             tracing::warn!("Failed to report transaction received: channel closed");
             metrics::lewis_event_channel_closed_inc();
         }
     }
 
     fn report_policy_skip(&self, signature: Signature, validator: Pubkey) {
-        if let Err(_) = self.tx.send((signature, TransactionEvent::policy_skipped(validator))) {
+        if self
+            .tx
+            .send((signature, TransactionEvent::policy_skipped(validator)))
+            .is_err()
+        {
             tracing::warn!("Failed to report policy skip: channel closed");
             metrics::lewis_event_channel_closed_inc();
         }
@@ -181,12 +187,16 @@ impl EventReporter for EventChannelReporter {
         validator: Pubkey,
         tpu_addr: SocketAddr,
         attempt_num: u8,
-        result: Result<(), String>
+        result: Result<(), String>,
     ) {
-        if let Err(_) = self.tx.send((
-            signature,
-            TransactionEvent::send_attempt(validator, tpu_addr, attempt_num, result)
-        )) {
+        if self
+            .tx
+            .send((
+                signature,
+                TransactionEvent::send_attempt(validator, tpu_addr, attempt_num, result),
+            ))
+            .is_err()
+        {
             tracing::warn!("Failed to report send attempt: channel closed");
             metrics::lewis_event_channel_closed_inc();
         }
@@ -197,12 +207,16 @@ impl EventReporter for EventChannelReporter {
         signature: Signature,
         validator: Pubkey,
         tpu_addr: SocketAddr,
-        error: String
+        error: String,
     ) {
-        if let Err(_) = self.tx.send((
-            signature,
-            TransactionEvent::connection_failed(validator, tpu_addr, error)
-        )) {
+        if self
+            .tx
+            .send((
+                signature,
+                TransactionEvent::connection_failed(validator, tpu_addr, error),
+            ))
+            .is_err()
+        {
             tracing::warn!("Failed to report connection failure: channel closed");
             metrics::lewis_event_channel_closed_inc();
         }
@@ -211,6 +225,7 @@ impl EventReporter for EventChannelReporter {
 
 /// Creates the complete Lewis event tracking pipeline if configured.
 /// Returns the event reporter for components to emit events, and futures for the aggregator and Lewis client.
+#[allow(clippy::type_complexity)]
 pub fn create_lewis_event_pipeline(
     config: Option<ConfigLewisEvents>,
     max_retries: usize,
@@ -232,12 +247,8 @@ pub fn create_lewis_event_pipeline(
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx)) as Arc<dyn EventReporter>;
 
-    let aggregator_fut = transaction_event_aggregator_loop(
-        event_rx,
-        lewis_client,
-        config,
-        max_retries,
-    );
+    let aggregator_fut =
+        transaction_event_aggregator_loop(event_rx, lewis_client, config, max_retries);
 
     (Some(event_reporter), Some(aggregator_fut), lewis_fut)
 }
@@ -255,17 +266,15 @@ struct TransactionTracking {
 impl TransactionTracking {
     fn new(signature: Signature, event: TransactionEvent) -> Option<Self> {
         match &event {
-            TransactionEvent::TransactionReceived { leaders, slot, .. } => {
-                Some(Self {
-                    signature,
-                    slot: *slot,
-                    leaders: leaders.clone(),
-                    events: vec![event],
-                    created_at: Instant::now(),
-                    completed_validators: HashSet::new(),
-                    validator_attempt_count: HashMap::new(),
-                })
-            }
+            TransactionEvent::TransactionReceived { leaders, slot, .. } => Some(Self {
+                signature,
+                slot: *slot,
+                leaders: leaders.clone(),
+                events: vec![event],
+                created_at: Instant::now(),
+                completed_validators: HashSet::new(),
+                validator_attempt_count: HashMap::new(),
+            }),
             _ => {
                 tracing::warn!("First event must be TransactionReceived for {}", signature);
                 None
@@ -284,13 +293,13 @@ impl TransactionTracking {
             TransactionEvent::ConnectionFailed { validator, .. } => {
                 self.completed_validators.insert(*validator);
             }
-            TransactionEvent::SendAttempt { validator, result, .. } => {
+            TransactionEvent::SendAttempt {
+                validator, result, ..
+            } => {
                 if result.is_ok() {
                     self.completed_validators.insert(*validator);
                 } else {
-                    let count = self.validator_attempt_count
-                        .entry(*validator)
-                        .or_insert(0);
+                    let count = self.validator_attempt_count.entry(*validator).or_insert(0);
                     *count += 1;
                     if *count >= max_retries {
                         self.completed_validators.insert(*validator);
@@ -326,47 +335,60 @@ pub async fn transaction_event_aggregator_loop(
         metrics::lewis_event_aggregator_tracking_size_set(trackers.len());
 
         tokio::select! {
-            Some((sig, event)) = event_rx.recv() => {
-                match &event {
-                    TransactionEvent::TransactionReceived { .. } => {
-                        if trackers.contains_key(&sig) {
-                            tracing::debug!("Duplicate TransactionReceived for {} - ignoring", sig);
-                            metrics::lewis_event_aggregator_duplicate_transaction_inc();
-                        } else if let Some(tracker) = TransactionTracking::new(sig, event) {
-                            trackers.insert(sig, tracker);
-                        }
-                    }
-                    _ => {
-                        if let Some(tracker) = trackers.get_mut(&sig) {
-                            let is_complete = tracker.add_event(event, transaction_max_retries);
-
-                            if is_complete {
-                                // Complete - send immediately
-                                if let Some(tracker) = trackers.remove(&sig) {
-                                    lewis_client.track_transaction_send(
-                                        &tracker.signature,
-                                        tracker.slot,
-                                        tracker.events
-                                    );
-                                    metrics::lewis_event_aggregator_completed_inc();
+            maybe_event = event_rx.recv() => {
+                match maybe_event {
+                    Some((sig, event)) => {
+                        match &event {
+                            TransactionEvent::TransactionReceived { .. } => {
+                                match trackers.entry(sig) {
+                                    Entry::Occupied(_) => {
+                                        tracing::debug!("Duplicate TransactionReceived for {} - ignoring", sig);
+                                        metrics::lewis_event_aggregator_duplicate_transaction_inc();
+                                    }
+                                    Entry::Vacant(entry) => {
+                                        if let Some(tracker) = TransactionTracking::new(sig, event) {
+                                            entry.insert(tracker);
+                                        }
+                                    }
                                 }
                             }
-                        } else {
-                            let event_type = match &event {
-                                TransactionEvent::PolicySkipped { .. } => "policy_skipped",
-                                TransactionEvent::SendAttempt { .. } => "send_attempt",
-                                TransactionEvent::ConnectionFailed { .. } => "connection_failed",
-                                TransactionEvent::TransactionReceived { .. } => unreachable!(),
-                            };
+                            _ => {
+                                if let Some(tracker) = trackers.get_mut(&sig) {
+                                    let is_complete = tracker.add_event(event, transaction_max_retries);
 
-                            tracing::debug!(
-                                "Orphaned {} event for {} - missing TransactionReceived",
-                                event_type,
-                                sig
-                            );
+                                    if is_complete {
+                                        // Complete - send immediately
+                                        if let Some(tracker) = trackers.remove(&sig) {
+                                            lewis_client.track_transaction_send(
+                                                &tracker.signature,
+                                                tracker.slot,
+                                                tracker.events
+                                            );
+                                            metrics::lewis_event_aggregator_completed_inc();
+                                        }
+                                    }
+                                } else {
+                                    let event_type = match &event {
+                                        TransactionEvent::PolicySkipped { .. } => "policy_skipped",
+                                        TransactionEvent::SendAttempt { .. } => "send_attempt",
+                                        TransactionEvent::ConnectionFailed { .. } => "connection_failed",
+                                        TransactionEvent::TransactionReceived { .. } => unreachable!(),
+                                    };
 
-                            metrics::lewis_event_aggregator_orphaned_events_inc(event_type);
+                                    tracing::debug!(
+                                        "Orphaned {} event for {} - missing TransactionReceived",
+                                        event_type,
+                                        sig
+                                    );
+
+                                    metrics::lewis_event_aggregator_orphaned_events_inc(event_type);
+                                }
+                            }
                         }
+                    }
+                    None => {
+                        // Channel closed, exit loop
+                        break;
                     }
                 }
             }
@@ -392,8 +414,6 @@ pub async fn transaction_event_aggregator_loop(
                     }
                 }
             }
-
-            else => break,
         }
     }
 

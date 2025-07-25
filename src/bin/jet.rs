@@ -1,6 +1,5 @@
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
-use yellowstone_jet::transaction_events::create_lewis_event_pipeline;
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
@@ -29,7 +28,7 @@ use {
         sync::{Mutex, oneshot, watch},
         task::JoinHandle,
     },
-    tracing::{info, warn, error},
+    tracing::{error, info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
@@ -48,6 +47,7 @@ use {
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         task_group::TaskGroup,
+        transaction_events::create_lewis_event_pipeline,
         transaction_handler::TransactionHandler,
         transactions::{
             AlwaysAllowTransactionPolicyStore, GrpcRootedTxReceiver, QuicGatewayBidi,

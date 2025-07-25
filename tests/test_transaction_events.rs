@@ -6,17 +6,19 @@ use {
         sync::{Arc, Mutex},
         time::Duration,
     },
-    tokio::{sync::mpsc, time::{sleep, timeout}},
+    tokio::{
+        sync::mpsc,
+        time::{sleep, timeout},
+    },
     yellowstone_jet::{
         config::ConfigLewisEvents,
         grpc_lewis::{LewisEventClient, LewisEventClientImpl},
         proto::lewis::{Event, event::Event as ProtoEvent},
         transaction_events::{
-            transaction_event_aggregator_loop, EventChannelReporter, EventReporter,
+            EventChannelReporter, EventReporter, transaction_event_aggregator_loop,
         },
     },
 };
-
 
 /// Simple mock Lewis client implementation that just counts events
 #[derive(Clone)]
@@ -65,7 +67,7 @@ fn make_test_config() -> ConfigLewisEvents {
     }
 }
 
-fn make_test_addr() -> SocketAddr {
+const fn make_test_addr() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000)
 }
 
@@ -74,8 +76,8 @@ async fn test_basic_transaction_flow_single_validator() {
     let config = make_test_config();
     let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
     let lewis_client = Arc::new(LewisEventClient::new_mock(
-        mock_impl.clone(),
-        Some("test-jet".to_string())
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
     ));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx));
@@ -113,8 +115,8 @@ async fn test_multiple_validators_with_mixed_results() {
     let config = make_test_config();
     let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
     let lewis_client = Arc::new(LewisEventClient::new_mock(
-        mock_impl.clone(),
-        Some("test-jet".to_string())
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
     ));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx));
@@ -142,7 +144,12 @@ async fn test_multiple_validators_with_mixed_results() {
     event_reporter.report_send_attempt(sig, validator2, make_test_addr(), 1, Ok(()));
 
     // Validator 3: Connection failed
-    event_reporter.report_connection_failed(sig, validator3, make_test_addr(), "timeout".to_string());
+    event_reporter.report_connection_failed(
+        sig,
+        validator3,
+        make_test_addr(),
+        "timeout".to_string(),
+    );
 
     // Wait for completion
     sleep(Duration::from_millis(100)).await;
@@ -160,8 +167,8 @@ async fn test_retry_attempts_until_max_retries() {
     let config = make_test_config();
     let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
     let lewis_client = Arc::new(LewisEventClient::new_mock(
-        mock_impl.clone(),
-        Some("test-jet".to_string())
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
     ));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx));
@@ -205,12 +212,13 @@ async fn test_retry_attempts_until_max_retries() {
 #[tokio::test]
 async fn test_timeout_handling() {
     let mut config = make_test_config();
-    config.aggregation_timeout = Duration::from_millis(500); // Short timeout
+    config.aggregation_timeout = Duration::from_millis(200);
+    config.check_interval = Duration::from_millis(50);
 
     let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
     let lewis_client = Arc::new(LewisEventClient::new_mock(
-        mock_impl.clone(),
-        Some("test-jet".to_string())
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
     ));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx));
@@ -233,10 +241,8 @@ async fn test_timeout_handling() {
     // Only send event for validator1
     event_reporter.report_send_attempt(sig, validator1, make_test_addr(), 1, Ok(()));
 
-    // Don't send anything for validator2 - should timeout
-
-    // Wait for timeout
-    sleep(Duration::from_secs(1)).await;
+    // Wait longer than timeout + check interval
+    sleep(Duration::from_millis(300)).await;
 
     // Should have sent incomplete transaction due to timeout
     assert_eq!(mock_impl.get_event_count(), 1);
@@ -251,8 +257,8 @@ async fn test_orphaned_events() {
     let config = make_test_config();
     let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
     let lewis_client = Arc::new(LewisEventClient::new_mock(
-        mock_impl.clone(),
-        Some("test-jet".to_string())
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
     ));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx));
@@ -298,8 +304,8 @@ async fn test_duplicate_transaction_received() {
     let config = make_test_config();
     let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
     let lewis_client = Arc::new(LewisEventClient::new_mock(
-        mock_impl.clone(),
-        Some("test-jet".to_string())
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
     ));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx));
@@ -317,20 +323,16 @@ async fn test_duplicate_transaction_received() {
 
     // Send first TransactionReceived
     event_reporter.report_transaction_received(sig, vec![validator], slot);
+
+    // Send duplicate before completing the first one
+    event_reporter.report_transaction_received(sig, vec![validator], slot);
+
+    // Now complete the first transaction
     event_reporter.report_send_attempt(sig, validator, make_test_addr(), 1, Ok(()));
 
     sleep(Duration::from_millis(100)).await;
 
-    // First transaction should be complete
-    assert_eq!(mock_impl.get_event_count(), 1);
-
-    // Send duplicate TransactionReceived - should be ignored
-    event_reporter.report_transaction_received(sig, vec![validator], slot);
-    event_reporter.report_send_attempt(sig, validator, make_test_addr(), 2, Ok(()));
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Should still only have sent one transaction
+    // Should only have one transaction (duplicate was ignored)
     assert_eq!(mock_impl.get_event_count(), 1);
     assert_eq!(mock_impl.get_signatures(), vec![sig]);
 
@@ -343,8 +345,8 @@ async fn test_incremental_completion_tracking() {
     let config = make_test_config();
     let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
     let lewis_client = Arc::new(LewisEventClient::new_mock(
-        mock_impl.clone(),
-        Some("test-jet".to_string())
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
     ));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx));
@@ -394,11 +396,13 @@ async fn test_incremental_completion_tracking() {
 
 #[tokio::test]
 async fn test_shutdown_sends_remaining_events() {
-    let config = make_test_config();
+    let mut config = make_test_config();
+    config.check_interval = Duration::from_millis(50);
+
     let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
     let lewis_client = Arc::new(LewisEventClient::new_mock(
-        mock_impl.clone(),
-        Some("test-jet".to_string())
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
     ));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx));
@@ -419,11 +423,14 @@ async fn test_shutdown_sends_remaining_events() {
     event_reporter.report_send_attempt(sig, validator1, make_test_addr(), 1, Ok(()));
     // Don't complete validator2
 
+    // Give it a moment to process
+    sleep(Duration::from_millis(50)).await;
+
     // Drop reporter to close channel
     drop(event_reporter);
 
-    // Aggregator should shutdown and send remaining
-    let _ = timeout(Duration::from_secs(1), aggregator_handle).await;
+    // Wait for aggregator to finish and send remaining
+    let _ = aggregator_handle.await;
 
     // Should have sent incomplete transaction
     assert_eq!(mock_impl.get_event_count(), 1);
@@ -435,8 +442,8 @@ async fn test_multiple_transactions_concurrent() {
     let config = make_test_config();
     let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
     let lewis_client = Arc::new(LewisEventClient::new_mock(
-        mock_impl.clone(),
-        Some("test-jet".to_string())
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
     ));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_reporter = Arc::new(EventChannelReporter::new(event_tx));

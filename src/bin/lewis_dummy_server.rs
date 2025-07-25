@@ -5,13 +5,13 @@ use {
         net::SocketAddr,
         sync::atomic::{AtomicU64, Ordering},
     },
-    tonic::{transport::server::Server, Request, Response, Status, Streaming},
+    tonic::{Request, Response, Status, Streaming, transport::server::Server},
     tracing::{error, info},
     yellowstone_jet::{
         proto::lewis::{
+            Event, EventAck,
             event::Event as EventType,
             transaction_tracker_server::{TransactionTracker, TransactionTrackerServer},
-            Event, EventAck,
         },
         setup_tracing,
     },

@@ -3,18 +3,30 @@ use {
         feature_flags::FeatureSet,
         quic_gateway::{DEFAULT_LEADER_DURATION, DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT},
         util::CommitmentLevel,
-    }, anyhow::Context, serde::{
-        de::{self, Deserializer}, Deserialize
-    }, solana_keypair::{read_keypair_file, Keypair}, solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE}, solana_pubkey::Pubkey, solana_quic_definitions::{
+    },
+    anyhow::Context,
+    serde::{
+        Deserialize,
+        de::{self, Deserializer},
+    },
+    solana_keypair::{Keypair, read_keypair_file},
+    solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
+    solana_pubkey::Pubkey,
+    solana_quic_definitions::{
         QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
         QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
-    }, solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE, std::{
+    },
+    solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
+    std::{
         collections::HashSet,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
         num::{NonZeroU64, NonZeroUsize},
         ops::Range,
         path::{Path, PathBuf},
-    }, tokio::{fs, time::Duration}, yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig}, yellowstone_vixen::config::YellowstoneConfig
+    },
+    tokio::{fs, time::Duration},
+    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
+    yellowstone_vixen::config::YellowstoneConfig,
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -550,10 +562,16 @@ pub struct ConfigLewisEvents {
     #[serde(default)]
     pub jet_id: Option<String>,
     /// Aggregation timeout - how long to wait for all attempts events to be received
-    #[serde(default = "ConfigLewisEvents::default_aggregation_timeout", with = "humantime_serde")]
+    #[serde(
+        default = "ConfigLewisEvents::default_aggregation_timeout",
+        with = "humantime_serde"
+    )]
     pub aggregation_timeout: Duration,
     /// Check interval for timeouts only (not for completion)
-    #[serde(default = "ConfigLewisEvents::default_check_interval", with = "humantime_serde")]
+    #[serde(
+        default = "ConfigLewisEvents::default_check_interval",
+        with = "humantime_serde"
+    )]
     pub check_interval: Duration,
 }
 
