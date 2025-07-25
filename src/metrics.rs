@@ -266,6 +266,11 @@ pub mod jet {
             &["leader"]
         ).unwrap();
 
+        static ref TRANSACTION_LANDING_TIME: Histogram = Histogram::with_opts(
+           HistogramOpts::new("transaction_landing_time_ms", "Time taken to land a transaction in ms")
+           .buckets(vec![0.5, 10.0, 20.0, 40.0, 60.0, 80.0, 100.0, 200.0, 300.0, 400.0,500.0, 600.0, 700.0, 800.0, 900.0, 1000.0, 1500.0, 2000.0, f64::INFINITY])
+        ).unwrap();
+
         ///
         /// Number of transactions processed by the worker
         /// status is either success/error.
@@ -424,6 +429,7 @@ pub mod jet {
             register!(QUIC_GW_DROP_TX_CNT);
             register!(QUIC_GW_WORKER_TX_PROCESS_CNT);
             register!(QUIC_GW_TX_RELAYED_TO_WORKER_CNT);
+            register!(TRANSACTION_LANDING_TIME);
         });
     }
 
@@ -635,4 +641,7 @@ pub mod jet {
                 .set(0);
         }
     }
+    pub fn observe_transaction_landing_time(duration: Duration) {
+    TRANSACTION_LANDING_TIME.observe(duration.as_millis() as f64);
+    }   
 }
