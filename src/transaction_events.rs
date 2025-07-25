@@ -301,7 +301,10 @@ impl TransactionTracking {
                 let mut total_expected = 0;
 
                 if leaders.is_empty() {
-                    tracing::warn!("TransactionReceived event has empty leaders list for {}", signature);
+                    tracing::warn!(
+                        "TransactionReceived event has empty leaders list for {}",
+                        signature
+                    );
                     return None;
                 }
 
@@ -347,7 +350,9 @@ impl TransactionTracking {
         let validator = match &event {
             TransactionEvent::PolicySkipped { validator, .. }
             | TransactionEvent::ConnectionFailed { validator, .. } => Some(validator),
-            TransactionEvent::SendAttempt { validator, result, .. } => {
+            TransactionEvent::SendAttempt {
+                validator, result, ..
+            } => {
                 if result.is_ok() {
                     Some(validator)
                 } else {
@@ -375,7 +380,10 @@ impl TransactionTracking {
                     if *received_count >= expected_count {
                         tracing::warn!(
                             "Received extra event for validator {} in transaction {}: already have {}/{} events",
-                            validator, self.signature, received_count, expected_count
+                            validator,
+                            self.signature,
+                            received_count,
+                            expected_count
                         );
                         // Don't process this event further
                         return self.total_remaining_events == 0;
@@ -391,7 +399,8 @@ impl TransactionTracking {
                     // Event for unexpected validator
                     tracing::warn!(
                         "Received event for unexpected validator {} in transaction {}",
-                        validator, self.signature
+                        validator,
+                        self.signature
                     );
                 }
             }
