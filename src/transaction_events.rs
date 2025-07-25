@@ -37,15 +37,20 @@
 //! from transactions that never complete.
 
 use {
-    crate::{config::ConfigLewisEvents, grpc_lewis::LewisEventClient, metrics::jet as metrics},
+    crate::{
+        config::ConfigLewisEvents,
+        grpc_lewis::{LewisClientError, LewisEventClient},
+        metrics::jet as metrics,
+    },
     solana_clock::Slot,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     std::{
         collections::{HashMap, HashSet, hash_map::Entry},
+        future::Future,
         net::SocketAddr,
         sync::Arc,
-        time::{Instant, SystemTime},
+        time::{Instant, SystemTime, UNIX_EPOCH},
     },
     tokio::{sync::mpsc, time::interval},
 };
@@ -84,9 +89,13 @@ pub enum TransactionEvent {
 impl TransactionEvent {
     fn current_timestamp() -> i64 {
         SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("System clock is before UNIX epoch")
-            .as_secs() as i64
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_else(|e| {
+                tracing::error!("System clock before UNIX epoch: {:?}", e);
+                // Return 0 as a fallback - better than panicking
+                0
+            })
     }
 
     pub fn transaction_received(leaders: Vec<Pubkey>, slot: Slot) -> Self {
@@ -246,7 +255,7 @@ pub fn create_lewis_event_pipeline(
 ) -> (
     Option<Arc<dyn EventReporter>>,
     Option<impl Future<Output = ()> + Send>,
-    Option<impl Future<Output = anyhow::Result<()>> + Send>,
+    Option<impl Future<Output = Result<(), LewisClientError>> + Send>,
 ) {
     let Some(config) = config else {
         return (None, None, None);

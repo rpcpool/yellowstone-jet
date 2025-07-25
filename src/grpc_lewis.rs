@@ -5,7 +5,6 @@ use {
         proto::lewis::{Event, EventAck, transaction_tracker_client::TransactionTrackerClient},
         transaction_events::{TransactionEvent, TransactionEventTracker},
     },
-    anyhow::Context,
     futures::SinkExt,
     solana_clock::Slot,
     solana_signature::Signature,
@@ -14,6 +13,34 @@ use {
     tonic::transport::Endpoint,
     tracing::{debug, info, warn},
 };
+
+// Configuration constants
+const BATCH_SIZE_THRESHOLD: u64 = 10;
+const BATCH_TIMEOUT_MS: u64 = 100;
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+const KEEPALIVE_INTERVAL_SECS: u64 = 30;
+const KEEPALIVE_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Debug, thiserror::Error)]
+pub enum LewisClientError {
+    #[error("Failed to create endpoint: {0}")]
+    EndpointError(#[from] tonic::transport::Error),
+
+    #[error("Failed to connect to Lewis: {0}")]
+    ConnectionError(String),
+
+    #[error("Failed to send event to gRPC stream: {0}")]
+    StreamSendError(String),
+
+    #[error("Failed to flush gRPC stream: {0}")]
+    StreamFlushError(String),
+
+    #[error("Lewis stream terminated unexpectedly")]
+    StreamTerminated,
+
+    #[error("Failed to receive acknowledgment from Lewis: {0}")]
+    AckError(tonic::Status),
+}
 
 /// Internal trait for Lewis event client implementations
 pub trait LewisEventClientImpl: Send + Sync {
@@ -61,7 +88,7 @@ impl LewisEventClient {
         config: Option<ConfigLewisEvents>,
     ) -> (
         Option<Arc<LewisEventClient>>,
-        Option<impl Future<Output = anyhow::Result<()>> + Send>,
+        Option<impl Future<Output = Result<(), LewisClientError>> + Send>,
     ) {
         let Some(config) = config else {
             return (None, None);
@@ -94,7 +121,7 @@ impl LewisEventClient {
     async fn run_event_loop(
         config: ConfigLewisEvents,
         mut rx: mpsc::Receiver<Event>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), LewisClientError> {
         match Self::connect_and_stream(&config, &mut rx).await {
             Ok(()) => {
                 info!("Lewis event stream completed normally");
@@ -102,12 +129,12 @@ impl LewisEventClient {
             }
             Err(e) => {
                 warn!(
-                    "Lewis connection failed: {}. Continuing without event tracking.",
+                    "Lewis connection failed: {}. Continuing to drain events.",
                     e
                 );
                 // Drain the channel to prevent blocking
                 while rx.recv().await.is_some() {}
-                Ok(())
+                Err(e)
             }
         }
     }
@@ -115,17 +142,17 @@ impl LewisEventClient {
     async fn connect_and_stream(
         config: &ConfigLewisEvents,
         rx: &mut mpsc::Receiver<Event>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), LewisClientError> {
         debug!("Connecting to Lewis at {}", config.endpoint);
 
         let channel = Endpoint::from_shared(config.endpoint.clone())?
-            .connect_timeout(Duration::from_secs(10))
-            .http2_keep_alive_interval(Duration::from_secs(30))
-            .keep_alive_timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .http2_keep_alive_interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS))
+            .keep_alive_timeout(Duration::from_secs(KEEPALIVE_TIMEOUT_SECS))
             .keep_alive_while_idle(true)
             .connect()
             .await
-            .context("Failed to connect to Lewis")?;
+            .map_err(|e| LewisClientError::ConnectionError(e.to_string()))?;
 
         info!("Connected to Lewis");
 
@@ -145,13 +172,16 @@ impl LewisEventClient {
                 maybe_event = rx.recv() => {
                     match maybe_event {
                         Some(event) => {
-                            tx.send(event).await.context("Failed to send to gRPC stream")?;
+                            tx.send(event).await
+                                .map_err(|e| LewisClientError::StreamSendError(e.to_string()))?;
                             pending += 1;
                             metrics::lewis_events_feed_inc();
 
                             // Batch events for efficiency
-                            if pending >= 10 || last_flush.elapsed() > Duration::from_millis(100) {
-                                tx.flush().await.context("Failed to flush stream")?;
+                            if pending >= BATCH_SIZE_THRESHOLD ||
+                               last_flush.elapsed() > Duration::from_millis(BATCH_TIMEOUT_MS) {
+                                tx.flush().await
+                                    .map_err(|e| LewisClientError::StreamFlushError(e.to_string()))?;
                                 debug!("Flushed {} events", pending);
                                 pending = 0;
                                 last_flush = tokio::time::Instant::now();
@@ -160,7 +190,8 @@ impl LewisEventClient {
                         None => {
                             // Channel closed, flush remaining and exit
                             if pending > 0 {
-                                tx.flush().await.context("Failed to flush final events")?;
+                                tx.flush().await
+                                    .map_err(|e| LewisClientError::StreamFlushError(e.to_string()))?;
                             }
                             drop(tx);
 
@@ -170,7 +201,7 @@ impl LewisEventClient {
                                     info!("Lewis acknowledged stream completion");
                                 }
                                 Err(status) => {
-                                    warn!("Lewis final ack error: {}", status);
+                                    return Err(LewisClientError::AckError(status));
                                 }
                             }
                             return Ok(());
@@ -180,7 +211,7 @@ impl LewisEventClient {
 
                 _ = &mut response => {
                     warn!("Lewis stream ended unexpectedly");
-                    return Err(anyhow::anyhow!("Stream terminated by server"));
+                    return Err(LewisClientError::StreamTerminated);
                 }
             }
         }
