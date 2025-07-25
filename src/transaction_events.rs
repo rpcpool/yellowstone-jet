@@ -6,22 +6,35 @@
 //!
 //! # Architecture
 //!
+//! In QuicGateway, each transaction is distributed to multiple leader validators, with each
+//! leader handled by a dedicated worker. Workers retry failed attempts up to N times before
+//! giving up. This aggregator collects all these events to provide a complete picture.
+//!
 //! Events flow through the system as follows:
 //!
 //! 1. **TransactionReceived** - Marks transaction arrival with target leaders and slot
-//! 2. **Routing Events** - PolicySkipped, SendAttempt, ConnectionFailed for each validator
-//! 3. **Aggregation** - State machine waits for all leaders to reach terminal state
-//! 4. **Emission** - Complete event sent to Lewis for persistence
+//! 2. **Routing Events** - For each leader validator:
+//!    - PolicySkipped: Leader rejected by policy (no attempts made)
+//!    - SendAttempt: Each retry attempt with success/failure result
+//!    - ConnectionFailed: Unable to establish QUIC connection
+//! 3. **Aggregation** - Collects events until all leaders reach terminal state:
+//!    - Success: Transaction sent successfully (no more retries)
+//!    - Policy skip: Rejected by policy
+//!    - Max retries: All N attempts exhausted
+//! 4. **Emission** - Complete transaction history sent to Lewis for persistence
 //!
 //! # State Machine Logic
 //!
-//! Each transaction is tracked until one of these conditions is met:
-//! - All target leaders have been attempted (success, skip, or max retries)
-//! - Aggregation timeout is reached (default 30s)
-//! - The aggregator is shutting down
+//! The aggregator tracks each transaction's progress across all assigned leaders.
+//! A transaction is considered complete when one of these conditions is met:
 //!
-//! This ensures we capture a complete picture of transaction routing while preventing
-//! memory leaks from transactions that never complete.
+//! - All target leaders have reached a terminal state (success, skip, or max retries)
+//! - Aggregation timeout is reached (default 30s) - handles stuck transactions
+//! - The aggregator is shutting down - ensures all data is persisted
+//!
+//! This design ensures we capture every routing decision and attempt, providing
+//! valuable insights into transaction propagation while preventing memory leaks
+//! from transactions that never complete.
 
 use {
     crate::{config::ConfigLewisEvents, grpc_lewis::LewisEventClient, metrics::jet as metrics},
