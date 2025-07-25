@@ -127,11 +127,7 @@ pub mod jet {
         static ref QUIC_IDENTITY_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);
         static ref QUIC_IDENTITY_EXPECTED_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);
 
-        static ref LEWIS_EVENTS_PUSH: IntCounterVec = IntCounterVec::new(
-            Opts::new("lewis_events_push_total", "Total number of events pushed to lewis"),
-            &["status"]
-        ).unwrap();
-        static ref LEWIS_EVENTS_FEED: IntCounter = IntCounter::new("lewis_events_feed_total", "Total number of events feed to lewis").unwrap();
+
 
         static ref GATEWAY_CONNECTED: IntGaugeVec = IntGaugeVec::new(
             Opts::new("gateway_connected", "Connected gateway endpoint"),
@@ -259,6 +255,13 @@ pub mod jet {
         ).unwrap();
 
         // Lewis Metrics
+        static ref LEWIS_EVENTS_PUSH: IntCounterVec = IntCounterVec::new(
+            Opts::new("lewis_events_push_total", "Total number of events pushed to lewis"),
+            &["status"]
+        ).unwrap();
+
+        static ref LEWIS_EVENTS_FEED: IntCounter = IntCounter::new("lewis_events_feed_total", "Total number of events feed to lewis").unwrap();
+
         static ref LEWIS_EVENT_CHANNEL_CLOSED: IntCounter = IntCounter::new(
             "lewis_event_channel_closed_total",
             "Number of times lewis event channel was closed when trying to send"
@@ -284,10 +287,6 @@ pub mod jet {
             "Number of transactions completed normally"
         ).unwrap();
 
-        static ref LEWIS_EVENT_AGGREGATOR_DROPPED_TOTAL: IntCounter = IntCounter::new(
-            "lewis_event_aggregator_dropped_total",
-            "Number of events dropped due to buffer full"
-        ).unwrap();
         static ref LEWIS_EVENT_AGGREGATOR_ORPHANED_EVENTS: IntCounterVec = IntCounterVec::new(
             Opts::new(
                 "lewis_event_aggregator_orphaned_events_total",
@@ -381,8 +380,7 @@ pub mod jet {
             register!(GRPC_SLOT_RECEIVED);
             register!(LEADER_MTU);
             register!(LEADER_RTT);
-            register!(LEWIS_EVENTS_FEED);
-            register!(LEWIS_EVENTS_PUSH);
+
             register!(QUIC_IDENTITY);
             register!(QUIC_IDENTITY_EXPECTED);
             register!(QUIC_SEND_ATTEMPTS);
@@ -416,12 +414,13 @@ pub mod jet {
             register!(QUIC_GW_LEADER_PREDICTION_MISS);
 
             // Lewis Metrics
+            register!(LEWIS_EVENTS_FEED);
+            register!(LEWIS_EVENTS_PUSH);
             register!(LEWIS_EVENT_CHANNEL_CLOSED);
             register!(LEWIS_EVENT_AGGREGATOR_QUEUE_SIZE);
             register!(LEWIS_EVENT_AGGREGATOR_TRACKING_SIZE);
             register!(LEWIS_EVENT_AGGREGATOR_TIMEOUT_TOTAL);
             register!(LEWIS_EVENT_AGGREGATOR_COMPLETED_TOTAL);
-            register!(LEWIS_EVENT_AGGREGATOR_DROPPED_TOTAL);
             register!(LEWIS_EVENT_AGGREGATOR_ORPHANED_EVENTS);
             register!(LEWIS_EVENT_AGGREGATOR_DUPLICATE_TRANSACTION);
         });
@@ -607,15 +606,6 @@ pub mod jet {
             .inc();
     }
 
-    pub fn lewis_events_push_inc(status: Result<(), ()>) {
-        LEWIS_EVENTS_PUSH
-            .with_label_values(&[if status.is_ok() { "ok" } else { "overflow" }])
-            .inc()
-    }
-
-    pub fn lewis_events_feed_inc() {
-        LEWIS_EVENTS_FEED.inc()
-    }
 
     pub fn gateway_set_connected(endpoints: &[String], endpoint: String) {
         for endpoint in endpoints {
@@ -637,6 +627,16 @@ pub mod jet {
     }
 
     // Lewis Metrics
+    pub fn lewis_events_push_inc(status: Result<(), ()>) {
+        LEWIS_EVENTS_PUSH
+            .with_label_values(&[if status.is_ok() { "ok" } else { "overflow" }])
+            .inc()
+    }
+
+    pub fn lewis_events_feed_inc() {
+        LEWIS_EVENTS_FEED.inc()
+    }
+
     pub fn lewis_event_channel_closed_inc() {
         LEWIS_EVENT_CHANNEL_CLOSED.inc();
     }
@@ -655,10 +655,6 @@ pub mod jet {
 
     pub fn lewis_event_aggregator_completed_inc() {
         LEWIS_EVENT_AGGREGATOR_COMPLETED_TOTAL.inc();
-    }
-
-    pub fn lewis_event_aggregator_dropped_inc() {
-        LEWIS_EVENT_AGGREGATOR_DROPPED_TOTAL.inc();
     }
 
     pub fn lewis_event_aggregator_orphaned_events_inc(event_type: &str) {

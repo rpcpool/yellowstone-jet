@@ -303,19 +303,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         config.send_transaction_service.service_max_retries,
     );
 
-    // Spawn aggregator if Lewis is enabled
-    if let Some(aggregator_fut) = aggregator_fut {
-        tg.spawn_with_shutdown("lewis_event_aggregator", |mut stop| async move {
-            tokio::select! {
-                _ = aggregator_fut => {
-                    info!("Lewis event aggregator completed");
-                }
-                _ = &mut stop => {
-                    info!("Shutting down Lewis event aggregator");
-                }
-            }
-        });
-    }
 
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
         stake_info_map: stake_info_map.clone(),
@@ -477,6 +464,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         keep_stake_metrics_up_to_date_task(identity_observer.clone(), stake_info_map.clone()),
     );
 
+    // Spawn gRPC Client for Lewis if enabled
     if let Some(fut) = lewis_fut {
         tg.spawn_with_shutdown("lewis_events", |mut stop| async move {
             tokio::select! {
@@ -487,6 +475,20 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                 }
                 _ = &mut stop => {
                     info!("Shutting down Lewis event client");
+                }
+            }
+        });
+    }
+
+    // Spawn aggregator if Lewis is enabled
+    if let Some(aggregator_fut) = aggregator_fut {
+        tg.spawn_with_shutdown("lewis_event_aggregator", |mut stop| async move {
+            tokio::select! {
+                _ = aggregator_fut => {
+                    info!("Lewis event aggregator completed");
+                }
+                _ = &mut stop => {
+                    info!("Shutting down Lewis event aggregator");
                 }
             }
         });

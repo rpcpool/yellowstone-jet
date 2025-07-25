@@ -114,12 +114,20 @@ quic:
   #     quic: 208.61.229.3:8442
   #     quic_forwards: 208.61.229.3:8443
 
-
+# Lewis Events Configuration
 lewis_events:
+  # Lewis Event gRPC endpoint
   endpoint: "http://localhost:8005"
+  # Lewis Event gRPC queue size
   queue_size_grpc: 1000
+  # Lewis Event buffer queue size - Aggregator sends to this channel
   queue_size_buffer: 100000
+  # Jet ID to use for events
   jet_id: "jet-test-123"
+  # Aggregation timeout - how long to wait for all attempts to be received
+  aggregation_timeout: 30s
+  # Check interval for timeouts only (not for completion)
+  check_interval: 1s
 
 features:
   enabled_features:

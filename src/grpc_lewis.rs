@@ -197,16 +197,19 @@ impl TransactionEventTracker for LewisEventClient {
         &self,
         signature: &Signature,
         slot: Slot,
+        ts_received: i64,
         events: Vec<TransactionEvent>,
     ) {
         let mut builder = event_builders::JetEventBuilder::new(
-            // TODO: These fields are not currently used by Lewis
+            // TODO: We are not sending these IDs yet, because it will require changes
+            // to the Jet proto.
             String::new(), // req_id
             String::new(), // cascade_id
             String::new(), // jet_gateway_id
             self.jet_id.clone().unwrap_or_default(),
             signature,
             slot,
+            ts_received,
         );
 
         // Convert TransactionEvents to proto JetSend messages
@@ -236,6 +239,7 @@ pub mod event_builders {
         jet_id: String,
         signature: Vec<u8>,
         slot: u64,
+        ts_received: i64, // Timestamp when the transaction was received
         jet_sends: Vec<JetSend>,
     }
 
@@ -247,6 +251,7 @@ pub mod event_builders {
             jet_id: String,
             signature: &Signature,
             slot: u64,
+            ts_received: i64,
         ) -> Self {
             Self {
                 req_id,
@@ -255,6 +260,7 @@ pub mod event_builders {
                 jet_id,
                 signature: signature.as_ref().to_vec(),
                 slot,
+                ts_received,
                 jet_sends: Vec::new(),
             }
         }
@@ -320,6 +326,7 @@ pub mod event_builders {
                     sig: self.signature,
                     jet_sends: self.jet_sends,
                     slot: self.slot,
+                    ts_received: self.ts_received,
                 })),
             }
         }
@@ -363,6 +370,7 @@ mod tests {
             "jet-abc".to_string(),
             &sig,
             slot,
+            1000,
         );
 
         // Add successful send attempt
@@ -391,6 +399,7 @@ mod tests {
                 assert_eq!(jet_event.sig, sig.as_ref());
                 assert_eq!(jet_event.slot, slot);
                 assert_eq!(jet_event.jet_sends.len(), 2);
+                assert_eq!(jet_event.ts_received, 1000);
 
                 // Check first send (successful)
                 assert_eq!(jet_event.jet_sends[0].validator, validator.to_string());
@@ -420,6 +429,7 @@ mod tests {
         let sig = Signature::new_unique();
         let validator = Pubkey::new_unique();
         let slot = 12345;
+        let ts_received = 1000;
 
         let events = vec![
             TransactionEvent::TransactionReceived {
@@ -436,7 +446,7 @@ mod tests {
             },
         ];
 
-        client.track_transaction_send(&sig, slot, events);
+        client.track_transaction_send(&sig, slot, ts_received, events);
 
         // Verify event was emitted
         let captured_events = mock_impl.events.lock().unwrap();
@@ -446,6 +456,7 @@ mod tests {
             Some(ProtoEvent::Jet(jet_event)) => {
                 assert_eq!(jet_event.sig, sig.as_ref());
                 assert_eq!(jet_event.slot, slot);
+                assert_eq!(jet_event.ts_received, ts_received);
                 assert_eq!(jet_event.jet_sends.len(), 1); // TransactionReceived is skipped
             }
             _ => panic!("Expected Jet event"),

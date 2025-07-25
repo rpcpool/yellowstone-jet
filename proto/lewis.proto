@@ -62,6 +62,7 @@ message EventJet {
 	bytes sig = 5;	                // - the transaction id (signature)
 	repeated JetSend jet_sends = 6; // - which validators (by voting pubkey??) jet sent the transaction to
 	uint64 slot = 7;                // - the latest slot that the jet has seen (via WS)
+	int64 ts_received = 8;          // - the timestamp when the transaction was received
 }
 
 message JetSend {

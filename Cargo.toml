@@ -103,7 +103,7 @@ yellowstone-shield-store = "~0.5.2"
 yellowstone-vixen = "0.2.0"
 
 [[bin]]
-name = "lewis_dummy_server"
+name = "lewis-dummy-server"
 path = "src/bin/lewis_dummy_server.rs"
 
 [build-dependencies]

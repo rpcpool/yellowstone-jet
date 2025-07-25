@@ -141,6 +141,7 @@ pub trait TransactionEventTracker: Send + Sync {
         &self,
         signature: &Signature,
         slot: Slot,
+        ts_received: i64,
         events: Vec<TransactionEvent>,
     );
 }
@@ -256,6 +257,7 @@ pub fn create_lewis_event_pipeline(
 struct TransactionTracking {
     signature: Signature,
     slot: Slot,
+    ts_received: i64,
     leaders: Vec<Pubkey>,
     events: Vec<TransactionEvent>,
     created_at: Instant,
@@ -266,9 +268,10 @@ struct TransactionTracking {
 impl TransactionTracking {
     fn new(signature: Signature, event: TransactionEvent) -> Option<Self> {
         match &event {
-            TransactionEvent::TransactionReceived { leaders, slot, .. } => Some(Self {
+            TransactionEvent::TransactionReceived { leaders, slot, timestamp } => Some(Self {
                 signature,
                 slot: *slot,
+                ts_received: *timestamp,
                 leaders: leaders.clone(),
                 events: vec![event],
                 created_at: Instant::now(),
@@ -362,7 +365,8 @@ pub async fn transaction_event_aggregator_loop(
                                             lewis_client.track_transaction_send(
                                                 &tracker.signature,
                                                 tracker.slot,
-                                                tracker.events
+                                                tracker.ts_received,
+                                                tracker.events,
                                             );
                                             metrics::lewis_event_aggregator_completed_inc();
                                         }
@@ -408,6 +412,7 @@ pub async fn transaction_event_aggregator_loop(
                         lewis_client.track_transaction_send(
                             &tracker.signature,
                             tracker.slot,
+                            tracker.ts_received,
                             tracker.events
                         );
                         metrics::lewis_event_aggregator_timeout_inc();
@@ -419,6 +424,6 @@ pub async fn transaction_event_aggregator_loop(
 
     // Send all remaining on shutdown
     for (_, tracker) in trackers.drain() {
-        lewis_client.track_transaction_send(&tracker.signature, tracker.slot, tracker.events);
+        lewis_client.track_transaction_send(&tracker.signature, tracker.slot, tracker.ts_received, tracker.events);
     }
 }
