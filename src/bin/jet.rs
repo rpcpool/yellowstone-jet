@@ -37,7 +37,7 @@ use {
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         jet_gateway::spawn_jet_gw_listener,
-        metrics::{collect_to_text, inject_job_label, jet as metrics},
+        metrics::{collect_to_text, jet as metrics},
         quic_gateway::{
             IgnorantLeaderPredictor, QuicGatewayConfig, StakeBasedEvictionStrategy,
             TokioQuicGatewaySession, TokioQuicGatewaySpawner, UpcomingLeaderPredictor,
@@ -535,7 +535,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     if let Some(config_prometheus) = config.prometheus {
         let push_gw_task =
-            spawn_push_prometheus_metrics(identity_observer.clone(), config_prometheus).await?;
+            spawn_push_prometheus_metrics(config_prometheus).await?;
         tg.spawn_cancelable("prometheus_push_gw", async move {
             push_gw_task.await.expect("prometheus_push_gw");
         })
@@ -566,7 +566,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 }
 
 async fn spawn_push_prometheus_metrics(
-    mut jet_identity: watch::Receiver<Pubkey>,
     config: PrometheusConfig,
 ) -> anyhow::Result<JoinHandle<()>> {
     let prometheus_url = Url::parse(&config.url).expect("");
@@ -577,12 +576,10 @@ async fn spawn_push_prometheus_metrics(
         loop {
             tokio::select! {
             _ = interval.tick() => {
-                let current_identity = *jet_identity.borrow_and_update();
-
-                if let Err(error) = client
+                    if let Err(error) = client
                     .post(prometheus_url.clone())
                     .header("Content-Type", "text/plain")
-                    .body(inject_job_label(&collect_to_text(), "jet", &current_identity.to_string()))
+                    .body(collect_to_text())
                     .send()
                     .await {
                         warn!(?error, "Error pushing metrics");
