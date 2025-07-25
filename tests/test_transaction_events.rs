@@ -584,3 +584,47 @@ async fn test_all_duplicate_leaders() {
     drop(event_reporter);
     let _ = timeout(Duration::from_secs(1), aggregator_handle).await;
 }
+
+#[tokio::test]
+async fn test_duplicate_events_race_condition() {
+    let config = make_test_config();
+    let mock_impl = Arc::new(SimpleMockLewisClientImpl::new());
+    let lewis_client = Arc::new(LewisEventClient::new_mock(
+        Arc::<SimpleMockLewisClientImpl>::clone(&mock_impl),
+        Some("test-jet".to_string()),
+    ));
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let event_reporter = Arc::new(EventChannelReporter::new(event_tx));
+
+    let aggregator_handle = tokio::spawn(transaction_event_aggregator_loop(
+        event_rx,
+        lewis_client,
+        config,
+        3,
+    ));
+
+    let sig = Signature::new_unique();
+    let validator = Pubkey::new_unique();
+    let slot = 12345;
+
+    // Expect only 1 event from validator
+    event_reporter.report_transaction_received(sig, vec![validator], slot);
+
+    // Send first success
+    event_reporter.report_send_attempt(sig, validator, make_test_addr(), 1, Ok(()));
+
+    // Wait for completion
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(mock_impl.get_event_count(), 1);
+
+    // Send duplicate success events (race condition)
+    event_reporter.report_send_attempt(sig, validator, make_test_addr(), 2, Ok(()));
+    event_reporter.report_send_attempt(sig, validator, make_test_addr(), 3, Ok(()));
+
+    // Should still only have 1 transaction sent
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(mock_impl.get_event_count(), 1);
+
+    drop(event_reporter);
+    let _ = timeout(Duration::from_secs(1), aggregator_handle).await;
+}

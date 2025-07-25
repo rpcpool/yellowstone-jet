@@ -285,6 +285,7 @@ struct TransactionTracking {
     expected_per_validator: HashMap<Pubkey, usize>,
     received_per_validator: HashMap<Pubkey, usize>,
     validator_attempt_count: HashMap<Pubkey, usize>,
+    total_remaining_events: usize,
 }
 
 impl TransactionTracking {
@@ -297,8 +298,16 @@ impl TransactionTracking {
             } => {
                 // Count expected events per validator
                 let mut expected_per_validator = HashMap::new();
+                let mut total_expected = 0;
+
+                if leaders.is_empty() {
+                    tracing::warn!("TransactionReceived event has empty leaders list for {}", signature);
+                    return None;
+                }
+
                 for leader in leaders {
                     *expected_per_validator.entry(*leader).or_insert(0) += 1;
+                    total_expected += 1;
                 }
 
                 // Add metric if we have duplicate leaders
@@ -321,6 +330,7 @@ impl TransactionTracking {
                     expected_per_validator,
                     received_per_validator: HashMap::new(),
                     validator_attempt_count: HashMap::new(),
+                    total_remaining_events: total_expected,
                 })
             }
             _ => {
@@ -334,42 +344,60 @@ impl TransactionTracking {
     fn add_event(&mut self, event: TransactionEvent, max_retries: usize) -> bool {
         self.events.push(event.clone());
 
-        match &event {
+        let validator = match &event {
             TransactionEvent::PolicySkipped { validator, .. }
-            | TransactionEvent::ConnectionFailed { validator, .. } => {
-                // Increment received count for this validator
-                *self.received_per_validator.entry(*validator).or_insert(0) += 1;
-            }
-            TransactionEvent::SendAttempt {
-                validator, result, ..
-            } => {
+            | TransactionEvent::ConnectionFailed { validator, .. } => Some(validator),
+            TransactionEvent::SendAttempt { validator, result, .. } => {
                 if result.is_ok() {
-                    // Success - increment received count
-                    *self.received_per_validator.entry(*validator).or_insert(0) += 1;
+                    Some(validator)
                 } else {
                     // Failed - track retry attempts
                     let count = self.validator_attempt_count.entry(*validator).or_insert(0);
                     *count += 1;
                     if *count >= max_retries {
-                        // Max retries reached - increment received count
-                        *self.received_per_validator.entry(*validator).or_insert(0) += 1;
+                        Some(validator) // Max retries reached
+                    } else {
+                        None // Still retrying
                     }
                 }
             }
-            TransactionEvent::TransactionReceived { .. } => {
-                // Should not happen after initial event
+            TransactionEvent::TransactionReceived { .. } => None, // Should not happen
+        };
+
+        // If we have a terminal event for a validator
+        if let Some(validator) = validator {
+            // Check if this validator is expected
+            match self.expected_per_validator.get(validator) {
+                Some(&expected_count) => {
+                    let received_count = self.received_per_validator.entry(*validator).or_insert(0);
+
+                    // Check if we've already completed this validator
+                    if *received_count >= expected_count {
+                        tracing::warn!(
+                            "Received extra event for validator {} in transaction {}: already have {}/{} events",
+                            validator, self.signature, received_count, expected_count
+                        );
+                        // Don't process this event further
+                        return self.total_remaining_events == 0;
+                    }
+
+                    // Increment received count
+                    *received_count += 1;
+
+                    // Decrement remaining events
+                    self.total_remaining_events = self.total_remaining_events.saturating_sub(1);
+                }
+                None => {
+                    // Event for unexpected validator
+                    tracing::warn!(
+                        "Received event for unexpected validator {} in transaction {}",
+                        validator, self.signature
+                    );
+                }
             }
         }
 
-        // Check if all expected events have been received
-        for (validator, expected_count) in &self.expected_per_validator {
-            let received_count = self.received_per_validator.get(validator).unwrap_or(&0);
-            if received_count < expected_count {
-                return false; // Still waiting for events
-            }
-        }
-
-        true // All expected events received
+        self.total_remaining_events == 0
     }
 }
 
