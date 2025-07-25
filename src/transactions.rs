@@ -186,6 +186,7 @@ pub struct SendTransactionRequest {
 struct RetryableTx {
     tx: Arc<SendTransactionRequest>,
     leftover_attempt: usize,
+    inserted_at: Instant,
 }
 
 ///
@@ -309,8 +310,10 @@ impl TransactionRetrySchedulerRuntime {
             tracing::trace!(
                 "transaction {signature} landed on commitment {commitment:?}, removing from the pool"
             );
-            if self.tx_pool.remove(&signature).is_some() {
-                metrics::sts_landed_inc();
+            if let Some(tx_data) = self.tx_pool.remove(&signature) {
+               let duration = tx_data.inserted_at.elapsed();
+               metrics::observe_transaction_landing_time(duration);
+               metrics::sts_landed_inc();
             }
         }
     }
@@ -375,6 +378,7 @@ impl TransactionRetrySchedulerRuntime {
             RetryableTx {
                 tx: Arc::clone(&tx),
                 leftover_attempt,
+                inserted_at: now,
             },
         );
         tracing::trace!(
