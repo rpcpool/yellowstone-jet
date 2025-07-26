@@ -142,6 +142,6 @@ listen_quic:
   client_limits:
     GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 2000000
 
-jito_block_engine:
+jito:
   block_engine_url: https://ny.testnet.block-engine.jito.wtf
   auth_service_url: null

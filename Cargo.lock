@@ -8896,6 +8896,7 @@ dependencies = [
  "tower 0.4.13",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "vergen",
  "yellowstone-grpc-client 7.0.0",

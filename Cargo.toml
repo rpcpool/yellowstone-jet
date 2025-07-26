@@ -108,6 +108,7 @@ solana-perf = "2.0.22"
 histogram = "0.11.3"
 crossbeam-channel = "0.5.15"
 cached = "0.42.0"
+url = "2.5.4"
 
 
 [build-dependencies]

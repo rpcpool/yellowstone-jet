@@ -50,6 +50,7 @@ use tonic::{
     transport::{Channel, Endpoint},
     Response, Status, Streaming,
 };
+use url::Url;
 pub type BankingPacketBatch = Arc<(Vec<PacketBatch>, )>;
 
 pub struct BlockEngineConfig {
@@ -230,9 +231,12 @@ impl BlockEngineRelayerHandler {
         ofac_addresses: &HashSet<Pubkey>,
     ) -> BlockEngineResult<()> {
         let mut auth_endpoint = Endpoint::from_str(auth_service_url).expect("valid auth url");
-        if auth_service_url.contains("https") {
+        if auth_service_url.starts_with("https") {
+            let url = Url::parse(auth_service_url)
+                .map_err(|e| BlockEngineError::AuthServiceFailure(e.to_string()))?;
+            let domain_name = url.host_str().unwrap_or_default().to_string();
             auth_endpoint = auth_endpoint
-                .tls_config(tonic::transport::ClientTlsConfig::new())
+                .tls_config(tonic::transport::ClientTlsConfig::new().domain_name(domain_name))
                 .expect("invalid tls config");
         }
         let channel = auth_endpoint
@@ -263,9 +267,12 @@ impl BlockEngineRelayerHandler {
 
         let mut block_engine_endpoint =
             Endpoint::from_str(block_engine_url).expect("valid block engine url");
-        if block_engine_url.contains("https") {
+        if block_engine_url.starts_with("https") {
+            let url = Url::parse(block_engine_url)
+                .map_err(|e| BlockEngineError::BlockEngineFailure(e.to_string()))?;
+            let domain_name = url.host_str().unwrap_or_default().to_string();
             block_engine_endpoint = block_engine_endpoint
-                .tls_config(tonic::transport::ClientTlsConfig::new())
+                .tls_config(tonic::transport::ClientTlsConfig::new().domain_name(domain_name))
                 .expect("invalid tls config");
         }
         let block_engine_channel = block_engine_endpoint
