@@ -10,27 +10,30 @@ use {
     solana_client::{
         nonblocking::rpc_client::RpcClient as SolanaRpcClient, rpc_client::RpcClientConfig,
     },
+    dashmap::DashMap,
     solana_commitment_config::CommitmentConfig,
     solana_keypair::{Keypair, read_keypair},
     solana_pubkey::Pubkey,
     solana_quic_definitions::QUIC_MAX_TIMEOUT,
     solana_rpc_client::http_sender::HttpSender,
+    solana_program::address_lookup_table::AddressLookupTableAccount,
     std::{
         fs,
         path::PathBuf,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering, AtomicBool},
         },
     },
     tokio::{
         runtime::Builder,
         signal::unix::{SignalKind, signal},
-        sync::{Mutex, oneshot, watch},
+        sync::{Mutex, oneshot, watch, mpsc},
         task::JoinHandle,
     },
     tracing::{info, warn},
     yellowstone_jet::{
+        block_engine::{BlockEngineRelayerHandler, BlockEngineConfig, BlockEnginePackets},
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{ConfigJet, PrometheusConfig, RpcErrorStrategy, load_config},
@@ -42,7 +45,7 @@ use {
             IgnorantLeaderPredictor, QuicGatewayConfig, StakeBasedEvictionStrategy,
             TokioQuicGatewaySession, TokioQuicGatewaySpawner, UpcomingLeaderPredictor,
         },
-        rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient, RpcRateLimiter},
+        rpc::{RpcRateLimiter, RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
         solana::sanitize_transaction_support_check,
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
@@ -330,7 +333,41 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let (rooted_transactions_rx, rooted_tx_loop_fut) =
         GrpcRootedTxReceiver::new(rooted_tx_geyser_rx);
 
-    let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
+    let initial_identity = Arc::new(config.identity.keypair.unwrap_or(Keypair::new()));
+
+    let (jito_sender, mut jito_receiver) =
+        mpsc::channel(5000);
+
+    if let Some(jito_config) = config.jito.clone() {
+        info!("Jito Block Engine is configured, starting relayer handler...");
+        let block_engine_config = BlockEngineConfig {
+            block_engine_url: jito_config.block_engine_url.clone(),
+            auth_service_url: jito_config
+                .auth_service_url
+                .unwrap_or(jito_config.block_engine_url),
+        };        
+
+        let exit_signal = Arc::new(AtomicBool::new(false));
+        let aoi_cache_ttl_s = 300;
+        let address_lookup_table_cache: Arc<DashMap<Pubkey, AddressLookupTableAccount>> = Arc::new(dashmap::DashMap::new());
+        let is_connected_to_block_engine = Arc::new(AtomicBool::new(false));
+        let ofac_addresses: std::collections::HashSet<Pubkey> = std::collections::HashSet::new();
+
+        let jito_handler = BlockEngineRelayerHandler::new(
+            Some(block_engine_config),
+            jito_receiver,
+            initial_identity.clone(),
+            exit_signal,
+            aoi_cache_ttl_s,
+            address_lookup_table_cache,
+            &is_connected_to_block_engine,
+            ofac_addresses,
+        );
+    } else {
+        tracing::error!("Jito Block Engine is not configured");
+    }
+    
+
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
         stake_info_map: stake_info_map.clone(),
         gateway_tx_channel_capacity: 10000,
@@ -413,7 +450,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     if let Some(quic_config) = &config.listen_quic {
         let quic_server_handle = yellowstone_jet::quic_server::spawn_quic_server(
             quic_config.bind[0],
-            &initial_identity,
+            &initial_identity.insecure_clone(),
             scheduler_in.clone(),
             config.send_transaction_service.service_max_retries,
             quic_config.client_limits.clone(),
@@ -446,6 +483,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         rpc: tx_handler_rpc,
         proxy_sanitize_check: config.listen_solana_like.proxy_sanitize_check && sanitize_supported,
         proxy_preflight_check: config.listen_solana_like.proxy_preflight_check,
+        jito_sender,
     };
 
     let rate_limiter = RpcRateLimiter::new(
@@ -474,7 +512,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                 info!("starting jet-gateway listener");
                 let stake_info = stake_info_map.clone();
                 let jet_gw_identity = initial_identity.insecure_clone();
-                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(tx_handler.clone(), rate_limiter);
+                let tx_sender =
+                    RpcServer::create_solana_like_rpc_server_impl(tx_handler.clone(), rate_limiter);
                 let (jet_gw_identity_updater, jet_gw_fut) = spawn_jet_gw_listener(
                     stake_info,
                     jet_gw_config,
@@ -496,7 +535,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
 
     let jet_identity_group_syncer =
-        JetIdentitySyncGroup::new(initial_identity, jet_identity_sync_members);
+        JetIdentitySyncGroup::new(initial_identity.insecure_clone(), jet_identity_sync_members);
     let identity_observer = jet_identity_group_syncer.get_identity_watcher();
     let rpc_admin = RpcServer::new(
         config.listen_admin.bind[0],

@@ -1,35 +1,29 @@
 use {
-    crate::metrics::{
-        jet::{
-            dec_quic_server_active_connections, incr_quic_server_active_connections,
-            incr_quic_server_auth_failures_total, incr_quic_server_stream_error,
-            incr_quic_server_transactions_by_client_total,
-            incr_quic_server_transactions_received_total, observe_quic_server_stream_duration,
-        },
+    crate::metrics::jet::{
+        dec_quic_server_active_connections, incr_quic_server_active_connections,
+        incr_quic_server_auth_failures_total, incr_quic_server_stream_error,
+        incr_quic_server_transactions_by_client_total,
+        incr_quic_server_transactions_received_total, observe_quic_server_stream_duration,
     },
     crate::transactions::SendTransactionRequest,
+    bytes::Bytes,
     dashmap::DashMap,
     governor::{
+        Quota, RateLimiter,
         clock::DefaultClock,
         middleware::NoOpMiddleware,
         state::{InMemoryState, NotKeyed},
-        Quota, RateLimiter,
     },
-    bytes::Bytes,
     quinn_proto::crypto::rustls::QuicServerConfig,
     rustls::{
         Error as TlsError,
         server::danger::{ClientCertVerified, ClientCertVerifier},
     },
-    solana_sdk::{
-        pubkey::Pubkey, transaction::VersionedTransaction,
-    },
-    solana_tls_utils::{
-      get_pubkey_from_tls_certificate,
-      new_dummy_x509_certificate,
-    },
+    solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction},
+    solana_streamer::nonblocking::quic::get_remote_pubkey,
+    solana_tls_utils::{get_pubkey_from_tls_certificate, new_dummy_x509_certificate},
     std::{
-        collections::{HashSet, HashMap},
+        collections::{HashMap, HashSet},
         net::SocketAddr,
         num::NonZeroU32,
         sync::Arc,
@@ -37,7 +31,6 @@ use {
     },
     tokio::sync::mpsc,
     tracing::{error, info, warn},
-    solana_streamer::nonblocking::quic::get_remote_pubkey,
 };
 
 const ALPN_JET_TX_PROTOCOL: &[&[u8]] = &[b"tx-quic-jet", b"solana-tpu"];
@@ -102,15 +95,14 @@ impl ClientCertVerifier for WhitelistVerifier {
         _intermediates: &[tonic::transport::CertificateDer<'_>],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<ClientCertVerified, TlsError> {
-        let pubkey =
-            if let Some(pubkey) = get_pubkey_from_tls_certificate(&end_entity) {
-                pubkey
-            } else {
-                incr_quic_server_auth_failures_total("invalid_cert_has_no_pubkey");
-                return Err(TlsError::General(
-                    "Failed to get pubkey from cert".to_string(),
-                ));
-            };
+        let pubkey = if let Some(pubkey) = get_pubkey_from_tls_certificate(&end_entity) {
+            pubkey
+        } else {
+            incr_quic_server_auth_failures_total("invalid_cert_has_no_pubkey");
+            return Err(TlsError::General(
+                "Failed to get pubkey from cert".to_string(),
+            ));
+        };
 
         if self.whitelist.contains(&pubkey) {
             info!("Client certificate validated for pubkey: {}", pubkey);
@@ -178,7 +170,7 @@ pub fn spawn_quic_server(
     client_limits: HashMap<Pubkey, u32>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let (cert, key) = new_dummy_x509_certificate(identity);
-    
+
     let client_whitelist = client_limits.keys().cloned().collect();
     let rate_limiter = QuicRateLimiter::new(client_limits);
 
@@ -227,9 +219,14 @@ pub fn spawn_quic_server(
                                     let pubkey = peer_identity;
                                     let start_time = Instant::now();
                                     tokio::spawn(async move {
-                                        if let Err(e) =
-                                            handle_stream(stream, sink, remote_address, pubkey, max_retries)
-                                                .await
+                                        if let Err(e) = handle_stream(
+                                            stream,
+                                            sink,
+                                            remote_address,
+                                            pubkey,
+                                            max_retries,
+                                        )
+                                        .await
                                         {
                                             let reason = {
                                                 let error_text = e.to_string().to_lowercase();
@@ -305,8 +302,8 @@ async fn handle_stream(
         signature,
         transaction,
         wire_transaction,
-        max_retries: Some(max_retries),    // Use scheduler's default
-        policies: Vec::new(), // No policies for raw QUIC submission
+        max_retries: Some(max_retries), // Use scheduler's default
+        policies: Vec::new(),           // No policies for raw QUIC submission
     });
 
     transaction_sink

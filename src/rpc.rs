@@ -1,14 +1,14 @@
 use {
     crate::transaction_handler::TransactionHandler,
+    anyhow::Context as _,
     dashmap::DashMap,
+    futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
     governor::{
+        Quota, RateLimiter,
         clock::DefaultClock,
         middleware::NoOpMiddleware,
         state::{InMemoryState, NotKeyed},
-        Quota, RateLimiter,
     },
-    anyhow::Context as _,
-    futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
     hyper::{Request, Response, StatusCode},
     jsonrpsee::{
         core::http_helpers::Body,
@@ -19,12 +19,12 @@ use {
     solana_pubkey::Pubkey,
     std::{
         collections::HashMap,
-        hash::Hash,
-        num::NonZeroU32,
         error::Error,
         fmt,
         future::Future,
+        hash::Hash,
         net::SocketAddr,
+        num::NonZeroU32,
         sync::{Arc, Mutex as StdMutex},
         task::{Context, Poll},
         time::Instant,
@@ -149,10 +149,14 @@ impl RpcServer {
                         )
                     })
             }
-            RpcServerType::SolanaLike { tx_handler, rate_limiter } => {
+            RpcServerType::SolanaLike {
+                tx_handler,
+                rate_limiter,
+            } => {
                 use rpc_solana_like::RpcServer;
 
-                let rpc_server_impl = Self::create_solana_like_rpc_server_impl(tx_handler, rate_limiter);
+                let rpc_server_impl =
+                    Self::create_solana_like_rpc_server_impl(tx_handler, rate_limiter);
 
                 ServerBuilder::new()
                     .max_request_body_size(MAX_REQUEST_BODY_SIZE)
@@ -171,9 +175,12 @@ impl RpcServer {
 
     pub const fn create_solana_like_rpc_server_impl(
         tx_handler: TransactionHandler,
-        rate_limiter: RpcRateLimiter<Pubkey>
+        rate_limiter: RpcRateLimiter<Pubkey>,
     ) -> rpc_solana_like::RpcServerImpl {
-        rpc_solana_like::RpcServerImpl { tx_handler, rate_limiter }
+        rpc_solana_like::RpcServerImpl {
+            tx_handler,
+            rate_limiter,
+        }
     }
 
     pub fn shutdown(self) {
@@ -197,10 +204,7 @@ pub mod rpc_admin {
         solana_keypair::{Keypair, read_keypair_file},
         solana_pubkey::Pubkey,
         solana_signer::Signer,
-        std::sync::{
-            atomic::Ordering,
-            Arc,
-        },
+        std::sync::{Arc, atomic::Ordering},
         tokio::sync::Mutex,
         tracing::info,
     };
@@ -319,12 +323,11 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            payload::JetRpcSendTransactionConfig, rpc::invalid_params,
+            payload::JetRpcSendTransactionConfig, rpc::RpcRateLimiter, rpc::invalid_params,
             solana::decode_and_deserialize, transaction_handler::TransactionHandler,
-            rpc::RpcRateLimiter,
         },
         jsonrpsee::{
-            core::{RpcResult, async_trait, },
+            core::{RpcResult, async_trait},
             proc_macros::rpc,
             types::error::ErrorObject,
         },
@@ -400,9 +403,12 @@ pub mod rpc_solana_like {
                     tracing::warn!("RPC rate limit exceeded for signer: {}", signer_pubkey);
                     return Err(ErrorObject::owned(
                         -32002,
-                        format!("Transaction sent by {} rate limited. Please try again", signer_pubkey),
+                        format!(
+                            "Transaction sent by {} rate limited. Please try again",
+                            signer_pubkey
+                        ),
                         None::<()>,
-                    ))
+                    ));
                 }
             }
 

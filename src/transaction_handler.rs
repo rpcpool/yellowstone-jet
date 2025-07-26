@@ -1,9 +1,12 @@
 use {
     crate::{
-        rpc::invalid_params,
-        payload::JetRpcSendTransactionConfig, solana::decode_and_deserialize,
+        payload::JetRpcSendTransactionConfig, rpc::invalid_params, solana::decode_and_deserialize,
         transactions::SendTransactionRequest,
+        block_engine::BlockEnginePackets,
     },
+    solana_perf::packet::{PacketBatch},
+    solana_packet::Packet,
+    std::time::SystemTime,
     anyhow::Result,
     bytes::Bytes,
     jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE},
@@ -16,20 +19,22 @@ use {
     },
     solana_rpc_client_api::config::RpcSendTransactionConfig,
     solana_sdk::{
-        commitment_config::CommitmentConfig, transaction::VersionedTransaction,
-        pubkey::Pubkey,
-        system_instruction::SystemInstruction,
+        commitment_config::CommitmentConfig, pubkey::Pubkey, system_instruction::SystemInstruction,
+        transaction::VersionedTransaction,
     },
     solana_transaction_status_client_types::UiTransactionEncoding,
     solana_version::Version,
-    std::sync::{Arc, atomic::{AtomicBool, Ordering,}},
+    std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thiserror::Error,
     tokio::sync::mpsc,
 };
 
-const EVERTIPS_PROGRAMS: &[Pubkey] = &[
-    solana_sdk::pubkey!("3o1bcbWhNpXLUfgLgHWx4S9hLcc7vkaoELjRXF7GwD7r"),
-]; //test
+const EVERTIPS_PROGRAMS: &[Pubkey] = &[solana_sdk::pubkey!(
+    "3o1bcbWhNpXLUfgLgHWx4S9hLcc7vkaoELjRXF7GwD7r"
+)]; //test
 const MIN_TIP_LAMPORTS: u64 = 100_000;
 
 pub static ENABLE_TIP_CHECK: AtomicBool = AtomicBool::new(true);
@@ -81,6 +86,7 @@ pub struct TransactionHandler {
     pub rpc: Arc<RpcClient>,
     pub proxy_sanitize_check: bool,
     pub proxy_preflight_check: bool,
+    pub jito_sender: mpsc::Sender<BlockEnginePackets>,
 }
 
 impl TransactionHandler {
@@ -89,12 +95,14 @@ impl TransactionHandler {
         rpc: &Arc<RpcClient>,
         proxy_sanitize_check: bool,
         proxy_preflight_check: bool,
+        jito_sender: mpsc::Sender<BlockEnginePackets>,
     ) -> Self {
         Self {
             transaction_sink,
             rpc: Arc::clone(rpc),
             proxy_sanitize_check,
             proxy_preflight_check,
+            jito_sender,
         }
     }
 
@@ -132,7 +140,7 @@ impl TransactionHandler {
                 }
             }
         }
-        
+
         let msg = "Transaction does not contain a valid tip to the required program.".to_string();
         return Err(invalid_params(msg));
     }
@@ -143,6 +151,23 @@ impl TransactionHandler {
         config_with_forwarding_policies: JetRpcSendTransactionConfig,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         let config = config_with_forwarding_policies.config;
+
+        let packet = Packet::from_data(None, &transaction).map_err(|_| {
+            TransactionHandlerError::InvalidTransaction("Failed to create packet from transaction".to_string())
+        })?;
+
+        let packet_batch = PacketBatch::new(vec![packet]);
+        let banking_packet_batch = Arc::new((vec![packet_batch],));
+
+        let jito_packets = BlockEnginePackets {
+            banking_packet_batch,
+            stamp: SystemTime::now(),
+            expiration: 100
+        };
+
+        if let Err(e) = self.jito_sender.try_send(jito_packets) {
+        tracing::warn!("Failed to send transaction to Jito channel: {}", e);
+    }
 
         self.filter_transaction(&transaction)?;
 

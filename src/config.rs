@@ -18,16 +18,16 @@ use {
     },
     solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
     std::{
-        collections::{HashSet, HashMap},
+        collections::{HashMap, HashSet},
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
         num::{NonZeroU64, NonZeroUsize},
         ops::Range,
         path::{Path, PathBuf},
     },
     tokio::{fs, time::Duration},
+    tracing::info,
     yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
     yellowstone_vixen::config::YellowstoneConfig,
-    tracing::info,
 };
 
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
@@ -67,6 +67,10 @@ pub struct ConfigJet {
     /// Send retry options
     pub send_transaction_service: ConfigSendTransactionService,
 
+    /// Jito Block Engine config
+    #[serde(default)]
+    pub jito: Option<ConfigJito>,
+
     /// Quic config
     pub quic: ConfigQuic,
 
@@ -79,6 +83,13 @@ pub struct ConfigJet {
 
     /// Prometheus Push Gateway
     pub prometheus: Option<PrometheusConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigJito {
+    pub block_engine_url: String,
+    pub auth_service_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,7 +244,8 @@ fn deserialize_pubkey_limit_map<'de, D>(deserializer: D) -> Result<HashMap<Pubke
 where
     D: Deserializer<'de>,
 {
-    let pubkey_limit_map = Option::<HashMap<String, u32>>::deserialize(deserializer)?.unwrap_or_default();
+    let pubkey_limit_map =
+        Option::<HashMap<String, u32>>::deserialize(deserializer)?.unwrap_or_default();
     pubkey_limit_map
         .into_iter()
         .map(|(s, limit)| {

@@ -7,15 +7,18 @@ use {
     },
 };
 
+pub mod block_engine;
 pub mod blockhash_queue;
 pub mod cluster_tpu_info;
 pub mod config;
 pub mod crypto_provider;
+pub mod convert;
 pub mod feature_flags;
 pub mod grpc_geyser;
 pub mod grpc_jet;
 pub mod grpc_metrics;
 pub mod metrics;
+pub mod ofac;
 pub mod payload;
 pub mod proto;
 pub mod pubkey_challenger;
