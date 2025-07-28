@@ -311,10 +311,7 @@ impl ClusterTpuInfo {
                 // Fetch the leader schedule with retries
                 backoff.reset();
                 loop {
-                    tokio::select! {
-                        _ = backoff.maybe_tick() => {}
-                    }
-
+                    backoff.maybe_tick().await;
                     let ts = Instant::now();
                     match rpc.get_leader_schedule(Some(max_slot)).await {
                         Ok(Some(leader_schedule)) => {

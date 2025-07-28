@@ -581,7 +581,6 @@ impl GeyserStreams for GeyserSubscriber {
 mod tests {
     use {
         crate::{grpc_geyser::SlotTrackingInfo, util::SlotStatus},
-        solana_clock::Slot,
         solana_hash::Hash,
     };
 
