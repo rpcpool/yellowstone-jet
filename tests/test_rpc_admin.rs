@@ -275,3 +275,132 @@ pub async fn reset_identity_to_random() {
     assert_ne!(new_identity.pubkey(), initial_kp.pubkey());
     rpc_admin.shutdown();
 }
+
+#[tokio::test]
+pub async fn test_get_latest_slot() {
+    let rpc_addr = generate_random_local_addr();
+    let initial_kp = Keypair::new();
+    let shared = Arc::new(RwLock::new(initial_kp.insecure_clone()));
+
+    let jet_identity_updater = NullJetIdentitySyncMember {
+        new_identity: Arc::clone(&shared),
+    };
+    let jet_identity_group = JetIdentitySyncGroup::new(
+        initial_kp.insecure_clone(),
+        vec![Box::new(jet_identity_updater)],
+    );
+
+    let expected_slot = 12345u64;
+
+    let mock_cluster_info = MockClusterTpuInfo {
+        latest_slot: expected_slot,
+        ..Default::default()
+    };
+
+    let rpc_admin = RpcServer::new(
+        rpc_addr,
+        RpcServerType::Admin {
+            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
+            allowed_identity: None,
+            cluster_tpu_info: Arc::new(mock_cluster_info),
+        },
+    )
+    .await
+    .expect("Error creating rpc server");
+
+    let client = HttpClientBuilder::default()
+        .build(format!("http://{}", rpc_addr))
+        .expect("Error build rpc client");
+
+    let latest_slot = client
+        .get_latest_slot()
+        .await
+        .expect("Error getting latest slot");
+    assert_eq!(latest_slot, expected_slot);
+
+    rpc_admin.shutdown();
+}
+
+#[tokio::test]
+pub async fn test_get_latest_slot_updates() {
+    let rpc_addr = generate_random_local_addr();
+    let initial_kp = Keypair::new();
+    let shared = Arc::new(RwLock::new(initial_kp.insecure_clone()));
+
+    let jet_identity_updater = NullJetIdentitySyncMember {
+        new_identity: Arc::clone(&shared),
+    };
+    let jet_identity_group = JetIdentitySyncGroup::new(
+        initial_kp.insecure_clone(),
+        vec![Box::new(jet_identity_updater)],
+    );
+
+    let initial_slot = 1000u64;
+    let mock_cluster_info = Arc::new(RwLock::new(MockClusterTpuInfo {
+        latest_slot: initial_slot,
+        cluster_nodes: HashMap::new(),
+        leader_schedule: HashMap::new(),
+    }));
+
+    struct UpdatableMockClusterTpuInfo {
+        inner: Arc<RwLock<MockClusterTpuInfo>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ClusterTpuInfoProvider for UpdatableMockClusterTpuInfo {
+        fn latest_seen_slot(&self) -> Slot {
+            self.inner.read().unwrap().latest_slot
+        }
+
+        fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
+            self.inner.read().unwrap().cluster_nodes.clone()
+        }
+
+        fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey> {
+            self.inner.read().unwrap().leader_schedule.clone()
+        }
+
+        fn get_leader_tpus(&self, _leader_forward_count: usize) -> Vec<TpuInfo> {
+            vec![]
+        }
+    }
+
+    let updatable_mock = Arc::new(UpdatableMockClusterTpuInfo {
+        inner: Arc::clone(&mock_cluster_info),
+    });
+
+    let rpc_admin = RpcServer::new(
+        rpc_addr,
+        RpcServerType::Admin {
+            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
+            allowed_identity: None,
+            cluster_tpu_info: updatable_mock,
+        },
+    )
+    .await
+    .expect("Error creating rpc server");
+
+    let client = HttpClientBuilder::default()
+        .build(format!("http://{}", rpc_addr))
+        .expect("Error build rpc client");
+
+    // Verify initial slot
+    let latest_slot = client
+        .get_latest_slot()
+        .await
+        .expect("Error getting latest slot");
+    assert_eq!(latest_slot, initial_slot);
+
+    // Update the slot value
+    let updated_slot = 2000u64;
+    mock_cluster_info.write().unwrap().latest_slot = updated_slot;
+
+    // Verify updated slot
+    let latest_slot = client
+        .get_latest_slot()
+        .await
+        .expect("Error getting latest slot");
+    assert_eq!(latest_slot, updated_slot);
+
+    rpc_admin.shutdown();
+}
