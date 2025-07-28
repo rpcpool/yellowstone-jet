@@ -1,9 +1,9 @@
 use {
     crate::{
         config::ConfigLewisEvents,
+        lewis::transaction_events::{TransactionEvent, TransactionEventTracker},
         metrics::jet as metrics,
         proto::lewis::{Event, EventAck, transaction_tracker_client::TransactionTrackerClient},
-        lewis::transaction_events::{TransactionEvent, TransactionEventTracker},
     },
     futures::SinkExt,
     solana_clock::Slot,
@@ -258,8 +258,8 @@ pub mod event_builders {
     use {
         super::*,
         crate::{
-            proto::lewis::{Event, EventJet, JetSend},
             lewis::transaction_events::TransactionEvent,
+            proto::lewis::{Event, EventJet, JetSend},
         },
     };
 
@@ -368,7 +368,9 @@ pub mod event_builders {
 mod tests {
     use {
         super::*,
-        crate::{proto::lewis::event::Event as ProtoEvent, lewis::transaction_events::TransactionEvent},
+        crate::{
+            lewis::transaction_events::TransactionEvent, proto::lewis::event::Event as ProtoEvent,
+        },
         solana_pubkey::Pubkey,
         std::{
             net::{IpAddr, Ipv4Addr, SocketAddr},

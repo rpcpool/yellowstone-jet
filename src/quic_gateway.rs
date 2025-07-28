@@ -47,6 +47,7 @@ use {
         config::ConfigQuicTpuPort,
         crypto_provider::crypto_provider,
         identity::JetIdentitySyncMember,
+        lewis::transaction_events::EventReporter,
         metrics::{
             self,
             jet::{
@@ -55,7 +56,6 @@ use {
             },
         },
         stake::StakeInfoMap,
-        lewis::transaction_events::EventReporter,
     },
     bytes::Bytes,
     derive_more::Display,

@@ -36,6 +36,7 @@ use {
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         jet_gateway::spawn_jet_gw_listener,
+        lewis::transaction_events::create_lewis_event_pipeline,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
         quic_gateway::{
             IgnorantLeaderPredictor, QuicGatewayConfig, StakeBasedEvictionStrategy,
@@ -47,7 +48,6 @@ use {
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         task_group::TaskGroup,
-        lewis::transaction_events::create_lewis_event_pipeline,
         transaction_handler::TransactionHandler,
         transactions::{
             AlwaysAllowTransactionPolicyStore, GrpcRootedTxReceiver, QuicGatewayBidi,

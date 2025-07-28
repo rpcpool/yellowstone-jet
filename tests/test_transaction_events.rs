@@ -12,11 +12,13 @@ use {
     },
     yellowstone_jet::{
         config::ConfigLewisEvents,
-        lewis::grpc_lewis::{LewisEventClient, LewisEventClientImpl},
-        proto::lewis::{Event, event::Event as ProtoEvent},
-        lewis::transaction_events::{
-            EventChannelReporter, EventReporter, transaction_event_aggregator_loop,
+        lewis::{
+            grpc_lewis::{LewisEventClient, LewisEventClientImpl},
+            transaction_events::{
+                EventChannelReporter, EventReporter, transaction_event_aggregator_loop,
+            },
         },
+        proto::lewis::{Event, event::Event as ProtoEvent},
     },
 };
 
