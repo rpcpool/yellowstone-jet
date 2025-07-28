@@ -722,9 +722,11 @@ impl TransactionFanout {
                 self.inflight_transactions.remove(&tx_sig);
             }
             GatewayResponse::TxDrop(tx_drop) => {
-                let tx_sig = tx_drop.tx_sig;
-                tracing::trace!("transaction {tx_sig} dropped by QUIC gateway");
-                self.inflight_transactions.remove(&tx_sig);
+                for (gw_tx, _curr_attempt) in tx_drop.dropped_gateway_tx_vec {
+                    let tx_sig = gw_tx.tx_sig;
+                    tracing::trace!("transaction {tx_sig} dropped by QUIC gateway");
+                    self.inflight_transactions.remove(&tx_sig);
+                }
             }
         }
         metrics::sts_inflight_set_size(self.inflight_transactions.len());

@@ -363,11 +363,12 @@ async fn gateway_should_handle_connection_refused_by_peer() {
 
     let resp = gateway_response_source.recv().await.expect("recv response");
 
-    let GatewayResponse::TxDrop(actual_resp) = resp else {
+    let GatewayResponse::TxDrop(mut actual_resp) = resp else {
         panic!("Expected GatewayResponse::TxSent, got something {resp:?}");
     };
 
-    assert_eq!(actual_resp.tx_sig, tx_sig);
+    let (actual_tx_sig, _curr_attempt) = actual_resp.dropped_gateway_tx_vec.pop_front().unwrap();
+    assert_eq!(actual_tx_sig.tx_sig, tx_sig);
     assert!(matches!(
         actual_resp.drop_reason,
         TxDropReason::RemotePeerUnreachable
