@@ -51,7 +51,8 @@ use {
             self,
             jet::{
                 incr_quic_gw_worker_tx_process_cnt, observe_leader_rtt,
-                observe_send_transaction_e2e_latency, quic_send_attempts_inc, set_leader_mtu,
+                observe_quic_gw_stream_data_written, observe_send_transaction_e2e_latency,
+                quic_send_attempts_inc, set_leader_mtu,
             },
         },
         stake::StakeInfoMap,
@@ -634,6 +635,7 @@ struct TxSenderWorkerCompleted {
 impl QuicTxSenderWorker {
     async fn send_tx(&mut self, tx: Bytes) -> Result<SentOk, SendTxError> {
         let t = Instant::now();
+        let data_size = tx.len();
         let mut uni = self.connection.open_uni().await?;
         uni.write_all(&tx).await.map_err(|e| match e {
             WriteError::Stopped(var_int) => SendTxError::StreamStopped(var_int),
@@ -643,6 +645,7 @@ impl QuicTxSenderWorker {
             WriteError::ClosedStream => SendTxError::StreamClosed,
             WriteError::ZeroRttRejected => SendTxError::ZeroRttRejected,
         })?;
+        observe_quic_gw_stream_data_written(self.remote_peer, data_size);
         let e2e_time = t.elapsed();
         let ok = SentOk { e2e_time };
         Ok(ok)

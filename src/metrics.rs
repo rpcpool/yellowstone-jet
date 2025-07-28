@@ -288,6 +288,21 @@ pub mod jet {
             &["remote_peer"]
         ).unwrap();
 
+
+        static ref QUIC_GW_STREAM_DATA_WRITTEN_HIST: HistogramVec = HistogramVec::new(
+            HistogramOpts::new(
+                "quic_gw_stream_data_written_hist",
+                "Histogram of data written to QUIC stream in bytes"
+            )
+            .buckets(vec![1300.0, 1400.0, 1600.0, 1800.0, 2000.0, 2500.0, 3000.0, 4000.0, f64::INFINITY]),
+            &["remote_peer"]
+        ).unwrap();
+    }
+
+    pub fn observe_quic_gw_stream_data_written(remote_peer: Pubkey, bytes: usize) {
+        QUIC_GW_STREAM_DATA_WRITTEN_HIST
+            .with_label_values(&[&remote_peer.to_string()])
+            .observe(bytes as f64);
     }
 
     pub fn incr_quic_gw_tx_relayed_to_worker(remote_peer: Pubkey) {
@@ -424,6 +439,7 @@ pub mod jet {
             register!(QUIC_GW_DROP_TX_CNT);
             register!(QUIC_GW_WORKER_TX_PROCESS_CNT);
             register!(QUIC_GW_TX_RELAYED_TO_WORKER_CNT);
+            register!(QUIC_GW_STREAM_DATA_WRITTEN_HIST);
         });
     }
 
