@@ -576,3 +576,74 @@ impl GeyserStreams for GeyserSubscriber {
         self.transactions_rx.lock().await.take()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use {
+        crate::{grpc_geyser::SlotTrackingInfo, util::SlotStatus},
+        solana_clock::Slot,
+        solana_hash::Hash,
+    };
+
+    #[test]
+    fn test_slot_seen_status() {
+        let mut info = SlotTrackingInfo {
+            statuses_seen: 0,
+            block_height: 0,
+            block_hash: Hash::default(),
+            has_block_meta: false,
+        };
+
+        for status in [
+            SlotStatus::SlotProcessed,
+            SlotStatus::SlotConfirmed,
+            SlotStatus::SlotFinalized,
+            SlotStatus::SlotFirstShredReceived,
+            SlotStatus::SlotCompleted,
+            SlotStatus::SlotCreatedBank,
+            SlotStatus::SlotDead,
+        ] {
+            assert!(!info.has_seen_status(status));
+        }
+
+        for status in [
+            SlotStatus::SlotProcessed,
+            SlotStatus::SlotConfirmed,
+            SlotStatus::SlotFinalized,
+            SlotStatus::SlotFirstShredReceived,
+            SlotStatus::SlotCompleted,
+            SlotStatus::SlotCreatedBank,
+            SlotStatus::SlotDead,
+        ] {
+            info.mark_status_seen(status);
+            assert!(info.has_seen_status(status));
+        }
+
+        info.statuses_seen = 0; // Reset for next checks
+
+        // Mark in reverse order
+        for status in [
+            SlotStatus::SlotDead,
+            SlotStatus::SlotCreatedBank,
+            SlotStatus::SlotCompleted,
+            SlotStatus::SlotFirstShredReceived,
+            SlotStatus::SlotFinalized,
+            SlotStatus::SlotConfirmed,
+            SlotStatus::SlotProcessed,
+        ] {
+            assert!(!info.has_seen_status(status));
+            info.mark_status_seen(status);
+            assert!(info.has_seen_status(status));
+        }
+
+        info.statuses_seen = 0; // Reset again
+
+        // Check that marking a status doesn't affect others
+        info.mark_status_seen(SlotStatus::SlotConfirmed);
+        assert!(!info.has_seen_status(SlotStatus::SlotProcessed));
+
+        info.statuses_seen = 0; // Reset again
+        info.mark_status_seen(SlotStatus::SlotConfirmed);
+        assert!(!info.has_seen_status(SlotStatus::SlotFinalized));
+    }
+}

@@ -1,5 +1,9 @@
 use {
-    crate::{grpc_geyser::SlotUpdateWithStatus, metrics::jet as metrics, util::IncrementalBackoff},
+    crate::{
+        grpc_geyser::SlotUpdateWithStatus,
+        metrics::jet as metrics,
+        util::{IncrementalBackoff, SlotStatus},
+    },
     futures::future::FutureExt,
     solana_client::{
         client_error::Result as ClientResult,
@@ -255,13 +259,21 @@ impl ClusterTpuInfo {
                 .epoch_schedule
                 .clone()
         };
-
+        let mut max_slot = {
+            inner
+                .read()
+                .expect("rwlock schedule poisoned")
+                .latest_seen_slot
+        };
         loop {
             let mut new_latest_slot = tokio::select! {
                 message = slots_rx.recv() => match message {
                     Ok(slot_update) => {
+                        if [SlotStatus::SlotConfirmed, SlotStatus::SlotFinalized].contains(&slot_update.slot_status) {
+                            continue;
+                        }
                         debug!("Received {} for slot {}", slot_update.slot_status.as_str(), slot_update.slot);
-                        Some(slot_update.slot)
+                        slot_update.slot
                     },
                     Err(error) => {
                         anyhow::bail!("failed to receive slot: {error:?}");
@@ -271,123 +283,100 @@ impl ClusterTpuInfo {
 
             // Consume all pending updates to get the highest slot
             while let Ok(slot_update_next) = slots_rx.try_recv() {
-                new_latest_slot = match new_latest_slot {
-                    Some(current) => Some(current.max(slot_update_next.slot)),
-                    None => Some(slot_update_next.slot),
-                };
+                new_latest_slot = new_latest_slot.max(slot_update_next.slot);
             }
 
-            if let Some(slot) = new_latest_slot {
-                // Check if this is actually a newer slot
-                let should_update = {
-                    let locked = inner.read().expect("rwlock epoch schedule poisoned");
-                    slot > locked.latest_seen_slot
-                };
+            if max_slot >= new_latest_slot {
+                continue;
+            }
 
-                if !should_update {
-                    continue;
-                }
+            max_slot = max_slot.max(new_latest_slot);
 
-                let previous_slot = {
-                    let mut locked = inner.write().expect("rwlock epoch schedule poisoned");
-                    let previous = locked.latest_seen_slot;
-                    locked.latest_seen_slot = slot;
-                    previous
-                };
+            let need_schedule_update = {
+                let mut locked = inner.write().expect("rwlock schedule poisoned");
+                locked.latest_seen_slot = max_slot;
+                !locked.leader_schedule.contains_key(&max_slot)
+            };
 
-                debug!(
-                    "Updated latest seen slot from {} to {}",
-                    previous_slot, slot
+            if need_schedule_update {
+                // Get the first slot of the epoch that contains our current slot
+                let epoch = epoch_schedule.get_epoch(max_slot);
+                let epoch_start_slot = epoch_schedule.get_first_slot_in_epoch(epoch);
+
+                info!(
+                    "Need to fetch leader schedule for epoch {} (slot {} is in this epoch)",
+                    epoch, max_slot
                 );
 
-                // Check if we need to update the leader schedule
-                // We fetch the schedule for the entire epoch when we enter a new epoch
-                // or when we don't have schedule data for the current slot
-                let need_schedule_update = {
-                    let locked = inner.read().expect("rwlock epoch schedule poisoned");
-                    !locked.leader_schedule.contains_key(&slot)
-                };
+                // Fetch the leader schedule with retries
+                backoff.reset();
+                loop {
+                    tokio::select! {
+                        _ = backoff.maybe_tick() => {}
+                    }
 
-                if need_schedule_update {
-                    // Get the first slot of the epoch that contains our current slot
-                    let epoch = epoch_schedule.get_epoch(slot);
-                    let epoch_start_slot = epoch_schedule.get_first_slot_in_epoch(epoch);
+                    let ts = Instant::now();
+                    match rpc.get_leader_schedule(Some(max_slot)).await {
+                        Ok(Some(leader_schedule)) => {
+                            let mut locked =
+                                inner.write().expect("rwlock epoch schedule is poisoned");
 
-                    info!(
-                        "Need to fetch leader schedule for epoch {} (slot {} is in this epoch)",
-                        epoch, slot
-                    );
+                            // Clean up old leader schedule entries
+                            // Keep LEADER_SCHEDULE_RETENTION_SLOTS slots before current slot
+                            locked
+                                .leader_schedule
+                                .retain(|leader_schedule_slot, _pubkey| {
+                                    *leader_schedule_slot + LEADER_SCHEDULE_RETENTION_SLOTS
+                                        > max_slot
+                                });
 
-                    // Fetch the leader schedule with retries
-                    backoff.reset();
-                    loop {
-                        tokio::select! {
-                            _ = backoff.maybe_tick() => {}
-                        }
-
-                        let ts = Instant::now();
-                        match rpc.get_leader_schedule(Some(slot)).await {
-                            Ok(Some(leader_schedule)) => {
-                                let mut locked =
-                                    inner.write().expect("rwlock epoch schedule is poisoned");
-
-                                // Clean up old leader schedule entries
-                                // Keep LEADER_SCHEDULE_RETENTION_SLOTS slots before current slot
-                                locked
-                                    .leader_schedule
-                                    .retain(|leader_schedule_slot, _pubkey| {
-                                        *leader_schedule_slot + LEADER_SCHEDULE_RETENTION_SLOTS
-                                            > slot
-                                    });
-
-                                // Add new leader schedule entries
-                                // The RPC returns a map of validator pubkey -> array of slot indices within the epoch
-                                let mut added = 0;
-                                for (pubkey_str, slot_indices) in leader_schedule {
-                                    match pubkey_str.parse::<Pubkey>() {
-                                        Ok(pubkey) => {
-                                            for slot_index in slot_indices {
-                                                let absolute_slot =
-                                                    epoch_start_slot + slot_index as u64;
-                                                if locked
-                                                    .leader_schedule
-                                                    .insert(absolute_slot, pubkey)
-                                                    .is_none()
-                                                {
-                                                    added += 1;
-                                                }
+                            // Add new leader schedule entries
+                            // The RPC returns a map of validator pubkey -> array of slot indices within the epoch
+                            let mut added = 0;
+                            for (pubkey_str, slot_indices) in leader_schedule {
+                                match pubkey_str.parse::<Pubkey>() {
+                                    Ok(pubkey) => {
+                                        for slot_index in slot_indices {
+                                            let absolute_slot =
+                                                epoch_start_slot + slot_index as u64;
+                                            if locked
+                                                .leader_schedule
+                                                .insert(absolute_slot, pubkey)
+                                                .is_none()
+                                            {
+                                                added += 1;
                                             }
                                         }
-                                        Err(error) => warn!(
-                                            "failed to parse leader schedule identity {}: {error:?}",
-                                            pubkey_str
-                                        ),
                                     }
+                                    Err(error) => warn!(
+                                        "failed to parse leader schedule identity {}: {error:?}",
+                                        pubkey_str
+                                    ),
                                 }
+                            }
 
-                                metrics::cluster_leaders_schedule_set_size(
-                                    locked.leader_schedule.len(),
-                                );
-                                info!(
-                                    added,
-                                    total = locked.leader_schedule.len(),
-                                    elapsed_ms = ts.elapsed().as_millis(),
-                                    "updated leader schedule for epoch {}",
-                                    epoch
-                                );
+                            metrics::cluster_leaders_schedule_set_size(
+                                locked.leader_schedule.len(),
+                            );
+                            info!(
+                                added,
+                                total = locked.leader_schedule.len(),
+                                elapsed_ms = ts.elapsed().as_millis(),
+                                "updated leader schedule for epoch {}",
+                                epoch
+                            );
 
-                                break;
-                            }
-                            Ok(None) => {
-                                metrics::cluster_leaders_schedule_set_size(0);
-                                backoff.init();
-                                warn!("RPC returned no leader schedule for slot: {}", slot);
-                            }
-                            Err(error) => {
-                                metrics::cluster_leaders_schedule_set_size(0);
-                                backoff.init();
-                                warn!("failed to get leader schedule: {error:?}");
-                            }
+                            break;
+                        }
+                        Ok(None) => {
+                            metrics::cluster_leaders_schedule_set_size(0);
+                            backoff.init();
+                            warn!("RPC returned no leader schedule for slot: {}", max_slot);
+                        }
+                        Err(error) => {
+                            metrics::cluster_leaders_schedule_set_size(0);
+                            backoff.init();
+                            warn!("failed to get leader schedule: {error:?}");
                         }
                     }
                 }
