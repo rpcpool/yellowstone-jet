@@ -5,7 +5,8 @@ use {
         util::{BlockHeight, CommitmentLevel, IncrementalBackoff, SlotStatus},
     },
     futures::{
-        stream::{Stream, StreamExt}, FutureExt, TryFutureExt
+        FutureExt, TryFutureExt,
+        stream::{Stream, StreamExt},
     },
     maplit::hashmap,
     semver::{Version, VersionReq},
@@ -13,9 +14,14 @@ use {
     solana_clock::Slot,
     solana_hash::{Hash, ParseHashError},
     solana_signature::Signature,
-    std::{collections::BTreeMap, future::Future, sync::Arc, time::{Duration, Instant}},
+    std::{
+        collections::BTreeMap,
+        future::Future,
+        sync::Arc,
+        time::{Duration, Instant},
+    },
     tokio::{
-        sync::{broadcast, mpsc, oneshot, Mutex},
+        sync::{Mutex, broadcast, mpsc, oneshot},
         task::{JoinError, JoinHandle},
         time,
     },
@@ -24,7 +30,10 @@ use {
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
         prelude::{
-            subscribe_update::UpdateOneof, BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel, SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots, SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot, SubscribeUpdateTransactionStatus
+            BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel,
+            SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots,
+            SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta,
+            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
         },
         tonic::Status,
     },
@@ -234,7 +243,7 @@ impl GeyserSubscriber {
     /*
      * Core stream processing logic - processes until stream ends.
      * Shutdown is handled in the outer loop between reconnections.
-    */
+     */
     pub async fn process_grpc_stream<S>(
         mut stream: S,
         slots_tx: &broadcast::Sender<SlotUpdateWithStatus>,
@@ -372,7 +381,10 @@ impl GeyserSubscriber {
                     .await
                 {
                     Ok(_) => {
-                        metrics::observe_grpc_channel_send_time("transactions", send_start.elapsed());
+                        metrics::observe_grpc_channel_send_time(
+                            "transactions",
+                            send_start.elapsed(),
+                        );
                     }
                     Err(_) => {
                         metrics::incr_grpc_channel_send_failures("transactions");
@@ -395,7 +407,11 @@ impl GeyserSubscriber {
             *slot_tracking = slot_tracking.split_off(&slot);
             let after_size = slot_tracking.len();
 
-            debug!("Cleaned up {} slots on finalized slot {}", before_size - after_size, slot);
+            debug!(
+                "Cleaned up {} slots on finalized slot {}",
+                before_size - after_size,
+                slot
+            );
 
             metrics::set_slot_tracking_btreemap_size(slot_tracking.len());
         }
@@ -477,7 +493,10 @@ impl GeyserSubscriber {
                     let send_start = Instant::now();
                     match block_meta_tx.send(block_meta) {
                         Ok(_) => {
-                            metrics::observe_grpc_channel_send_time("block_meta", send_start.elapsed());
+                            metrics::observe_grpc_channel_send_time(
+                                "block_meta",
+                                send_start.elapsed(),
+                            );
                         }
                         Err(_) => {
                             metrics::incr_grpc_channel_send_failures("block_meta");
@@ -490,7 +509,10 @@ impl GeyserSubscriber {
                         .await
                     {
                         Ok(_) => {
-                            metrics::observe_grpc_channel_send_time("transactions", send_start.elapsed());
+                            metrics::observe_grpc_channel_send_time(
+                                "transactions",
+                                send_start.elapsed(),
+                            );
                         }
                         Err(_) => {
                             metrics::incr_grpc_channel_send_failures("transactions");

@@ -17,24 +17,20 @@ use {
     },
 };
 #[cfg(test)]
-use {solana_client::rpc_response::RpcContactInfo, solana_clock::Slot, solana_pubkey::Pubkey, std::collections::HashMap, yellowstone_jet::cluster_tpu_info::{ClusterTpuInfoProvider, TpuInfo}};
+use {
+    solana_client::rpc_response::RpcContactInfo,
+    solana_clock::Slot,
+    solana_pubkey::Pubkey,
+    std::collections::HashMap,
+    yellowstone_jet::cluster_tpu_info::{ClusterTpuInfoProvider, TpuInfo},
+};
 
 #[cfg(test)]
+#[derive(Default)]
 pub struct MockClusterTpuInfo {
     latest_slot: Slot,
     cluster_nodes: HashMap<Pubkey, RpcContactInfo>,
     leader_schedule: HashMap<Slot, Pubkey>,
-}
-
-#[cfg(test)]
-impl Default for MockClusterTpuInfo {
-    fn default() -> Self {
-        Self {
-            latest_slot: 0,
-            cluster_nodes: HashMap::new(),
-            leader_schedule: HashMap::new(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -100,7 +96,7 @@ pub async fn set_identity_if_expected() {
         initial_kp.insecure_clone(),
         vec![Box::new(jet_identity_updater)],
     );
-      let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
+    let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
     let rpc_admin = RpcServer::new(
         rpc_addr,
         RpcServerType::Admin {

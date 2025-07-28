@@ -1,7 +1,7 @@
 use {
     crate::{cluster_tpu_info::ClusterTpuInfoProvider, transaction_handler::TransactionHandler},
     anyhow::Context as _,
-    futures::future::{ready, BoxFuture, FutureExt, TryFutureExt},
+    futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
     hyper::{Request, Response, StatusCode},
     jsonrpsee::{
         core::http_helpers::Body,
@@ -137,10 +137,18 @@ impl RpcServer {
 
 pub mod rpc_admin {
     use {
-        super::invalid_params, crate::cluster_tpu_info::ClusterTpuInfoProvider, jsonrpsee::{
-            core::{async_trait, RpcResult},
+        super::invalid_params,
+        crate::cluster_tpu_info::ClusterTpuInfoProvider,
+        jsonrpsee::{
+            core::{RpcResult, async_trait},
             proc_macros::rpc,
-        }, solana_keypair::{read_keypair_file, Keypair}, solana_pubkey::Pubkey, solana_signer::Signer, std::sync::Arc, tokio::sync::Mutex, tracing::info
+        },
+        solana_keypair::{Keypair, read_keypair_file},
+        solana_pubkey::Pubkey,
+        solana_signer::Signer,
+        std::sync::Arc,
+        tokio::sync::Mutex,
+        tracing::info,
     };
 
     #[rpc(server, client)]

@@ -185,10 +185,10 @@ impl ClusterTpuInfo {
         )
     }
 
-
     pub fn latest_seen_slot(&self) -> Slot {
         let start = Instant::now();
-        let result = self.inner
+        let result = self
+            .inner
             .read()
             .expect("rwlock schedule poisoned")
             .latest_seen_slot;
@@ -323,7 +323,9 @@ impl ClusterTpuInfo {
                 updates_drained += 1;
                 metrics::incr_slot_status_received_by_type(slot_update_next.slot_status.as_str());
 
-                if ![SlotStatus::SlotConfirmed, SlotStatus::SlotFinalized].contains(&slot_update_next.slot_status) {
+                if ![SlotStatus::SlotConfirmed, SlotStatus::SlotFinalized]
+                    .contains(&slot_update_next.slot_status)
+                {
                     new_latest_slot = new_latest_slot.max(slot_update_next.slot);
                 }
             }
@@ -340,7 +342,11 @@ impl ClusterTpuInfo {
                 let check_start = Instant::now();
                 let lock_start = Instant::now();
                 let mut locked = inner.write().expect("rwlock schedule poisoned");
-                metrics::observe_cluster_tpu_lock_time("update_and_check_schedule", "write", lock_start.elapsed());
+                metrics::observe_cluster_tpu_lock_time(
+                    "update_and_check_schedule",
+                    "write",
+                    lock_start.elapsed(),
+                );
 
                 locked.latest_seen_slot = max_slot;
                 let need_update = !locked.leader_schedule.contains_key(&max_slot);
@@ -373,16 +379,24 @@ impl ClusterTpuInfo {
 
                             let parse_start = Instant::now();
                             let lock_start = Instant::now();
-                            let mut locked = inner.write().expect("rwlock epoch schedule is poisoned");
-                            metrics::observe_cluster_tpu_lock_time("update_leader_schedule", "write", lock_start.elapsed());
+                            let mut locked =
+                                inner.write().expect("rwlock epoch schedule is poisoned");
+                            metrics::observe_cluster_tpu_lock_time(
+                                "update_leader_schedule",
+                                "write",
+                                lock_start.elapsed(),
+                            );
 
                             // Track entries before cleanup
                             let entries_before = locked.leader_schedule.len();
 
                             // Clean up old leader schedule entries
-                            locked.leader_schedule.retain(|leader_schedule_slot, _pubkey| {
-                                *leader_schedule_slot + LEADER_SCHEDULE_RETENTION_SLOTS > max_slot
-                            });
+                            locked
+                                .leader_schedule
+                                .retain(|leader_schedule_slot, _pubkey| {
+                                    *leader_schedule_slot + LEADER_SCHEDULE_RETENTION_SLOTS
+                                        > max_slot
+                                });
 
                             let entries_cleaned = entries_before - locked.leader_schedule.len();
                             metrics::set_leader_schedule_entries_cleaned(entries_cleaned);
@@ -393,8 +407,13 @@ impl ClusterTpuInfo {
                                 match pubkey_str.parse::<Pubkey>() {
                                     Ok(pubkey) => {
                                         for slot_index in slot_indices {
-                                            let absolute_slot = epoch_start_slot + slot_index as u64;
-                                            if locked.leader_schedule.insert(absolute_slot, pubkey).is_none() {
+                                            let absolute_slot =
+                                                epoch_start_slot + slot_index as u64;
+                                            if locked
+                                                .leader_schedule
+                                                .insert(absolute_slot, pubkey)
+                                                .is_none()
+                                            {
                                                 added += 1;
                                             }
                                         }
@@ -407,7 +426,9 @@ impl ClusterTpuInfo {
                             }
 
                             metrics::set_leader_schedule_entries_added(added);
-                            metrics::cluster_leaders_schedule_set_size(locked.leader_schedule.len());
+                            metrics::cluster_leaders_schedule_set_size(
+                                locked.leader_schedule.len(),
+                            );
                             metrics::set_leader_schedule_size(locked.leader_schedule.len());
 
                             info!(
@@ -419,7 +440,9 @@ impl ClusterTpuInfo {
                             );
 
                             drop(locked);
-                            metrics::observe_leader_schedule_parse_insert_time(parse_start.elapsed());
+                            metrics::observe_leader_schedule_parse_insert_time(
+                                parse_start.elapsed(),
+                            );
 
                             break;
                         }
