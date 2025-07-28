@@ -25,8 +25,8 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    setup_tracing(false)?;
+async fn main() -> Result<(), String> {
+    setup_tracing(false).expect("Failed to set up tracing");
     let args = Args::parse();
 
     let service = TransactionTrackerServer::new(DummyLewisService {
@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(Server::builder()
         .add_service(service)
         .serve(args.listen)
-        .await?)
+        .await.expect("Failed to start server"))
 }
 
 #[derive(Debug)]
@@ -50,12 +50,12 @@ impl DummyLewisService {
     async fn handle_stream(
         client_id: u64,
         mut request: Request<Streaming<Event>>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), Status> {
         info!(client_id, "new event stream started");
 
         let mut event_count = 0u64;
 
-        while let Some(event) = request.get_mut().message().await? {
+        while let Some(event) = request.get_mut().message().await.expect("Failed to read event") {
             event_count += 1;
 
             match event.event {
@@ -64,7 +64,7 @@ impl DummyLewisService {
                 }
                 Some(EventType::Jet(jet)) => {
                     let sig = Signature::try_from(jet.sig)
-                        .map_err(|_| Status::invalid_argument("invalid signature"))?;
+                        .map_err(|_| Status::invalid_argument("invalid signature")).expect("Failed to parse signature");
 
                     for (idx, send) in jet.jet_sends.iter().enumerate() {
                         info!(

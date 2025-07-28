@@ -55,7 +55,7 @@ use {
             },
         },
         stake::StakeInfoMap,
-        transaction_events::EventReporter,
+        lewis::transaction_events::EventReporter,
     },
     bytes::Bytes,
     derive_more::Display,

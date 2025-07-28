@@ -47,7 +47,7 @@ use {
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         task_group::TaskGroup,
-        transaction_events::create_lewis_event_pipeline,
+        lewis::transaction_events::create_lewis_event_pipeline,
         transaction_handler::TransactionHandler,
         transactions::{
             AlwaysAllowTransactionPolicyStore, GrpcRootedTxReceiver, QuicGatewayBidi,

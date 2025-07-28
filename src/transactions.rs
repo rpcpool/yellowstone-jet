@@ -5,7 +5,7 @@ use {
         grpc_geyser::{BlockMetaWithCommitment, GrpcUpdateMessage, TransactionReceived},
         metrics::jet as metrics,
         quic_gateway::{GatewayResponse, GatewayTransaction},
-        transaction_events::EventReporter,
+        lewis::transaction_events::EventReporter,
         util::CommitmentLevel,
     },
     bytes::Bytes,

@@ -39,7 +39,7 @@
 use {
     crate::{
         config::ConfigLewisEvents,
-        grpc_lewis::{LewisClientError, LewisEventClient},
+        lewis::grpc_lewis::{LewisClientError, LewisEventClient},
         metrics::jet as metrics,
     },
     solana_clock::Slot,

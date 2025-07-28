@@ -1002,7 +1002,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 async fn it_should_emit_events_through_event_reporter() {
     use {
         std::sync::{Arc, Mutex},
-        yellowstone_jet::transaction_events::EventReporter,
+        yellowstone_jet::lewis::transaction_events::EventReporter,
     };
 
     #[derive(Clone, Default)]
