@@ -16,6 +16,46 @@ use {
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
     },
 };
+#[cfg(test)]
+use {solana_client::rpc_response::RpcContactInfo, solana_clock::Slot, solana_pubkey::Pubkey, std::collections::HashMap, yellowstone_jet::cluster_tpu_info::{ClusterTpuInfoProvider, TpuInfo}};
+
+#[cfg(test)]
+pub struct MockClusterTpuInfo {
+    latest_slot: Slot,
+    cluster_nodes: HashMap<Pubkey, RpcContactInfo>,
+    leader_schedule: HashMap<Slot, Pubkey>,
+}
+
+#[cfg(test)]
+impl Default for MockClusterTpuInfo {
+    fn default() -> Self {
+        Self {
+            latest_slot: 0,
+            cluster_nodes: HashMap::new(),
+            leader_schedule: HashMap::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl ClusterTpuInfoProvider for MockClusterTpuInfo {
+    fn latest_seen_slot(&self) -> Slot {
+        self.latest_slot
+    }
+
+    fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
+        self.cluster_nodes.clone()
+    }
+
+    fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey> {
+        self.leader_schedule.clone()
+    }
+
+    fn get_leader_tpus(&self, _leader_forward_count: usize) -> Vec<TpuInfo> {
+        vec![]
+    }
+}
 
 fn clean_file(path: &PathBuf) {
     if path.exists() {
@@ -60,11 +100,13 @@ pub async fn set_identity_if_expected() {
         initial_kp.insecure_clone(),
         vec![Box::new(jet_identity_updater)],
     );
+      let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
     let rpc_admin = RpcServer::new(
         rpc_addr,
         RpcServerType::Admin {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: Some(expected_identity.pubkey()),
+            cluster_tpu_info: mock_cluster_info,
         },
     )
     .await
@@ -107,11 +149,13 @@ pub async fn set_identity_wrong_keypair() {
         initial_kp.insecure_clone(),
         vec![Box::new(jet_identity_updater)],
     );
+    let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
     let rpc_admin = RpcServer::new(
         rpc_addr,
         RpcServerType::Admin {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: Some(expected_identity.pubkey()),
+            cluster_tpu_info: mock_cluster_info,
         },
     )
     .await
@@ -149,11 +193,13 @@ pub async fn set_identity_from_file() {
         initial_kp.insecure_clone(),
         vec![Box::new(jet_identity_updater)],
     );
+    let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
     let rpc_admin = RpcServer::new(
         rpc_addr,
         RpcServerType::Admin {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: Some(expected_identity.pubkey()),
+            cluster_tpu_info: mock_cluster_info,
         },
     )
     .await
@@ -196,11 +242,13 @@ pub async fn reset_identity_to_random() {
         initial_kp.insecure_clone(),
         vec![Box::new(jet_identity_updater)],
     );
+    let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
     let rpc_admin = RpcServer::new(
         rpc_addr,
         RpcServerType::Admin {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: Some(expected_identity.pubkey()),
+            cluster_tpu_info: mock_cluster_info,
         },
     )
     .await

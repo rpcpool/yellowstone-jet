@@ -5,8 +5,7 @@ use {
         util::{BlockHeight, CommitmentLevel, IncrementalBackoff, SlotStatus},
     },
     futures::{
-        FutureExt, TryFutureExt,
-        stream::{Stream, StreamExt},
+        stream::{Stream, StreamExt}, FutureExt, TryFutureExt
     },
     maplit::hashmap,
     semver::{Version, VersionReq},
@@ -14,9 +13,9 @@ use {
     solana_clock::Slot,
     solana_hash::{Hash, ParseHashError},
     solana_signature::Signature,
-    std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration},
+    std::{collections::BTreeMap, future::Future, sync::Arc, time::{Duration, Instant}},
     tokio::{
-        sync::{Mutex, broadcast, mpsc, oneshot},
+        sync::{broadcast, mpsc, oneshot, Mutex},
         task::{JoinError, JoinHandle},
         time,
     },
@@ -25,10 +24,7 @@ use {
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
         prelude::{
-            BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel,
-            SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots,
-            SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta,
-            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
+            subscribe_update::UpdateOneof, BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel, SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots, SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot, SubscribeUpdateTransactionStatus
         },
         tonic::Status,
     },
@@ -238,7 +234,7 @@ impl GeyserSubscriber {
     /*
      * Core stream processing logic - processes until stream ends.
      * Shutdown is handled in the outer loop between reconnections.
-     */
+    */
     pub async fn process_grpc_stream<S>(
         mut stream: S,
         slots_tx: &broadcast::Sender<SlotUpdateWithStatus>,
@@ -261,6 +257,8 @@ impl GeyserSubscriber {
                         transactions_tx,
                     )
                     .await?;
+
+                    metrics::set_slot_tracking_btreemap_size(slot_tracking.len());
                 }
                 Err(error) => {
                     return Err(GeyserError::StreamError(error));
@@ -278,7 +276,16 @@ impl GeyserSubscriber {
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
         transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
     ) -> Result<()> {
-        match msg.update_oneof {
+        let msg_start = Instant::now();
+        let msg_type = match &msg.update_oneof {
+            Some(UpdateOneof::Slot(_)) => "slot",
+            Some(UpdateOneof::TransactionStatus(_)) => "transaction",
+            Some(UpdateOneof::BlockMeta(_)) => "block_meta",
+            Some(UpdateOneof::Ping(_)) => "ping",
+            _ => "unknown",
+        };
+
+        let result = match msg.update_oneof {
             Some(UpdateOneof::Slot(slot_update)) => {
                 Self::handle_slot_update(
                     slot_update,
@@ -287,23 +294,28 @@ impl GeyserSubscriber {
                     block_meta_tx,
                     transactions_tx,
                 )
-                .await?;
+                .await
             }
             Some(UpdateOneof::TransactionStatus(tx_status)) => {
-                Self::handle_transaction_status(tx_status, transactions_tx).await?;
+                Self::handle_transaction_status(tx_status, transactions_tx).await
             }
             Some(UpdateOneof::BlockMeta(block_meta)) => {
                 Self::handle_block_meta(block_meta, slot_tracking, block_meta_tx, transactions_tx)
-                    .await?;
+                    .await
             }
             Some(UpdateOneof::Ping(_)) => {
                 debug!("ping received");
+                Ok(())
             }
             _ => {
                 return Err(GeyserError::UnexpectedMessage(format!("{msg:?}")));
             }
-        }
-        Ok(())
+        };
+
+        metrics::observe_grpc_message_handle_time(msg_type, msg_start.elapsed());
+        metrics::incr_grpc_messages_processed(msg_type);
+
+        result
     }
 
     async fn handle_slot_update(
@@ -313,6 +325,7 @@ impl GeyserSubscriber {
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
         transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
     ) -> Result<()> {
+        let handle_start = Instant::now();
         let SubscribeUpdateSlot { slot, status, .. } = slot_update;
         let slot_status = SlotStatus::from(status);
 
@@ -321,34 +334,73 @@ impl GeyserSubscriber {
 
         // Send slot update immediately
         let slot_update = SlotUpdateWithStatus { slot, slot_status };
-        let _ = slots_tx.send(slot_update);
+        let send_start = Instant::now();
+        match slots_tx.send(slot_update) {
+            Ok(_) => {
+                metrics::observe_grpc_channel_send_time("slots", send_start.elapsed());
+            }
+            Err(_) => {
+                metrics::incr_grpc_channel_send_failures("slots");
+            }
+        }
 
         // Check if we should emit block meta
+        let mut emissions = 0;
         if entry.has_block_meta {
             if let Some(commitment) = slot_status_to_commitment(slot_status) {
+                emissions += 1;
                 let block_meta = BlockMetaWithCommitment {
                     slot,
                     block_height: entry.block_height,
                     block_hash: entry.block_hash,
                     commitment,
                 };
-                let _ = block_meta_tx.send(block_meta);
-                transactions_tx
+
+                let send_start = Instant::now();
+                match block_meta_tx.send(block_meta) {
+                    Ok(_) => {
+                        metrics::observe_grpc_channel_send_time("block_meta", send_start.elapsed());
+                    }
+                    Err(_) => {
+                        metrics::incr_grpc_channel_send_failures("block_meta");
+                    }
+                }
+
+                let send_start = Instant::now();
+                match transactions_tx
                     .send(GrpcUpdateMessage::BlockMeta(block_meta))
                     .await
-                    .map_err(|_| GeyserError::ChannelSendFailed {
-                        channel: "transactions",
-                    })?;
+                {
+                    Ok(_) => {
+                        metrics::observe_grpc_channel_send_time("transactions", send_start.elapsed());
+                    }
+                    Err(_) => {
+                        metrics::incr_grpc_channel_send_failures("transactions");
+                        return Err(GeyserError::ChannelSendFailed {
+                            channel: "transactions",
+                        });
+                    }
+                }
             }
         }
+
+        // Track block meta emissions
+        metrics::observe_block_meta_emissions_count(emissions);
 
         metrics::grpc_slot_set(slot_status, slot);
 
         // Cleanup on finalized
         if slot_status == SlotStatus::SlotFinalized {
+            let before_size = slot_tracking.len();
             *slot_tracking = slot_tracking.split_off(&slot);
+            let after_size = slot_tracking.len();
+
+            debug!("Cleaned up {} slots on finalized slot {}", before_size - after_size, slot);
+
+            metrics::set_slot_tracking_btreemap_size(slot_tracking.len());
         }
 
+        metrics::observe_grpc_slot_update_handle_time(handle_start.elapsed());
         Ok(())
     }
 
@@ -361,15 +413,25 @@ impl GeyserSubscriber {
         } = tx_status;
         let signature = Signature::try_from(signature).expect("Invalid signature format");
 
-        transactions_tx
+        let send_start = Instant::now();
+        match transactions_tx
             .send(GrpcUpdateMessage::Transaction(TransactionReceived {
                 slot,
                 signature,
             }))
             .await
-            .map_err(|_| GeyserError::ChannelSendFailed {
-                channel: "transactions",
-            })
+        {
+            Ok(_) => {
+                metrics::observe_grpc_channel_send_time("transactions", send_start.elapsed());
+                Ok(())
+            }
+            Err(_) => {
+                metrics::incr_grpc_channel_send_failures("transactions");
+                Err(GeyserError::ChannelSendFailed {
+                    channel: "transactions",
+                })
+            }
+        }
     }
 
     async fn handle_block_meta(
@@ -396,6 +458,7 @@ impl GeyserSubscriber {
         entry.has_block_meta = true;
 
         // Emit block meta for any commitment statuses we've already seen
+        let mut emissions = 0;
         for status in [
             SlotStatus::SlotProcessed,
             SlotStatus::SlotConfirmed,
@@ -403,22 +466,45 @@ impl GeyserSubscriber {
         ] {
             if entry.has_seen_status(status) {
                 if let Some(commitment) = slot_status_to_commitment(status) {
+                    emissions += 1;
                     let block_meta = BlockMetaWithCommitment {
                         slot,
                         block_height,
                         block_hash,
                         commitment,
                     };
-                    let _ = block_meta_tx.send(block_meta);
-                    transactions_tx
+
+                    let send_start = Instant::now();
+                    match block_meta_tx.send(block_meta) {
+                        Ok(_) => {
+                            metrics::observe_grpc_channel_send_time("block_meta", send_start.elapsed());
+                        }
+                        Err(_) => {
+                            metrics::incr_grpc_channel_send_failures("block_meta");
+                        }
+                    }
+
+                    let send_start = Instant::now();
+                    match transactions_tx
                         .send(GrpcUpdateMessage::BlockMeta(block_meta))
                         .await
-                        .map_err(|_| GeyserError::ChannelSendFailed {
-                            channel: "transactions",
-                        })?;
+                    {
+                        Ok(_) => {
+                            metrics::observe_grpc_channel_send_time("transactions", send_start.elapsed());
+                        }
+                        Err(_) => {
+                            metrics::incr_grpc_channel_send_failures("transactions");
+                            return Err(GeyserError::ChannelSendFailed {
+                                channel: "transactions",
+                            });
+                        }
+                    }
                 }
             }
         }
+
+        // Track block meta emissions
+        metrics::observe_block_meta_emissions_count(emissions);
 
         Ok(())
     }

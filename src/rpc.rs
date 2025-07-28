@@ -1,7 +1,7 @@
 use {
-    crate::transaction_handler::TransactionHandler,
+    crate::{cluster_tpu_info::ClusterTpuInfoProvider, transaction_handler::TransactionHandler},
     anyhow::Context as _,
-    futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
+    futures::future::{ready, BoxFuture, FutureExt, TryFutureExt},
     hyper::{Request, Response, StatusCode},
     jsonrpsee::{
         core::http_helpers::Body,
@@ -31,6 +31,7 @@ pub enum RpcServerType {
     Admin {
         jet_identity_updater: Arc<Mutex<Box<dyn JetIdentityUpdater + Send + 'static>>>,
         allowed_identity: Option<Pubkey>,
+        cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
     },
 
     SolanaLike {
@@ -59,6 +60,7 @@ impl RpcServer {
             RpcServerType::Admin {
                 jet_identity_updater: quic_identity_man,
                 allowed_identity,
+                cluster_tpu_info,
             } => {
                 use rpc_admin::{RpcServer, RpcServerImpl};
 
@@ -91,6 +93,7 @@ impl RpcServer {
                             RpcServerImpl {
                                 allowed_identity,
                                 jet_identity_updater: quic_identity_man,
+                                cluster_tpu_info,
                             }
                             .into_rpc(),
                         )
@@ -134,21 +137,17 @@ impl RpcServer {
 
 pub mod rpc_admin {
     use {
-        super::invalid_params,
-        jsonrpsee::{
-            core::{RpcResult, async_trait},
+        super::invalid_params, crate::cluster_tpu_info::ClusterTpuInfoProvider, jsonrpsee::{
+            core::{async_trait, RpcResult},
             proc_macros::rpc,
-        },
-        solana_keypair::{Keypair, read_keypair_file},
-        solana_pubkey::Pubkey,
-        solana_signer::Signer,
-        std::sync::Arc,
-        tokio::sync::Mutex,
-        tracing::info,
+        }, solana_keypair::{read_keypair_file, Keypair}, solana_pubkey::Pubkey, solana_signer::Signer, std::sync::Arc, tokio::sync::Mutex, tracing::info
     };
 
     #[rpc(server, client)]
     pub trait Rpc {
+        #[method(name = "getLatestSlot")]
+        async fn get_latest_slot(&self) -> RpcResult<u64>;
+
         #[method(name = "getIdentity")]
         async fn get_identity(&self) -> RpcResult<String>;
 
@@ -177,10 +176,15 @@ pub mod rpc_admin {
         // pub quic: QuicTxSender,
         pub allowed_identity: Option<Pubkey>,
         pub jet_identity_updater: Arc<Mutex<Box<dyn JetIdentityUpdater + Send + 'static>>>,
+        pub cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
     }
 
     #[async_trait]
     impl RpcServer for RpcServerImpl {
+        async fn get_latest_slot(&self) -> RpcResult<u64> {
+            Ok(self.cluster_tpu_info.latest_seen_slot())
+        }
+
         async fn get_identity(&self) -> RpcResult<String> {
             let identity = self.jet_identity_updater.lock().await.get_identity().await;
             Ok(identity.to_string())

@@ -288,6 +288,111 @@ pub mod jet {
             &["remote_peer"]
         ).unwrap();
 
+        // Metrics for Investigating decrease of performance when using first_shred_received
+        // Lock acquisition time - shows thread contention
+        static ref CLUSTER_TPU_LOCK_ACQUISITION_TIME: HistogramVec = HistogramVec::new(
+            HistogramOpts::new("cluster_tpu_lock_acquisition_ms", "Time to acquire read/write locks in ClusterTpuInfo")
+                .buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]),
+            &["method", "lock_type"]
+        ).unwrap();
+
+        // HashMap lookup time for leader schedule
+        static ref LEADER_SCHEDULE_EXISTS_CHECK_TIME: Histogram = Histogram::with_opts(
+            HistogramOpts::new("leader_schedule_exists_check_ms", "Time spent checking if slot exists in leader_schedule HashMap")
+                .buckets(vec![0.001, 0.01, 0.05, 0.1, 0.5, 1.0])
+        ).unwrap();
+
+        // Time per slot update loop iteration
+        static ref SLOT_UPDATE_LOOP_ITERATION_TIME: Histogram = Histogram::with_opts(
+            HistogramOpts::new("slot_update_loop_iteration_ms", "Time for one complete iteration of update_latest_slot_and_leader_schedule loop")
+                .buckets(vec![0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0])
+        ).unwrap();
+
+        // Batch size - high values mean backpressure
+        static ref SLOT_UPDATES_DRAINED_COUNT: Histogram = Histogram::with_opts(
+            HistogramOpts::new("slot_updates_drained_count", "Number of pending slot updates consumed in one loop iteration")
+                .buckets(vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0])
+        ).unwrap();
+
+        // Rate of each slot status type
+        static ref SLOT_STATUS_RECEIVED_BY_TYPE: IntCounterVec = IntCounterVec::new(
+            Opts::new("slot_status_received_by_type_total", "Count of each SlotStatus type received in ClusterTpuInfo"),
+            &["status"]
+        ).unwrap();
+
+        // RPC call duration
+        static ref LEADER_SCHEDULE_RPC_FETCH_TIME: Histogram = Histogram::with_opts(
+            HistogramOpts::new("leader_schedule_rpc_fetch_ms", "Time to fetch leader schedule via RPC")
+                .buckets(vec![100.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0])
+        ).unwrap();
+
+        // RPC retry count
+        static ref LEADER_SCHEDULE_RPC_ATTEMPTS: IntCounter = IntCounter::new(
+            "leader_schedule_rpc_attempts_total", "Total RPC attempts to fetch leader schedule"
+        ).unwrap();
+
+        // Schedule parsing time
+        static ref LEADER_SCHEDULE_PARSE_AND_INSERT_TIME: Histogram = Histogram::with_opts(
+            HistogramOpts::new("leader_schedule_parse_insert_ms", "Time to parse RPC response and insert into HashMap")
+                .buckets(vec![1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0])
+        ).unwrap();
+
+        // HashMap size for memory tracking
+        static ref LEADER_SCHEDULE_SIZE: IntGauge = IntGauge::new(
+            "leader_schedule_hashmap_size", "Number of entries in leader_schedule HashMap"
+        ).unwrap();
+
+        static ref LEADER_SCHEDULE_ENTRIES_ADDED: IntGauge = IntGauge::new(
+            "leader_schedule_entries_added_last_update", "Number of entries added in last schedule update"
+        ).unwrap();
+
+        static ref LEADER_SCHEDULE_ENTRIES_CLEANED: IntGauge = IntGauge::new(
+            "leader_schedule_entries_cleaned_last_update", "Number of entries removed in last cleanup"
+        ).unwrap();
+
+        // gRPC message processing time by type
+        static ref GRPC_MESSAGE_HANDLE_TIME: HistogramVec = HistogramVec::new(
+            HistogramOpts::new("grpc_message_handle_time_us", "Time to process each gRPC message type in microseconds")
+                .buckets(vec![1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0]),
+            &["message_type"]
+        ).unwrap();
+
+        // Slot update specific timing
+        static ref GRPC_SLOT_UPDATE_HANDLE_TIME: Histogram = Histogram::with_opts(
+            HistogramOpts::new("grpc_slot_update_handle_time_us", "Time to handle slot update message specifically")
+                .buckets(vec![1.0, 5.0, 10.0, 50.0, 100.0, 500.0])
+        ).unwrap();
+
+        // Channel send latency
+        static ref GRPC_CHANNEL_SEND_TIME: HistogramVec = HistogramVec::new(
+            HistogramOpts::new("grpc_channel_send_time_us", "Time to send on broadcast channels")
+                .buckets(vec![0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0]),
+            &["channel"]
+        ).unwrap();
+
+        // Channel overflow detection
+        static ref GRPC_CHANNEL_SEND_FAILURES: IntCounterVec = IntCounterVec::new(
+            Opts::new("grpc_channel_send_failures_total", "Failed channel sends"),
+            &["channel"]
+        ).unwrap();
+
+        // Tracks cleanup effectiveness
+        static ref SLOT_TRACKING_BTREEMAP_SIZE: IntGauge = IntGauge::new(
+            "slot_tracking_btreemap_size", "Number of slots in grpc_geyser slot_tracking BTreeMap"
+        ).unwrap();
+
+        // Duplicate processing detection
+        static ref BLOCK_META_EMISSIONS_COUNT: Histogram = Histogram::with_opts(
+            HistogramOpts::new("block_meta_emissions_per_slot", "Number of times block meta is emitted for a single slot")
+                .buckets(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+        ).unwrap();
+
+        // Message throughput
+        static ref GRPC_MESSAGES_PROCESSED_RATE: IntCounterVec = IntCounterVec::new(
+            Opts::new("grpc_messages_processed_total", "Total gRPC messages processed"),
+            &["message_type"]
+        ).unwrap();
+
     }
 
     pub fn incr_quic_gw_tx_relayed_to_worker(remote_peer: Pubkey) {
@@ -424,6 +529,25 @@ pub mod jet {
             register!(QUIC_GW_DROP_TX_CNT);
             register!(QUIC_GW_WORKER_TX_PROCESS_CNT);
             register!(QUIC_GW_TX_RELAYED_TO_WORKER_CNT);
+
+            register!(CLUSTER_TPU_LOCK_ACQUISITION_TIME);
+            register!(LEADER_SCHEDULE_EXISTS_CHECK_TIME);
+            register!(SLOT_UPDATE_LOOP_ITERATION_TIME);
+            register!(SLOT_UPDATES_DRAINED_COUNT);
+            register!(SLOT_STATUS_RECEIVED_BY_TYPE);
+            register!(LEADER_SCHEDULE_RPC_FETCH_TIME);
+            register!(LEADER_SCHEDULE_RPC_ATTEMPTS);
+            register!(LEADER_SCHEDULE_PARSE_AND_INSERT_TIME);
+            register!(LEADER_SCHEDULE_SIZE);
+            register!(LEADER_SCHEDULE_ENTRIES_ADDED);
+            register!(LEADER_SCHEDULE_ENTRIES_CLEANED);
+            register!(GRPC_MESSAGE_HANDLE_TIME);
+            register!(GRPC_SLOT_UPDATE_HANDLE_TIME);
+            register!(GRPC_CHANNEL_SEND_TIME);
+            register!(GRPC_CHANNEL_SEND_FAILURES);
+            register!(SLOT_TRACKING_BTREEMAP_SIZE);
+            register!(BLOCK_META_EMISSIONS_COUNT);
+            register!(GRPC_MESSAGES_PROCESSED_RATE);
         });
     }
 
@@ -634,5 +758,89 @@ pub mod jet {
                 .with_label_values(&[endpoint.as_ref()])
                 .set(0);
         }
+    }
+
+    pub fn observe_cluster_tpu_lock_time(method: &str, lock_type: &str, duration: Duration) {
+        CLUSTER_TPU_LOCK_ACQUISITION_TIME
+            .with_label_values(&[method, lock_type])
+            .observe(duration.as_millis() as f64);
+    }
+
+    pub fn observe_leader_schedule_exists_check_time(duration: Duration) {
+        LEADER_SCHEDULE_EXISTS_CHECK_TIME.observe(duration.as_millis() as f64);
+    }
+
+    pub fn observe_slot_update_loop_iteration_time(duration: Duration) {
+        SLOT_UPDATE_LOOP_ITERATION_TIME.observe(duration.as_millis() as f64);
+    }
+
+    pub fn observe_slot_updates_drained_count(count: usize) {
+        SLOT_UPDATES_DRAINED_COUNT.observe(count as f64);
+    }
+
+    pub fn incr_slot_status_received_by_type(status: &str) {
+        SLOT_STATUS_RECEIVED_BY_TYPE
+            .with_label_values(&[status])
+            .inc();
+    }
+
+    pub fn observe_leader_schedule_rpc_fetch_time(duration: Duration) {
+        LEADER_SCHEDULE_RPC_FETCH_TIME.observe(duration.as_millis() as f64);
+    }
+
+    pub fn incr_leader_schedule_rpc_attempts() {
+        LEADER_SCHEDULE_RPC_ATTEMPTS.inc();
+    }
+
+    pub fn observe_leader_schedule_parse_insert_time(duration: Duration) {
+        LEADER_SCHEDULE_PARSE_AND_INSERT_TIME.observe(duration.as_millis() as f64);
+    }
+
+    pub fn set_leader_schedule_size(size: usize) {
+        LEADER_SCHEDULE_SIZE.set(size as i64);
+    }
+
+    pub fn set_leader_schedule_entries_added(count: usize) {
+        LEADER_SCHEDULE_ENTRIES_ADDED.set(count as i64);
+    }
+
+    pub fn set_leader_schedule_entries_cleaned(count: usize) {
+        LEADER_SCHEDULE_ENTRIES_CLEANED.set(count as i64);
+    }
+
+    pub fn observe_grpc_message_handle_time(message_type: &str, duration: Duration) {
+        GRPC_MESSAGE_HANDLE_TIME
+            .with_label_values(&[message_type])
+            .observe(duration.as_micros() as f64);
+    }
+
+    pub fn observe_grpc_slot_update_handle_time(duration: Duration) {
+        GRPC_SLOT_UPDATE_HANDLE_TIME.observe(duration.as_micros() as f64);
+    }
+
+    pub fn observe_grpc_channel_send_time(channel: &str, duration: Duration) {
+        GRPC_CHANNEL_SEND_TIME
+            .with_label_values(&[channel])
+            .observe(duration.as_micros() as f64);
+    }
+
+    pub fn incr_grpc_channel_send_failures(channel: &str) {
+        GRPC_CHANNEL_SEND_FAILURES
+            .with_label_values(&[channel])
+            .inc();
+    }
+
+    pub fn set_slot_tracking_btreemap_size(size: usize) {
+        SLOT_TRACKING_BTREEMAP_SIZE.set(size as i64);
+    }
+
+    pub fn observe_block_meta_emissions_count(count: usize) {
+        BLOCK_META_EMISSIONS_COUNT.observe(count as f64);
+    }
+
+    pub fn incr_grpc_messages_processed(message_type: &str) {
+        GRPC_MESSAGES_PROCESSED_RATE
+            .with_label_values(&[message_type])
+            .inc();
     }
 }
