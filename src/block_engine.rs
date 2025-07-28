@@ -1,5 +1,7 @@
 use std::{
     collections::HashSet,
+    fs,
+    path::Path,
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -41,13 +43,13 @@ use tokio::{
     runtime::Runtime,
     select,
     sync::mpsc::{channel, Receiver, Sender},
-    time::{interval, sleep},
+    time::{interval, sleep, timeout},
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     codegen::InterceptedService,
     service::Interceptor,
-    transport::{Channel, Endpoint},
+    transport::{Channel, Endpoint, Certificate, ClientTlsConfig},
     Response, Status, Streaming,
 };
 use url::Url;
@@ -90,7 +92,10 @@ pub struct BlockEnginePackets {
 #[derive(Error, Debug)]
 pub enum BlockEngineError {
     #[error("auth service failed: {0}")]
-    AuthServiceFailure(String),
+    AuthServiceFailure(String), 
+
+    #[error("auth service returned invalid data: {0}")]
+    AuthServiceInvalidData(String),
 
     #[error("block engine failed: {0}")]
     BlockEngineFailure(String),
@@ -175,6 +180,7 @@ impl BlockEngineRelayerHandler {
         let auth_response = auth_client
             .generate_auth_challenge(GenerateAuthChallengeRequest {
                 role: Role::Relayer.into(),
+                // role: Role::Validator.into(),
                 pubkey: keypair.pubkey().to_bytes().to_vec(),
             })
             .await
@@ -233,16 +239,43 @@ impl BlockEngineRelayerHandler {
         let mut auth_endpoint = Endpoint::from_str(auth_service_url).expect("valid auth url");
         if auth_service_url.starts_with("https") {
             let url = Url::parse(auth_service_url)
-                .map_err(|e| BlockEngineError::AuthServiceFailure(e.to_string()))?;
+                .map_err(|e| BlockEngineError::AuthServiceInvalidData(e.to_string()))?;
             let domain_name = url.host_str().unwrap_or_default().to_string();
-            auth_endpoint = auth_endpoint
-                .tls_config(tonic::transport::ClientTlsConfig::new().domain_name(domain_name))
-                .expect("invalid tls config");
+
+            let mut tls = ClientTlsConfig::new().domain_name(domain_name);
+            if Path::new("/etc/ssl/certs/ca-certificates.crt").exists() {
+                let pem = fs::read_to_string("/etc/ssl/certs/ca-certificates.crt").unwrap();
+                let ca = Certificate::from_pem(pem);
+                tls = tls.ca_certificate(ca);
+            }
+
+            auth_endpoint = auth_endpoint.tls_config(tls).expect("invalid tls config");
         }
-        let channel = auth_endpoint
-            .connect()
-            .await
-            .map_err(|e| BlockEngineError::AuthServiceFailure(e.to_string()))?;
+        
+        let auth_endpoint_with_timeout = auth_endpoint.connect_timeout(Duration::from_secs(5));
+        let channel = match timeout(Duration::from_secs(5), auth_endpoint_with_timeout.connect()).await {
+            Ok(Ok(channel)) => channel,
+            Ok(Err(e)) => {
+                error!(
+                    "Failed to connect to auth service at {}: {:?}",
+                    auth_service_url, e
+                );
+                return Err(BlockEngineError::AuthServiceFailure(format!(
+                    "transport error connecting to {}: {:?}",
+                    auth_service_url, e
+                )));
+            }
+            Err(_) => {
+                error!(
+                    "Timed out connecting to auth service at {}",
+                    auth_service_url
+                );
+                return Err(BlockEngineError::AuthServiceFailure(format!(
+                    "timeout connecting to {}",
+                    auth_service_url
+                )));
+            }
+        };
         let mut auth_client = AuthServiceClient::new(channel);
 
         let (access_token, mut refresh_token) = Self::auth(&mut auth_client, keypair).await?;
@@ -271,14 +304,41 @@ impl BlockEngineRelayerHandler {
             let url = Url::parse(block_engine_url)
                 .map_err(|e| BlockEngineError::BlockEngineFailure(e.to_string()))?;
             let domain_name = url.host_str().unwrap_or_default().to_string();
+
+            let mut tls = ClientTlsConfig::new().domain_name(domain_name);
+            if Path::new("/etc/ssl/certs/ca-certificates.crt").exists() {
+                let pem = fs::read_to_string("/etc/ssl/certs/ca-certificates.crt").unwrap();
+                let ca = Certificate::from_pem(pem);
+                tls = tls.ca_certificate(ca);
+            }
+
             block_engine_endpoint = block_engine_endpoint
-                .tls_config(tonic::transport::ClientTlsConfig::new().domain_name(domain_name))
+                .tls_config(tls)
                 .expect("invalid tls config");
         }
-        let block_engine_channel = block_engine_endpoint
-            .connect()
-            .await
-            .map_err(|e| BlockEngineError::BlockEngineFailure(e.to_string()))?;
+        let block_engine_endpoint_with_timeout =
+            block_engine_endpoint.connect_timeout(Duration::from_secs(5));
+        let block_engine_channel =
+            match timeout(Duration::from_secs(5), block_engine_endpoint_with_timeout.connect()).await {
+                Ok(Ok(channel)) => channel,
+                Ok(Err(e)) => {
+                    error!(
+                        "Failed to connect to block-engine at {}: {:?}",
+                        block_engine_url, e
+                    );
+                    return Err(BlockEngineError::BlockEngineFailure(format!(
+                        "transport error connecting to {}: {:?}",
+                        block_engine_url, e
+                    )));
+                }
+                Err(_) => {
+                    error!("Timed out connecting to block-engine at {}", block_engine_url);
+                    return Err(BlockEngineError::BlockEngineFailure(format!(
+                        "timeout connecting to {}",
+                        block_engine_url
+                    )));
+                }
+            };
 
         //Add custom metrics
         // datapoint_info!("block_engine-connection_stats",

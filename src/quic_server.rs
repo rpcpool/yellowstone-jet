@@ -22,6 +22,7 @@ use {
     solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction},
     solana_streamer::nonblocking::quic::get_remote_pubkey,
     solana_tls_utils::{get_pubkey_from_tls_certificate, new_dummy_x509_certificate},
+    serde::Serialize,
     std::{
         collections::{HashMap, HashSet},
         net::SocketAddr,
@@ -30,10 +31,16 @@ use {
         time::{Duration, Instant},
     },
     tokio::sync::mpsc,
-    tracing::{error, info, warn},
+    tracing::{error, info, warn, trace},
 };
 
 const ALPN_JET_TX_PROTOCOL: &[&[u8]] = &[b"tx-quic-jet", b"solana-tpu"];
+
+#[derive(Serialize)]
+struct QuicErrorResponse {
+    code: i32,
+    message: String,
+}
 
 type PubkeyLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
@@ -202,8 +209,12 @@ pub fn spawn_quic_server(
                         let remote_address = connection.remote_address();
                         info!("QUIC connection established from: {}", remote_address);
                         loop {
-                            match connection.accept_uni().await {
-                                Ok(mut stream) => {
+                            match connection.accept_bi().await {
+                                Ok((mut send_stream, mut recv_stream)) => {
+                                    let sink = transaction_sink.clone();
+                                    let pubkey = peer_identity;
+                                    let start_time = Instant::now();
+
                                     if let Some(pubkey) = peer_identity {
                                         if rate_limiter.check(&pubkey).is_err() {
                                             warn!(
@@ -211,16 +222,30 @@ pub fn spawn_quic_server(
                                                 pubkey,
                                                 remote_address.ip()
                                             );
-                                            let _ = stream.stop(0u32.into());
-                                            continue;
+
+                                            let error_response = QuicErrorResponse {
+                                                code: -32005,
+                                                message: format!(
+                                                    "QUIC rate limit exceeded for IP: {}. Please try again later.",
+                                                    remote_address.ip()
+                                                ),
+                                            };
+                                            tokio::spawn(async move {
+                                                let error_payload = serde_json::to_vec(&error_response).unwrap_or_default();
+                                                if let Err(e) = send_stream.write_all(&error_payload).await {
+                                                    warn!("Failed to send rate limit error to {}: {}", remote_address, e);
+                                                }
+
+                                                if let Err(e) = send_stream.finish() {
+                                                    trace!("Error finishing stream after sending rate limit error: {}", e);
+                                                }
+                                            });
+                                            continue; 
                                         }
                                     }
-                                    let sink = transaction_sink.clone();
-                                    let pubkey = peer_identity;
-                                    let start_time = Instant::now();
                                     tokio::spawn(async move {
                                         if let Err(e) = handle_stream(
-                                            stream,
+                                            recv_stream,
                                             sink,
                                             remote_address,
                                             pubkey,

@@ -12,7 +12,7 @@ use {
     },
     dashmap::DashMap,
     solana_commitment_config::CommitmentConfig,
-    solana_keypair::{Keypair, read_keypair},
+    solana_keypair::{Keypair, read_keypair, read_keypair_file},
     solana_pubkey::Pubkey,
     solana_quic_definitions::QUIC_MAX_TIMEOUT,
     solana_rpc_client::http_sender::HttpSender,
@@ -353,10 +353,12 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         let is_connected_to_block_engine = Arc::new(AtomicBool::new(false));
         let ofac_addresses: std::collections::HashSet<Pubkey> = std::collections::HashSet::new();
 
+        let relayer_keypair = Arc::new(read_keypair_file("/mnt/operational/solana-jito/keys/dummy.json").unwrap());
+
         let jito_handler = BlockEngineRelayerHandler::new(
             Some(block_engine_config),
             jito_receiver,
-            initial_identity.clone(),
+            relayer_keypair,
             exit_signal,
             aoi_cache_ttl_s,
             address_lookup_table_cache,

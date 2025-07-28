@@ -55,7 +55,7 @@ listen_solana_like:
   proxy_preflight_check: true
   default_signer_limit: 10
   signer_limits:
-    GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 100
+    GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 20
     # Add other signer pubkeys and their limits here
     # 4DoN4A5xPj2g9G3dLPg2psP2R2V52w1TTCy1Tf1a1b1c: 50
 
@@ -140,7 +140,7 @@ listen_quic:
   bind:
    - "93.115.25.190:2914"
   client_limits:
-    GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 2000000
+    GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 5
 
 jito:
   block_engine_url: https://ny.testnet.block-engine.jito.wtf
