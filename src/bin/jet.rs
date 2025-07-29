@@ -353,7 +353,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         let is_connected_to_block_engine = Arc::new(AtomicBool::new(false));
         let ofac_addresses: std::collections::HashSet<Pubkey> = std::collections::HashSet::new();
 
-        let relayer_keypair = Arc::new(read_keypair_file("/mnt/operational/solana-jito/keys/dummy.json").unwrap());
+        let relayer_keypair = Arc::new(read_keypair_file("/mnt/operational/jito-relayer/keys/relayer-keypair.json").unwrap());
 
         let jito_handler = BlockEngineRelayerHandler::new(
             Some(block_engine_config),
