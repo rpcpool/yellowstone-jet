@@ -50,9 +50,9 @@ listen_solana_like:
   # Allow to do sanitize check on RPC server (required for ALTs), supported only on patched nodes
   # If option set to `true`` then Jet would check `sanitizeTransaction` method before start
   # See https://github.com/rpcpool/solana-public/tree/v1.17.31-rpc-sanitize-tx
-  proxy_sanitize_check: true
+  proxy_sanitize_check: false
   # Allow to do preflight check on RPC server (simulateTransaction)
-  proxy_preflight_check: true
+  proxy_preflight_check: true 
   default_signer_limit: 10
   signer_limits:
     GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 20

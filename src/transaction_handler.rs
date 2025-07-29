@@ -165,16 +165,13 @@ impl TransactionHandler {
             expiration: 100
         };
 
-        if let Err(e) = self.jito_sender.try_send(jito_packets) {
-        tracing::warn!("Failed to send transaction to Jito channel: {}", e);
-    }
-
         self.filter_transaction(&transaction)?;
 
         // Basic sanitize check first
-        transaction
-            .sanitize()
-            .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
+        // this action already performed 
+        // transaction
+        //     .sanitize()
+        //     .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         // Run preflight/sanitize checks if needed
         if !config.skip_preflight && self.proxy_preflight_check {
@@ -185,6 +182,10 @@ impl TransactionHandler {
 
         let signature = transaction.signatures[0];
         let wire_transaction = Bytes::from(bincode::serialize(&transaction)?);
+
+        if let Err(e) = self.jito_sender.try_send(jito_packets) {
+            tracing::warn!("Failed to send transaction to Jito channel: {}", e);
+        }
 
         self.transaction_sink
             .send(Arc::new(SendTransactionRequest {
@@ -243,9 +244,10 @@ impl TransactionHandler {
         } else if !config.skip_sanitize && self.proxy_sanitize_check {
             self.handle_sanitize(&transaction, &config).await?;
         } else {
-            transaction
-                .sanitize()
-                .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
+            tracing::debug!("Unnecessary sanitize check. Already performed");
+            // transaction
+            //     .sanitize()
+            //     .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
         }
 
         Ok((wire_transaction, transaction))

@@ -329,12 +329,12 @@ pub mod rpc_solana_like {
         jsonrpsee::{
             core::{RpcResult, async_trait},
             proc_macros::rpc,
-            types::error::ErrorObject,
+            types::error::{ErrorObject, INVALID_PARAMS_CODE},
         },
         solana_pubkey::Pubkey,
         solana_rpc_client_api::response::RpcVersionInfo,
         solana_transaction::versioned::VersionedTransaction,
-        solana_transaction_status_client_types::UiTransactionEncoding,
+        solana_transaction_status_client_types::{UiTransactionEncoding, TransactionBinaryEncoding},
         tracing::debug,
     };
 
@@ -390,13 +390,31 @@ pub mod rpc_solana_like {
             let config = config_with_policies.config;
 
             let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
+            let binary_encoding = encoding
+                .into_binary_encoding()
+                .ok_or(ErrorObject::owned(1, "unbale to create binary encoding", None::<()>))?;
 
-            let (_, transaction) = decode_and_deserialize::<VersionedTransaction>(
-                data,
-                encoding
-                    .into_binary_encoding()
-                    .ok_or_else(|| invalid_params("unsupported encoding"))?,
-            )?;
+            let wire_transaction = match binary_encoding {
+                TransactionBinaryEncoding::Base58 => bs58::decode(&data)
+                    .into_vec()
+                    .map_err(|e| invalid_params(format!("Unable to decode from Base58: {e}")))?,
+                TransactionBinaryEncoding::Base64 => base64::decode(&data)
+                    .map_err(|e| invalid_params(format!("Unable to decode from Base64: {e}")))?,
+            };
+
+            use agave_transaction_view::transaction_view::TransactionView;
+            TransactionView::try_new_sanitized(wire_transaction.as_slice())
+                .map_err(|e| ErrorObject::owned(
+                    INVALID_PARAMS_CODE, 
+                    format!("Transaction failed to sanitize: {:?}", e),
+                    None::<()>,
+                ))?;
+
+
+            let transaction: VersionedTransaction = 
+                bincode::deserialize(&wire_transaction).map_err(|e| {
+                    invalid_params(format!("Failed to deserialize transaction: {:?}", e))
+                })?;
 
             if let Some(signer_pubkey) = transaction.message.static_account_keys().first() {
                 if self.rate_limiter.check(signer_pubkey).is_err() {

@@ -124,6 +124,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-transaction-view"
+version = "2.2.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2955952d757fa351a1904ece37c1f2c9c876233ee1ee26324ee6ab358788cfdf"
+dependencies = [
+ "solana-hash",
+ "solana-message",
+ "solana-packet",
+ "solana-pubkey",
+ "solana-sdk-ids",
+ "solana-short-vec",
+ "solana-signature",
+ "solana-svm-transaction",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6447,6 +6463,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-svm-transaction"
+version = "2.2.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b253a1a8a80c5e037854421af3051da6c50ca0af9ee319413d443c33eccd683e"
+dependencies = [
+ "solana-hash",
+ "solana-message",
+ "solana-pubkey",
+ "solana-sdk-ids",
+ "solana-signature",
+ "solana-transaction",
+]
+
+[[package]]
 name = "solana-system-interface"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8829,6 +8859,7 @@ dependencies = [
 name = "yellowstone-jet"
 version = "14.2.0"
 dependencies = [
+ "agave-transaction-view",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
