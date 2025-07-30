@@ -25,8 +25,18 @@ fn main() -> anyhow::Result<()> {
 
     // TODO: Audit that the environment access only happens in single-threaded code.
     unsafe { std::env::set_var("PROTOC", protobuf_src::protoc()) };
-    tonic_build::configure()
-        .compile_protos(&["proto/jet.proto", "proto/metrics.proto"], &["proto"])?;
+    tonic_build::configure().compile_protos(
+        &[
+            "proto/jet.proto",
+            "proto/metrics.proto",
+            "third_party/jito-protos/auth.proto",
+            "third_party/jito-protos/block_engine.proto",
+            "third_party/jito-protos/packet.proto",
+            "third_party/jito-protos/shared.proto",
+            "third_party/jito-protos/bundle.proto",
+        ],
+        &["proto", "third_party/jito-protos"],
+    )?;
 
     Ok(())
 }

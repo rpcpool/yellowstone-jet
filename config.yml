@@ -50,9 +50,14 @@ listen_solana_like:
   # Allow to do sanitize check on RPC server (required for ALTs), supported only on patched nodes
   # If option set to `true`` then Jet would check `sanitizeTransaction` method before start
   # See https://github.com/rpcpool/solana-public/tree/v1.17.31-rpc-sanitize-tx
-  proxy_sanitize_check: true
+  proxy_sanitize_check: false
   # Allow to do preflight check on RPC server (simulateTransaction)
-  proxy_preflight_check: true
+  proxy_preflight_check: true 
+  default_signer_limit: 10
+  signer_limits:
+    GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 20
+    # Add other signer pubkeys and their limits here
+    # 4DoN4A5xPj2g9G3dLPg2psP2R2V52w1TTCy1Tf1a1b1c: 50
 
 # Send retry options
 send_transaction_service:
@@ -80,7 +85,7 @@ quic:
   connection_pool_size: 1
   # Number of immediate retries in case of failed send (not applied to timedout)
   # Solana do not retry, atlas doing 4 retries, by default we keep same limit as Solana
-  send_retry_count: 1
+  send_retry_count: 2
   # Kind of Quic port: `normal` or `forwards`
   tpu_port: forwards
   # Quic handshake timeout.
@@ -134,4 +139,9 @@ prometheus:
 listen_quic:
   bind:
    - "93.115.25.190:2914"
-  client_whitelist: ["GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis"]
+  client_limits:
+    GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 5
+
+jito:
+  block_engine_url: https://ny.testnet.block-engine.jito.wtf
+  auth_service_url: null

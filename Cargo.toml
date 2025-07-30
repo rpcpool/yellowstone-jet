@@ -82,11 +82,11 @@ solana-message = "2"
 solana-compute-budget-interface = "2"
 solana-native-token = "2"
 solana-nonce = "2"
-solana-packet = "2"
+solana-packet = { version = "2", features = ["bincode", "serde"] }
 thiserror = "1.0.58"
-tokio = { version = "1.36.0", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros"] }
 tokio-stream = "0.1.15"
-tonic = { version = "0.12.3", features = ["tls-native-roots"] }
+tonic = { version = "0.12.3", features = ["tls-native-roots", "tls", "tls-roots", "tls-webpki-roots"] }
 tonic-health = "0.12.3"
 tower = "0.4.13"
 tracing = "0.1.40"
@@ -102,6 +102,14 @@ yellowstone-grpc-proto = "7"
 yellowstone-shield-store = "~0.5.2"
 yellowstone-vixen = "0.2.0"
 solana-sdk = "2.2.1"
+governor = "0.10.0"
+dashmap = "6.1.0"
+solana-perf = "2.0.22"
+histogram = "0.11.3"
+crossbeam-channel = "0.5.15"
+cached = "0.42.0"
+url = "2.5.4"
+agave-transaction-view = "2.2.1"
 
 
 [build-dependencies]

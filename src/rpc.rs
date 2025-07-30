@@ -1,7 +1,14 @@
 use {
     crate::transaction_handler::TransactionHandler,
     anyhow::Context as _,
+    dashmap::DashMap,
     futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
+    governor::{
+        Quota, RateLimiter,
+        clock::DefaultClock,
+        middleware::NoOpMiddleware,
+        state::{InMemoryState, NotKeyed},
+    },
     hyper::{Request, Response, StatusCode},
     jsonrpsee::{
         core::http_helpers::Body,
@@ -11,10 +18,13 @@ use {
     rpc_admin::JetIdentityUpdater,
     solana_pubkey::Pubkey,
     std::{
+        collections::HashMap,
         error::Error,
         fmt,
         future::Future,
+        hash::Hash,
         net::SocketAddr,
+        num::NonZeroU32,
         sync::{Arc, Mutex as StdMutex},
         task::{Context, Poll},
         time::Instant,
@@ -27,6 +37,48 @@ use {
 // should be more than enough for `sendTransaction` request
 const MAX_REQUEST_BODY_SIZE: u32 = 32 * (1 << 10); // 32kB
 
+type RpcLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
+
+#[derive(Clone)]
+pub struct RpcRateLimiter<K: Eq + Hash + Clone> {
+    limiters: Arc<DashMap<K, Arc<RpcLimiter>>>,
+    limits_config: Arc<HashMap<K, u32>>,
+    default_limit: u32,
+}
+
+impl<K: Eq + Hash + Clone> RpcRateLimiter<K> {
+    pub fn new(limits_config: HashMap<K, u32>, default_limit: u32) -> Self {
+        Self {
+            limiters: Arc::new(DashMap::new()),
+            limits_config: Arc::new(limits_config),
+            default_limit,
+        }
+    }
+
+    pub fn check(&self, key: &K) -> Result<(), ()> {
+        let limit = self
+            .limits_config
+            .get(key)
+            .copied()
+            .unwrap_or(self.default_limit);
+
+        if limit == 0 {
+            return Ok(());
+        }
+
+        let limiter = self.limiters.entry(key.clone()).or_insert_with(|| {
+            let quota = Quota::per_second(NonZeroU32::new(limit).unwrap());
+            Arc::new(RateLimiter::direct(quota))
+        });
+
+        if limiter.check().is_err() {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 pub enum RpcServerType {
     Admin {
         jet_identity_updater: Arc<Mutex<Box<dyn JetIdentityUpdater + Send + 'static>>>,
@@ -35,6 +87,7 @@ pub enum RpcServerType {
 
     SolanaLike {
         tx_handler: TransactionHandler,
+        rate_limiter: RpcRateLimiter<Pubkey>,
     },
 }
 
@@ -96,10 +149,14 @@ impl RpcServer {
                         )
                     })
             }
-            RpcServerType::SolanaLike { tx_handler } => {
+            RpcServerType::SolanaLike {
+                tx_handler,
+                rate_limiter,
+            } => {
                 use rpc_solana_like::RpcServer;
 
-                let rpc_server_impl = Self::create_solana_like_rpc_server_impl(tx_handler);
+                let rpc_server_impl =
+                    Self::create_solana_like_rpc_server_impl(tx_handler, rate_limiter);
 
                 ServerBuilder::new()
                     .max_request_body_size(MAX_REQUEST_BODY_SIZE)
@@ -118,8 +175,12 @@ impl RpcServer {
 
     pub const fn create_solana_like_rpc_server_impl(
         tx_handler: TransactionHandler,
+        rate_limiter: RpcRateLimiter<Pubkey>,
     ) -> rpc_solana_like::RpcServerImpl {
-        rpc_solana_like::RpcServerImpl { tx_handler }
+        rpc_solana_like::RpcServerImpl {
+            tx_handler,
+            rate_limiter,
+        }
     }
 
     pub fn shutdown(self) {
@@ -143,10 +204,7 @@ pub mod rpc_admin {
         solana_keypair::{Keypair, read_keypair_file},
         solana_pubkey::Pubkey,
         solana_signer::Signer,
-        std::sync::{
-            atomic::Ordering,
-            Arc,
-        },
+        std::sync::{Arc, atomic::Ordering},
         tokio::sync::Mutex,
         tracing::info,
     };
@@ -265,16 +323,18 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            payload::JetRpcSendTransactionConfig, rpc::invalid_params,
+            payload::JetRpcSendTransactionConfig, rpc::RpcRateLimiter, rpc::invalid_params,
             solana::decode_and_deserialize, transaction_handler::TransactionHandler,
         },
         jsonrpsee::{
             core::{RpcResult, async_trait},
             proc_macros::rpc,
+            types::error::{ErrorObject, INVALID_PARAMS_CODE},
         },
+        solana_pubkey::Pubkey,
         solana_rpc_client_api::response::RpcVersionInfo,
         solana_transaction::versioned::VersionedTransaction,
-        solana_transaction_status_client_types::UiTransactionEncoding,
+        solana_transaction_status_client_types::{UiTransactionEncoding, TransactionBinaryEncoding},
         tracing::debug,
     };
 
@@ -294,6 +354,7 @@ pub mod rpc_solana_like {
     #[derive(Clone)]
     pub struct RpcServerImpl {
         pub tx_handler: TransactionHandler,
+        pub rate_limiter: RpcRateLimiter<Pubkey>,
     }
 
     impl RpcServerImpl {
@@ -329,13 +390,45 @@ pub mod rpc_solana_like {
             let config = config_with_policies.config;
 
             let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
+            let binary_encoding = encoding
+                .into_binary_encoding()
+                .ok_or(ErrorObject::owned(1, "unbale to create binary encoding", None::<()>))?;
 
-            let (_, transaction) = decode_and_deserialize(
-                data,
-                encoding
-                    .into_binary_encoding()
-                    .ok_or_else(|| invalid_params("unsupported encoding"))?,
-            )?;
+            let wire_transaction = match binary_encoding {
+                TransactionBinaryEncoding::Base58 => bs58::decode(&data)
+                    .into_vec()
+                    .map_err(|e| invalid_params(format!("Unable to decode from Base58: {e}")))?,
+                TransactionBinaryEncoding::Base64 => base64::decode(&data)
+                    .map_err(|e| invalid_params(format!("Unable to decode from Base64: {e}")))?,
+            };
+
+            use agave_transaction_view::transaction_view::TransactionView;
+            TransactionView::try_new_sanitized(wire_transaction.as_slice())
+                .map_err(|e| ErrorObject::owned(
+                    INVALID_PARAMS_CODE, 
+                    format!("Transaction failed to sanitize: {:?}", e),
+                    None::<()>,
+                ))?;
+
+
+            let transaction: VersionedTransaction = 
+                bincode::deserialize(&wire_transaction).map_err(|e| {
+                    invalid_params(format!("Failed to deserialize transaction: {:?}", e))
+                })?;
+
+            if let Some(signer_pubkey) = transaction.message.static_account_keys().first() {
+                if self.rate_limiter.check(signer_pubkey).is_err() {
+                    tracing::warn!("RPC rate limit exceeded for signer: {}", signer_pubkey);
+                    return Err(ErrorObject::owned(
+                        -32002,
+                        format!(
+                            "Transaction sent by {} rate limited. Please try again",
+                            signer_pubkey
+                        ),
+                        None::<()>,
+                    ));
+                }
+            }
 
             self.handle_internal_transaction(transaction, config_with_policies)
                 .await
