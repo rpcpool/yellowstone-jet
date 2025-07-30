@@ -394,6 +394,14 @@ pub mod jet {
             &["message_type"]
         ).unwrap();
 
+        // New slot arrival interval - this can tell us if we have any weird delays
+        static ref NEW_SLOT_ARRIVAL_INTERVAL: Histogram = Histogram::with_opts(
+            HistogramOpts::new("new_slot_arrival_interval_ms", "Time between receiving consecutive new slot numbers in milliseconds")
+                .buckets(vec![
+                    10.0, 20.0, 30.0, 50.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0, 1000.0,
+                ])
+        ).unwrap();
+
     }
 
     pub fn incr_quic_gw_tx_relayed_to_worker(remote_peer: Pubkey) {
@@ -549,6 +557,7 @@ pub mod jet {
             register!(SLOT_TRACKING_BTREEMAP_SIZE);
             register!(BLOCK_META_EMISSIONS_COUNT);
             register!(GRPC_MESSAGES_PROCESSED_RATE);
+            register!(NEW_SLOT_ARRIVAL_INTERVAL);
         });
     }
 
@@ -843,5 +852,9 @@ pub mod jet {
         GRPC_MESSAGES_PROCESSED_RATE
             .with_label_values(&[message_type])
             .inc();
+    }
+
+    pub fn observe_new_slot_arrival_interval(duration: Duration) {
+        NEW_SLOT_ARRIVAL_INTERVAL.observe(duration.as_millis() as f64);
     }
 }

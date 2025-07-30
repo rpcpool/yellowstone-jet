@@ -295,6 +295,7 @@ impl ClusterTpuInfo {
                 .expect("rwlock schedule poisoned")
                 .latest_seen_slot
         };
+        let mut last_slot_instant = Instant::now();
 
         loop {
             let iteration_start = Instant::now();
@@ -335,6 +336,8 @@ impl ClusterTpuInfo {
             if max_slot >= new_latest_slot {
                 continue;
             }
+            metrics::observe_new_slot_arrival_interval(last_slot_instant.elapsed());
+            last_slot_instant = Instant::now();
 
             max_slot = max_slot.max(new_latest_slot);
 
