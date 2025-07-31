@@ -143,5 +143,6 @@ listen_quic:
     GkAattaGzp4SMokniV6YAbku7TfdnUH454BWujSRPQis: 5
 
 jito:
+  relayer_keypair: /mnt/operational/jito-relayer/keys/relayer-keypair.json
   block_engine_url: https://ny.testnet.block-engine.jito.wtf
   auth_service_url: null

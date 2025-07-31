@@ -36,12 +36,6 @@ use {
 
 const ALPN_JET_TX_PROTOCOL: &[&[u8]] = &[b"tx-quic-jet", b"solana-tpu"];
 
-#[derive(Serialize)]
-struct QuicErrorResponse {
-    code: i32,
-    message: String,
-}
-
 type PubkeyLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock, NoOpMiddleware>;
 
 #[derive(Clone)]
@@ -209,8 +203,8 @@ pub fn spawn_quic_server(
                         let remote_address = connection.remote_address();
                         info!("QUIC connection established from: {}", remote_address);
                         loop {
-                            match connection.accept_bi().await {
-                                Ok((mut send_stream, mut recv_stream)) => {
+                            match connection.accept_uni().await {
+                                Ok(recv_stream) => {
                                     let sink = transaction_sink.clone();
                                     let pubkey = peer_identity;
                                     let start_time = Instant::now();
@@ -222,25 +216,7 @@ pub fn spawn_quic_server(
                                                 pubkey,
                                                 remote_address.ip()
                                             );
-
-                                            let error_response = QuicErrorResponse {
-                                                code: -32005,
-                                                message: format!(
-                                                    "QUIC rate limit exceeded for IP: {}. Please try again later.",
-                                                    remote_address.ip()
-                                                ),
-                                            };
-                                            tokio::spawn(async move {
-                                                let error_payload = serde_json::to_vec(&error_response).unwrap_or_default();
-                                                if let Err(e) = send_stream.write_all(&error_payload).await {
-                                                    warn!("Failed to send rate limit error to {}: {}", remote_address, e);
-                                                }
-
-                                                if let Err(e) = send_stream.finish() {
-                                                    trace!("Error finishing stream after sending rate limit error: {}", e);
-                                                }
-                                            });
-                                            continue; 
+                                            continue;
                                         }
                                     }
                                     tokio::spawn(async move {

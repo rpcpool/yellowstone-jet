@@ -338,7 +338,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let (jito_sender, mut jito_receiver) =
         mpsc::channel(5000);
 
-    if let Some(jito_config) = config.jito.clone() {
+    if let Some(jito_config) = config.jito/* .clone()*/ {
         info!("Jito Block Engine is configured, starting relayer handler...");
         let block_engine_config = BlockEngineConfig {
             block_engine_url: jito_config.block_engine_url.clone(),
@@ -353,7 +353,12 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         let is_connected_to_block_engine = Arc::new(AtomicBool::new(false));
         let ofac_addresses: std::collections::HashSet<Pubkey> = std::collections::HashSet::new();
 
-        let relayer_keypair = Arc::new(read_keypair_file("/mnt/operational/jito-relayer/keys/relayer-keypair.json").unwrap());
+        let relayer_keypair = if let Some(relayer_keypair) = jito_config.relayer_keypair {
+            Arc::new(relayer_keypair)
+        } else {
+            info!("Relayer keypair is not specified.");
+            Arc::new(Keypair::new())
+        };
 
         let jito_handler = BlockEngineRelayerHandler::new(
             Some(block_engine_config),

@@ -85,9 +85,14 @@ pub struct ConfigJet {
     pub prometheus: Option<PrometheusConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigJito {
+    #[serde(
+        default,
+        deserialize_with = "ConfigIdentity::deserialize_maybe_keypair"
+    )]
+    pub relayer_keypair: Option<Keypair>,
     pub block_engine_url: String,
     pub auth_service_url: Option<String>,
 }
