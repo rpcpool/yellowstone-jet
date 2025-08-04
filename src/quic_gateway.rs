@@ -524,6 +524,17 @@ struct ConnectingTask {
     endpoint: Endpoint,
 }
 
+/// Translate a SocketAddr into a valid SNI for the purposes of QUIC connection
+///
+/// We do not actually check if the server holds a cert for this server_name
+/// since Solana does not rely on DNS names, but we need to provide a unique
+/// one to ensure that we present correct QUIC tokens to the correct server.
+///
+/// Code taken from https://github.com/anza-xyz/agave/pull/7260
+pub fn socket_addr_to_quic_server_name(peer: SocketAddr) -> String {
+    format!("{}.{}.sol", peer.ip(), peer.port())
+}
+
 impl ConnectingTask {
     async fn run(self) -> Result<Connection, ConnectingError> {
         if let Some(signal) = &self.wait_for_eviction {
@@ -569,9 +580,10 @@ impl ConnectingTask {
         let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
         config.transport_config(Arc::new(transport_config));
 
+        let server_name = socket_addr_to_quic_server_name(remote_peer_addr);
         let connecting = self
             .endpoint
-            .connect_with(config, remote_peer_addr, "connect")
+            .connect_with(config, remote_peer_addr, server_name.as_str())
             .map_err(ConnectingError::ConnectError)?;
 
         tracing::trace!(
