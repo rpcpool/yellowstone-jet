@@ -529,6 +529,8 @@ struct ConnectingTask {
 /// We do not actually check if the server holds a cert for this server_name
 /// since Solana does not rely on DNS names, but we need to provide a unique
 /// one to ensure that we present correct QUIC tokens to the correct server.
+/// 
+/// Code taken from https://github.com/anza-xyz/agave/pull/7260
 pub fn socket_addr_to_quic_server_name(peer: SocketAddr) -> String {
     format!("{}.{}.sol", peer.ip(), peer.port())
 }
