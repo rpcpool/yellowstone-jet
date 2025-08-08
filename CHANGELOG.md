@@ -10,6 +10,15 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+## [14.5.0]
+
+- More metrics for slot timings
+- refactoring for geyser subscription
+- fix QUIC RETRY_TOKEN server name issue #[66](https://github.com/rpcpool/yellowstone-jet/issues/66)
+- remove useless `Arc` #[68](https://github.com/rpcpool/yellowstone-jet/issues/68)
+- Supports `getLatestSlot` RPC endpoint
+-
+
 ## [14.4.0]
 
 - Fixed critical memory leak in rooted transactions where finalized slots were never cleaned up due to incorrect block height comparison.

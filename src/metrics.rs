@@ -219,6 +219,11 @@ pub mod jet {
             "quic_gw_connection_close", "Number of closed connections to remote peer validators"
         ).unwrap();
 
+        static ref QUIC_GW_UNREACHABLE_PEER_CNT: IntCounterVec = IntCounterVec::new(
+            Opts::new("quic_gw_unreachable_peer_count", "Number of unreachable remote peer validators"),
+            &["leader"]
+        ).unwrap();
+
         static ref QUIC_GW_ONGOING_EVICTIONS_GAUGE: IntGauge = IntGauge::new(
             "quic_gw_ongoing_evictions", "Number of ongoing evictions of connections to remote peer validators"
         ).unwrap();
@@ -538,6 +543,7 @@ pub mod jet {
             register!(QUIC_GW_DROP_TX_CNT);
             register!(QUIC_GW_WORKER_TX_PROCESS_CNT);
             register!(QUIC_GW_TX_RELAYED_TO_WORKER_CNT);
+            register!(QUIC_GW_UNREACHABLE_PEER_CNT);
 
             register!(CLUSTER_TPU_LOCK_ACQUISITION_TIME);
             register!(LEADER_SCHEDULE_EXISTS_CHECK_TIME);
@@ -856,5 +862,11 @@ pub mod jet {
 
     pub fn observe_new_slot_arrival_interval(duration: Duration) {
         NEW_SLOT_ARRIVAL_INTERVAL.observe(duration.as_millis() as f64);
+    }
+
+    pub fn inc_quic_gw_unreachable_peer_count(leader: Pubkey) {
+        QUIC_GW_UNREACHABLE_PEER_CNT
+            .with_label_values(&[&leader.to_string()])
+            .inc();
     }
 }
