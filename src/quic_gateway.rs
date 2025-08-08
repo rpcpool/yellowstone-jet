@@ -1654,8 +1654,8 @@ impl TokioQuicGatewayRuntime {
         {
             // Predict every 3 slot.
             let wait_dur_ms = DEFAULT_MS_PER_SLOT * (NUM_CONSECUTIVE_LEADER_SLOTS - 1);
-            let wait_dur = Duration::from_millis(wait_dur_ms)
-                .max(Duration::from_millis(DEFAULT_MS_PER_SLOT));
+            let wait_dur =
+                Duration::from_millis(wait_dur_ms).max(Duration::from_millis(DEFAULT_MS_PER_SLOT));
             self.next_leader_prediction_deadline = Instant::now() + wait_dur;
 
             let upcoming_leaders = self
