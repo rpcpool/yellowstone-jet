@@ -204,7 +204,6 @@ async fn send_buffer_should_land_properly() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
-        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -262,7 +261,6 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
-        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -327,7 +325,6 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
-        event_reporter: None,
     };
     let gateway_config = QuicGatewayConfig {
         max_connection_attempts: 1,
@@ -398,7 +395,6 @@ async fn it_should_update_gatway_identity() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
-        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -474,7 +470,6 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
-        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -576,7 +571,6 @@ async fn it_should_evict_connection() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
-        event_reporter: None,
     };
 
     let TokioQuicGatewaySession {
@@ -705,7 +699,6 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
-        event_reporter: None,
     };
     const MAX_CONN_ATTEMPT: NonZeroUsize = NonZeroUsize::new(1).unwrap();
     let gateway_config = QuicGatewayConfig {
@@ -777,7 +770,6 @@ async fn it_should_detect_remote_peer_address_change() {
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
-        event_reporter: None,
     };
 
     let gateway_config = QuicGatewayConfig {
@@ -908,7 +900,6 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
         stake_info_map,
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
-        event_reporter: None,
     };
 
     let gateway_config = QuicGatewayConfig {
@@ -996,263 +987,4 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
     }
 
     assert!(fake_predictor.get_calls() >= 1);
-}
-
-#[tokio::test]
-async fn it_should_emit_events_through_event_reporter() {
-    use {
-        std::sync::{Arc, Mutex},
-        yellowstone_jet::lewis::transaction_events::EventReporter,
-    };
-
-    #[derive(Clone, Default)]
-    struct MockEventReporter {
-        events: Arc<Mutex<Vec<(Signature, String)>>>, // (signature, event_type)
-    }
-
-    impl EventReporter for MockEventReporter {
-        fn report_transaction_received(
-            &self,
-            signature: Signature,
-            _leaders: Vec<Pubkey>,
-            _slot: solana_clock::Slot,
-        ) {
-            self.events
-                .lock()
-                .unwrap()
-                .push((signature, "received".to_string()));
-        }
-
-        fn report_send_attempt(
-            &self,
-            signature: Signature,
-            _validator: Pubkey,
-            _tpu_addr: SocketAddr,
-            _attempt_num: u8,
-            result: Result<(), String>,
-        ) {
-            let event_type = if result.is_ok() {
-                "send_success"
-            } else {
-                "send_failed"
-            };
-            self.events
-                .lock()
-                .unwrap()
-                .push((signature, event_type.to_string()));
-        }
-
-        fn report_connection_failed(
-            &self,
-            signature: Signature,
-            _validator: Pubkey,
-            _tpu_addr: SocketAddr,
-            _error: String,
-        ) {
-            self.events
-                .lock()
-                .unwrap()
-                .push((signature, "connection_failed".to_string()));
-        }
-
-        fn report_policy_skip(&self, signature: Signature, _validator: Pubkey) {
-            self.events
-                .lock()
-                .unwrap()
-                .push((signature, "policy_skip".to_string()));
-        }
-    }
-
-    // Test 1: Successful send
-    {
-        let rx_server_addr = generate_random_local_addr();
-        let rx_server_identity = Keypair::new();
-        let gateway_kp = Keypair::new();
-        let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
-        let fake_tpu_info_service =
-            FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
-
-        let event_reporter = Arc::new(MockEventReporter::default());
-
-        let gateway_spawner = TokioQuicGatewaySpawner {
-            stake_info_map,
-            leader_tpu_info_service: Arc::new(fake_tpu_info_service),
-            gateway_tx_channel_capacity: 100,
-            event_reporter: Some(Arc::<MockEventReporter>::clone(&event_reporter)),
-        };
-
-        let TokioQuicGatewaySession {
-            gateway_identity_updater: _,
-            gateway_tx_sink: transaction_sink,
-            mut gateway_response_source,
-            gateway_join_handle: _,
-        } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
-
-        let (_client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
-            rx_server_identity.insecure_clone(),
-            rx_server_addr,
-            Default::default(),
-        );
-
-        let tx_sig = Signature::new_unique();
-        transaction_sink
-            .send(GatewayTransaction {
-                tx_sig,
-                wire: Bytes::from("test_payload"),
-                remote_peer: rx_server_identity.pubkey(),
-            })
-            .await
-            .expect("send tx");
-
-        let resp = gateway_response_source.recv().await.expect("recv response");
-
-        // Verify we got a successful response
-        assert!(matches!(resp, GatewayResponse::TxSent(_)));
-
-        // Give a moment for event to be recorded
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Check events were emitted
-        let events = event_reporter.events.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, tx_sig);
-        assert_eq!(events[0].1, "send_success");
-    }
-
-    // Test 2: Connection failure (no server listening)
-    {
-        let rx_server_addr = generate_random_local_addr();
-        let rx_server_identity = Keypair::new();
-        let gateway_kp = Keypair::new();
-        let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
-
-        // Don't spawn a server - connection will fail
-        let fake_tpu_info_service =
-            FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
-
-        let event_reporter = Arc::new(MockEventReporter::default());
-
-        let gateway_spawner = TokioQuicGatewaySpawner {
-            stake_info_map,
-            leader_tpu_info_service: Arc::new(fake_tpu_info_service),
-            gateway_tx_channel_capacity: 100,
-            event_reporter: Some(Arc::<MockEventReporter>::clone(&event_reporter)),
-        };
-
-        let gateway_config = QuicGatewayConfig {
-            max_connection_attempts: 1,
-            connecting_timeout: Duration::from_millis(100),
-            ..Default::default()
-        };
-
-        let TokioQuicGatewaySession {
-            gateway_identity_updater: _,
-            gateway_tx_sink: transaction_sink,
-            mut gateway_response_source,
-            gateway_join_handle: _,
-        } = gateway_spawner.spawn(
-            gateway_kp.insecure_clone(),
-            gateway_config,
-            Arc::new(StakeBasedEvictionStrategy::default()),
-            Arc::new(IgnorantLeaderPredictor),
-        );
-
-        let tx_sig = Signature::new_unique();
-        transaction_sink
-            .send(GatewayTransaction {
-                tx_sig,
-                wire: Bytes::from("test_payload"),
-                remote_peer: rx_server_identity.pubkey(),
-            })
-            .await
-            .expect("send tx");
-
-        let resp = gateway_response_source.recv().await.expect("recv response");
-
-        // Should get a drop or failed response
-        assert!(matches!(
-            resp,
-            GatewayResponse::TxDrop(_) | GatewayResponse::TxFailed(_)
-        ));
-
-        // Give a moment for event to be recorded
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Check connection failure event
-        let events = event_reporter.events.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, tx_sig);
-        assert_eq!(events[0].1, "connection_failed");
-    }
-
-    // Test 3: Connection refused by peer
-    {
-        let rx_server_addr = generate_random_local_addr();
-        let rx_server_identity = Keypair::new();
-        let gateway_kp = Keypair::new();
-        let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
-        let fake_tpu_info_service =
-            FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
-
-        let event_reporter = Arc::new(MockEventReporter::default());
-
-        let gateway_spawner = TokioQuicGatewaySpawner {
-            stake_info_map,
-            leader_tpu_info_service: Arc::new(fake_tpu_info_service),
-            gateway_tx_channel_capacity: 100,
-            event_reporter: Some(Arc::<MockEventReporter>::clone(&event_reporter)),
-        };
-
-        let gateway_config = QuicGatewayConfig {
-            max_connection_attempts: 1,
-            ..Default::default()
-        };
-
-        let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
-
-        let TokioQuicGatewaySession {
-            gateway_identity_updater: _,
-            gateway_tx_sink: transaction_sink,
-            mut gateway_response_source,
-            gateway_join_handle: _,
-        } = gateway_spawner.spawn(
-            gateway_kp.insecure_clone(),
-            gateway_config,
-            Arc::new(StakeBasedEvictionStrategy::default()),
-            Arc::new(IgnorantLeaderPredictor),
-        );
-
-        // Server accepts but immediately drops connection
-        let rx_server_handle = tokio::spawn(async move {
-            let connecting = rx_server_endpoint.accept().await.expect("accept");
-            drop(connecting);
-        });
-
-        let tx_sig = Signature::new_unique();
-        transaction_sink
-            .send(GatewayTransaction {
-                tx_sig,
-                wire: Bytes::from("test_payload"),
-                remote_peer: rx_server_identity.pubkey(),
-            })
-            .await
-            .expect("send tx");
-
-        rx_server_handle.await.expect("server handle");
-
-        let resp = gateway_response_source.recv().await.expect("recv response");
-
-        // Should get a drop response
-        assert!(matches!(resp, GatewayResponse::TxDrop(_)));
-
-        // Give a moment for event to be recorded
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Check event
-        let events = event_reporter.events.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, tx_sig);
-        // Could be either connection_failed or send_failed depending on timing
-        assert!(events[0].1 == "connection_failed" || events[0].1 == "send_failed");
-    }
 }

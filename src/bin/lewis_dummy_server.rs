@@ -35,11 +35,12 @@ async fn main() -> Result<(), String> {
 
     info!("Lewis dummy server listening on {}", args.listen);
 
-    Ok(Server::builder()
+    Server::builder()
         .add_service(service)
         .serve(args.listen)
         .await
-        .expect("Failed to start server"))
+        .expect("Failed to start server");
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -72,23 +73,18 @@ impl DummyLewisService {
                     let sig = Signature::try_from(jet.sig)
                         .map_err(|_| Status::invalid_argument("invalid signature"))
                         .expect("Failed to parse signature");
-
-                    for (idx, send) in jet.jet_sends.iter().enumerate() {
-                        info!(
-                            client_id,
-                            event_count,
-                            %sig,
-                            req_id = jet.req_id,
-                            jet_id = jet.jet_id,
-                            slot = jet.slot,
-                            send_idx = idx,
-                            validator = send.validator,
-                            tpu_addr = send.tpu_addr,
-                            skipped = send.skipped,
-                            error = ?send.error,
-                            "received jet send attempt"
-                        );
-                    }
+                    info!(
+                        client_id,
+                        event_count,
+                        %sig,
+                        req_id = jet.req_id,
+                        jet_id = jet.jet_id,
+                        slot = jet.slot,
+                        tpu_addr = jet.tpu_addr,
+                        skipped = jet.skipped,
+                        error = ?jet.error,
+                        "received jet send attempt"
+                    );
                 }
                 None => {
                     error!(client_id, event_count, "received event without type");

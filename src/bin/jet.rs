@@ -34,9 +34,9 @@ use {
         cluster_tpu_info::ClusterTpuInfo,
         config::{ConfigJet, PrometheusConfig, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
+        grpc_lewis::create_lewis_pipeline,
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         jet_gateway::spawn_jet_gw_listener,
-        lewis::transaction_events::create_lewis_event_pipeline,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
         quic_gateway::{
             IgnorantLeaderPredictor, QuicGatewayConfig, StakeBasedEvictionStrategy,
@@ -296,18 +296,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
 
-    // Set up Lewis event tracking pipeline
-    // Tracks transaction lifecycle: attempts, failures, and policy decisions
-    let (event_reporter, aggregator_fut, lewis_fut) = create_lewis_event_pipeline(
-        config.lewis_events.clone(),
-        config.send_transaction_service.service_max_retries,
-    );
-
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
         stake_info_map: stake_info_map.clone(),
         gateway_tx_channel_capacity: 10000,
         leader_tpu_info_service: Arc::new(cluster_tpu_info.clone()),
-        event_reporter: event_reporter.clone(),
     };
 
     let connection_predictor = if config.quic.connection_prediction_lookahead.is_none() {
@@ -375,13 +367,16 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         (sink, source)
     };
 
+    // Set up Lewis event tracking pipeline
+    let (lewis_handler, lewis_fut) = create_lewis_pipeline(config.lewis_events.clone());
+
     let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
         shield_policy_store,
         scheduler_out,
         quic_gateway_bidi,
         config.send_transaction_service.leader_forward_count,
-        event_reporter.clone(),
+        lewis_handler,
     );
 
     tg.spawn_cancelable(
@@ -463,31 +458,17 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         keep_stake_metrics_up_to_date_task(identity_observer.clone(), stake_info_map.clone()),
     );
 
-    // Spawn gRPC Client for Lewis if enabled
+    // Spawn Lewis client task if configured
     if let Some(fut) = lewis_fut {
-        tg.spawn_with_shutdown("lewis_events", |mut stop| async move {
+        tg.spawn_with_shutdown("lewis_client", |mut stop| async move {
             tokio::select! {
                 result = fut => {
                     if let Err(e) = result {
-                        error!("Lewis event loop error: {}", e);
+                        error!("Lewis client error: {}", e);
                     }
                 }
                 _ = &mut stop => {
-                    info!("Shutting down Lewis event client");
-                }
-            }
-        });
-    }
-
-    // Spawn aggregator if Lewis is enabled
-    if let Some(aggregator_fut) = aggregator_fut {
-        tg.spawn_with_shutdown("lewis_event_aggregator", |mut stop| async move {
-            tokio::select! {
-                _ = aggregator_fut => {
-                    info!("Lewis event aggregator completed");
-                }
-                _ = &mut stop => {
-                    info!("Shutting down Lewis event aggregator");
+                    info!("Shutting down Lewis client");
                 }
             }
         });

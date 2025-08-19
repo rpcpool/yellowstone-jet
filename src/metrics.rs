@@ -255,54 +255,14 @@ pub mod jet {
         ).unwrap();
 
         // Lewis Metrics
-        static ref LEWIS_EVENTS_PUSH: IntCounterVec = IntCounterVec::new(
-            Opts::new("lewis_events_push_total", "Total number of events pushed to lewis"),
-            &["status"]
+       static ref LEWIS_EVENTS_DROPPED: IntCounter = IntCounter::new(
+            "lewis_events_dropped_total",
+            "Total number of events dropped due to channel closure"
         ).unwrap();
 
-        static ref LEWIS_EVENTS_FEED: IntCounter = IntCounter::new("lewis_events_feed_total", "Total number of events feed to lewis").unwrap();
-
-        static ref LEWIS_EVENT_CHANNEL_CLOSED: IntCounter = IntCounter::new(
-            "lewis_event_channel_closed_total",
-            "Number of times lewis event channel was closed when trying to send"
-        ).unwrap();
-
-        static ref LEWIS_EVENT_AGGREGATOR_QUEUE_SIZE: IntGauge = IntGauge::new(
-            "lewis_event_aggregator_queue_size",
-            "Number of events waiting in aggregator queue"
-        ).unwrap();
-
-        static ref LEWIS_EVENT_AGGREGATOR_TRACKING_SIZE: IntGauge = IntGauge::new(
-            "lewis_event_aggregator_tracking_size",
-            "Number of transactions being tracked"
-        ).unwrap();
-
-        static ref LEWIS_EVENT_AGGREGATOR_TIMEOUT_TOTAL: IntCounter = IntCounter::new(
-            "lewis_event_aggregator_timeout_total",
-            "Number of transactions sent due to timeout"
-        ).unwrap();
-
-        static ref LEWIS_EVENT_AGGREGATOR_COMPLETED_TOTAL: IntCounter = IntCounter::new(
-            "lewis_event_aggregator_completed_total",
-            "Number of transactions completed normally"
-        ).unwrap();
-
-        static ref LEWIS_EVENT_AGGREGATOR_ORPHANED_EVENTS: IntCounterVec = IntCounterVec::new(
-            Opts::new(
-                "lewis_event_aggregator_orphaned_events_total",
-                "Number of events received without a preceding TransactionReceived event"
-            ),
-            &["event_type"]
-        ).unwrap();
-
-        static ref LEWIS_EVENT_AGGREGATOR_DUPLICATE_TRANSACTION: IntCounter = IntCounter::new(
-            "lewis_event_aggregator_duplicate_transaction_total",
-            "Number of duplicate TransactionReceived events"
-        ).unwrap();
-
-        static ref LEWIS_EVENT_AGGREGATOR_DUPLICATE_LEADERS: IntCounter = IntCounter::new(
-            "lewis_event_aggregator_duplicate_leaders_total",
-            "Number of transactions with duplicate leaders in schedule"
+        static ref LEWIS_EVENTS_SENT: IntCounter = IntCounter::new(
+            "lewis_events_sent_total",
+            "Total number of events sent to Lewis gRPC stream"
         ).unwrap();
     }
 
@@ -419,16 +379,8 @@ pub mod jet {
             register!(QUIC_GW_LEADER_PREDICTION_MISS);
 
             // Lewis Metrics
-            register!(LEWIS_EVENTS_FEED);
-            register!(LEWIS_EVENTS_PUSH);
-            register!(LEWIS_EVENT_CHANNEL_CLOSED);
-            register!(LEWIS_EVENT_AGGREGATOR_QUEUE_SIZE);
-            register!(LEWIS_EVENT_AGGREGATOR_TRACKING_SIZE);
-            register!(LEWIS_EVENT_AGGREGATOR_TIMEOUT_TOTAL);
-            register!(LEWIS_EVENT_AGGREGATOR_COMPLETED_TOTAL);
-            register!(LEWIS_EVENT_AGGREGATOR_ORPHANED_EVENTS);
-            register!(LEWIS_EVENT_AGGREGATOR_DUPLICATE_TRANSACTION);
-            register!(LEWIS_EVENT_AGGREGATOR_DUPLICATE_LEADERS);
+            register!(LEWIS_EVENTS_DROPPED);
+            register!(LEWIS_EVENTS_SENT);
         });
     }
 
@@ -632,47 +584,11 @@ pub mod jet {
     }
 
     // Lewis Metrics
-    pub fn lewis_events_push_inc(status: Result<(), ()>) {
-        LEWIS_EVENTS_PUSH
-            .with_label_values(&[if status.is_ok() { "ok" } else { "overflow" }])
-            .inc()
+    pub fn lewis_events_dropped_inc() {
+        LEWIS_EVENTS_DROPPED.inc();
     }
 
-    pub fn lewis_events_feed_inc() {
-        LEWIS_EVENTS_FEED.inc()
-    }
-
-    pub fn lewis_event_channel_closed_inc() {
-        LEWIS_EVENT_CHANNEL_CLOSED.inc();
-    }
-
-    pub fn lewis_event_aggregator_queue_size_set(size: usize) {
-        LEWIS_EVENT_AGGREGATOR_QUEUE_SIZE.set(size as i64);
-    }
-
-    pub fn lewis_event_aggregator_tracking_size_set(size: usize) {
-        LEWIS_EVENT_AGGREGATOR_TRACKING_SIZE.set(size as i64);
-    }
-
-    pub fn lewis_event_aggregator_timeout_inc() {
-        LEWIS_EVENT_AGGREGATOR_TIMEOUT_TOTAL.inc();
-    }
-
-    pub fn lewis_event_aggregator_completed_inc() {
-        LEWIS_EVENT_AGGREGATOR_COMPLETED_TOTAL.inc();
-    }
-
-    pub fn lewis_event_aggregator_orphaned_events_inc(event_type: &str) {
-        LEWIS_EVENT_AGGREGATOR_ORPHANED_EVENTS
-            .with_label_values(&[event_type])
-            .inc();
-    }
-
-    pub fn lewis_event_aggregator_duplicate_transaction_inc() {
-        LEWIS_EVENT_AGGREGATOR_DUPLICATE_TRANSACTION.inc();
-    }
-
-    pub fn lewis_event_aggregator_duplicate_leaders_inc() {
-        LEWIS_EVENT_AGGREGATOR_DUPLICATE_LEADERS.inc();
+    pub fn lewis_events_sent_inc() {
+        LEWIS_EVENTS_SENT.inc();
     }
 }

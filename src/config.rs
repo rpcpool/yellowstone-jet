@@ -552,44 +552,71 @@ impl ConfigExtraTpuForward {
 pub struct ConfigLewisEvents {
     /// lewis gRPC metrics endpoint
     pub endpoint: String,
+
     /// Events gRPC queue size
     #[serde(default = "ConfigLewisEvents::default_queue_size_grpc")]
     pub queue_size_grpc: usize,
-    /// Event buffer queue size
-    #[serde(default = "ConfigLewisEvents::default_queue_size_buffer")]
-    pub queue_size_buffer: usize,
+
     /// Jet ID to use for events
     #[serde(default)]
     pub jet_id: Option<String>,
-    /// Aggregation timeout - how long to wait for all attempts events to be received
+
+    /// Batch size threshold - number of events before forcing a flush
+    #[serde(default = "ConfigLewisEvents::default_batch_size_threshold")]
+    pub batch_size_threshold: u64,
+
+    /// Batch timeout - max time to wait before flushing events
     #[serde(
-        default = "ConfigLewisEvents::default_aggregation_timeout",
+        default = "ConfigLewisEvents::default_batch_timeout",
         with = "humantime_serde"
     )]
-    pub aggregation_timeout: Duration,
-    /// Check interval for timeouts only (not for completion)
+    pub batch_timeout: Duration,
+
+    /// Connection timeout for Lewis gRPC
     #[serde(
-        default = "ConfigLewisEvents::default_check_interval",
+        default = "ConfigLewisEvents::default_connect_timeout",
         with = "humantime_serde"
     )]
-    pub check_interval: Duration,
+    pub connect_timeout: Duration,
+
+    /// HTTP2 keepalive interval
+    #[serde(
+        default = "ConfigLewisEvents::default_keepalive_interval",
+        with = "humantime_serde"
+    )]
+    pub keepalive_interval: Duration,
+
+    /// Keepalive timeout
+    #[serde(
+        default = "ConfigLewisEvents::default_keepalive_timeout",
+        with = "humantime_serde"
+    )]
+    pub keepalive_timeout: Duration,
 }
 
 impl ConfigLewisEvents {
     const fn default_queue_size_grpc() -> usize {
-        1_000
+        10_000
     }
 
-    const fn default_queue_size_buffer() -> usize {
-        100_000
+    const fn default_batch_size_threshold() -> u64 {
+        128
     }
 
-    const fn default_aggregation_timeout() -> Duration {
+    const fn default_batch_timeout() -> Duration {
+        Duration::from_millis(100)
+    }
+
+    const fn default_connect_timeout() -> Duration {
+        Duration::from_secs(10)
+    }
+
+    const fn default_keepalive_interval() -> Duration {
         Duration::from_secs(30)
     }
 
-    const fn default_check_interval() -> Duration {
-        Duration::from_secs(1)
+    const fn default_keepalive_timeout() -> Duration {
+        Duration::from_secs(10)
     }
 }
 

@@ -3,7 +3,7 @@ use {
         blockhash_queue::BlockHeightService,
         cluster_tpu_info::ClusterTpuInfo,
         grpc_geyser::{BlockMetaWithCommitment, GrpcUpdateMessage, TransactionReceived},
-        lewis::transaction_events::EventReporter,
+        grpc_lewis::LewisEventHandler,
         metrics::jet as metrics,
         quic_gateway::{GatewayResponse, GatewayTransaction},
         util::CommitmentLevel,
@@ -598,7 +598,7 @@ pub struct TransactionFanout {
     transaction_send_set: JoinSet<Result<Signature, SendTransactionError>>,
     transaction_send_set_meta: HashMap<task::Id, Signature>,
     inflight_transactions: HashSet<Signature>,
-    event_reporter: Option<Arc<dyn EventReporter>>,
+    lewis_handler: Option<Arc<LewisEventHandler>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -670,7 +670,7 @@ impl TransactionFanout {
         incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
         quic_gateway_bidi: QuicGatewayBidi,
         leader_fwd_count: usize,
-        event_reporter: Option<Arc<dyn EventReporter>>,
+        lewis_handler: Option<Arc<LewisEventHandler>>,
     ) -> Self {
         Self {
             leader_schedule_service,
@@ -682,7 +682,7 @@ impl TransactionFanout {
             transaction_send_set: JoinSet::new(),
             transaction_send_set_meta: HashMap::new(),
             inflight_transactions: HashSet::new(),
-            event_reporter,
+            lewis_handler,
         }
     }
 
@@ -701,7 +701,7 @@ impl TransactionFanout {
                 maybe = self.gateway_response_rx.recv() => {
                     match maybe {
                         Some(response) => {
-                            self.handle_gateway_response(response);
+                            self.handle_gateway_response(&response);
                         }
                         None => {
                             error!("gateway response channel is closed");
@@ -717,7 +717,12 @@ impl TransactionFanout {
         }
     }
 
-    fn handle_gateway_response(&mut self, response: GatewayResponse) {
+    fn handle_gateway_response(&mut self, response: &GatewayResponse) {
+        // Forward to Lewis if handler is configured
+        if let Some(handler) = &self.lewis_handler {
+            let current_slot = self.leader_schedule_service.get_current_slot();
+            handler.handle_gateway_response(response, current_slot);
+        }
         match response {
             GatewayResponse::TxSent(gateway_tx_sent) => {
                 let tx_sig = gateway_tx_sent.tx_sig;
@@ -780,21 +785,17 @@ impl TransactionFanout {
         let leader_fwd = self.leader_fwd_count;
         let gateway_sink = self.tx_gateway_sender.clone();
         let signature = tx.signature;
-        let event_reporter = self.event_reporter.clone();
+        let lewis_handler = self.lewis_handler.clone();
+
         let send_fut = async move {
             let next_leaders = leader_schedule_service.leader_lookahead(leader_fwd);
             let current_slot = leader_schedule_service.get_current_slot();
 
-            // Emit transaction received event
-            if let Some(reporter) = &event_reporter {
-                reporter.report_transaction_received(signature, next_leaders.clone(), current_slot);
-            }
-
             for dest in next_leaders {
                 if !policy_store_service.is_allowed(&tx.policies, &dest)? {
-                    // Report a skip event if lewis is enabled.
-                    if let Some(reporter) = &event_reporter {
-                        reporter.report_policy_skip(tx.signature, dest);
+                    // Report skip to Lewis
+                    if let Some(handler) = &lewis_handler {
+                        handler.handle_skip(tx.signature, dest, current_slot, &tx.policies);
                     }
                     metrics::sts_tpu_denied_inc_by(1);
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");

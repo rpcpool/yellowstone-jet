@@ -60,17 +60,13 @@ message EventJet {
 	string jet_gateway_id = 3;      // - the jet gateway id
 	string jet_id = 4;              // - the jet gateway id
 	bytes sig = 5;	                // - the transaction id (signature)
-	repeated JetSend jet_sends = 6; // - which validators (by voting pubkey??) jet sent the transaction to
-	uint64 slot = 7;                // - the latest slot that the jet has seen (via WS)
-	int64 ts_received = 8;          // - the timestamp when the transaction was received
-}
-
-message JetSend {
-	string validator = 1; // - validator identifier
-	int64 ts = 2;         // - timestamp when the transaction was sent
-	bool skipped = 3;     // if skipped sending to this validator
-	string tpu_addr = 4;  // tpu address of the validator to which the transaction was sent
-	string error = 5;     // error message if sending failed
+	uint64 slot = 7;                // - the slot we sent the transaction to the leader.
+	int64 ts = 8;          // - the timestamp when sent the transaction
+  string validator = 9;  // - the validator identifier that the transaction was sent
+  string tpu_addr = 10;  // - the TPU address of the validator to which the transaction was sent
+  string error = 11;    // - error message if sending failed
+  bool skipped = 12;     // - if the transaction was skipped because of shield policy
+  repeated string shield_policies = 13; // the shield policies used on this transaction
 }
 
 message EventBlockInclusion {
