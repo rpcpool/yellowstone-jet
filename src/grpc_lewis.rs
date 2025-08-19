@@ -70,36 +70,47 @@ impl LewisEventHandler {
     }
 
     pub fn handle_gateway_response(&self, response: &GatewayResponse, slot: Slot) {
-        let event = match response {
-            GatewayResponse::TxSent(sent) => self.build_event(
-                sent.tx_sig,
-                sent.remote_peer_identity,
-                Some(sent.remote_peer_addr),
-                slot,
-                None,
-                false,
-                vec![],
-            ),
-            GatewayResponse::TxFailed(failed) => self.build_event(
-                failed.tx_sig,
-                failed.remote_peer_identity,
-                Some(failed.remote_peer_addr),
-                slot,
-                Some(failed.failure_reason.to_string()),
-                false,
-                vec![],
-            ),
-            GatewayResponse::TxDrop(dropped) => self.build_event(
-                dropped.tx_sig,
-                dropped.remote_peer_identity,
-                None,
-                slot,
-                Some(dropped.drop_reason.to_string()),
-                false,
-                vec![],
-            ),
-        };
-        self.emit(event);
+        match response {
+            GatewayResponse::TxSent(sent) => {
+                let event = self.build_event(
+                    sent.tx_sig,
+                    sent.remote_peer_identity,
+                    Some(sent.remote_peer_addr),
+                    slot,
+                    None,
+                    false,
+                    vec![],
+                );
+                self.emit(event);
+            }
+            GatewayResponse::TxFailed(failed) => {
+                let event = self.build_event(
+                    failed.tx_sig,
+                    failed.remote_peer_identity,
+                    Some(failed.remote_peer_addr),
+                    slot,
+                    Some(failed.failure_reason.to_string()),
+                    false,
+                    vec![],
+                );
+                self.emit(event);
+            }
+            GatewayResponse::TxDrop(dropped) => {
+                // Iterate over all dropped transactions
+                for (gateway_tx, _attempt_count) in &dropped.dropped_gateway_tx_vec {
+                    let event = self.build_event(
+                        gateway_tx.tx_sig,
+                        dropped.remote_peer_identity,
+                        None, // No TPU addr for dropped
+                        slot,
+                        Some(dropped.drop_reason.to_string()),
+                        false,
+                        vec![],
+                    );
+                    self.emit(event);
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

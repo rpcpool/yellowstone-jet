@@ -10,6 +10,17 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+## [14.4.0]
+
+- Fixed critical memory leak in rooted transactions where finalized slots were never cleaned up due to incorrect block height comparison.
+- Refactored `GrpcRootedTxReceiver` to use a testable state machine pattern, eliminating duplicated state and improving code maintainability.
+- Added comprehensive tests for transaction lifecycle and cleanup logic to prevent future regressions.
+- No breaking changes to public APIs.
+
+## [14.3.1]
+
+- Fixed connection prediction ignore.
+
 ## [14.3.0]
 
 - Improved leader schedule and slot tracking by using `FirstShredReceived` events, resulting in 350-400ms faster TPU routing.

@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod payload;
 pub mod proto;
 pub mod pubkey_challenger;
+pub mod rooted_transaction_state;
 // pub mod quic;
 pub mod quic_gateway;
 // pub mod quic_solana;

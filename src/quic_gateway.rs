@@ -50,8 +50,8 @@ use {
         metrics::{
             self,
             jet::{
-                observe_leader_rtt, observe_send_transaction_e2e_latency, quic_send_attempts_inc,
-                set_leader_mtu,
+                incr_quic_gw_worker_tx_process_cnt, observe_leader_rtt,
+                observe_send_transaction_e2e_latency, quic_send_attempts_inc, set_leader_mtu,
             },
         },
         stake::StakeInfoMap,
@@ -332,7 +332,7 @@ pub(crate) struct TokioQuicGatewayRuntime {
     ///
     /// Transaction queues per remote identity waiting for connection to be come available.
     ///
-    tx_queues: HashMap<Pubkey, VecDeque<GatewayTransaction>>,
+    tx_queues: HashMap<Pubkey, VecDeque<(GatewayTransaction, usize)>>,
 
     ///
     /// The runtime to spawn transation sender worker on.
@@ -459,7 +459,7 @@ pub struct GatewayTransaction {
     pub remote_peer: Pubkey,
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum SendTxError {
     #[error(transparent)]
     ConnectionError(#[from] ConnectionError),
@@ -501,8 +501,9 @@ pub enum TxDropReason {
 #[derive(Debug)]
 pub struct TxDrop {
     pub remote_peer_identity: Pubkey,
-    pub tx_sig: Signature,
+    // pub tx_sig: Signatu
     pub drop_reason: TxDropReason,
+    pub dropped_gateway_tx_vec: VecDeque<(GatewayTransaction, usize)>,
 }
 
 #[derive(Debug)]
@@ -524,6 +525,17 @@ struct ConnectingTask {
     tpu_port_kind: ConfigQuicTpuPort,
     wait_for_eviction: Option<Arc<Notify>>,
     endpoint: Endpoint,
+}
+
+/// Translate a SocketAddr into a valid SNI for the purposes of QUIC connection
+///
+/// We do not actually check if the server holds a cert for this server_name
+/// since Solana does not rely on DNS names, but we need to provide a unique
+/// one to ensure that we present correct QUIC tokens to the correct server.
+///
+/// Code taken from https://github.com/anza-xyz/agave/pull/7260
+pub fn socket_addr_to_quic_server_name(peer: SocketAddr) -> String {
+    format!("{}.{}.sol", peer.ip(), peer.port())
 }
 
 impl ConnectingTask {
@@ -571,9 +583,10 @@ impl ConnectingTask {
         let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
         config.transport_config(Arc::new(transport_config));
 
+        let server_name = socket_addr_to_quic_server_name(remote_peer_addr);
         let connecting = self
             .endpoint
-            .connect_with(config, remote_peer_addr, "connect")
+            .connect_with(config, remote_peer_addr, server_name.as_str())
             .map_err(ConnectingError::ConnectError)?;
 
         tracing::trace!(
@@ -609,9 +622,8 @@ struct QuicTxSenderWorker {
     connection: Arc<Connection>,
     incoming_rx: mpsc::Receiver<GatewayTransaction>,
     output_tx: mpsc::UnboundedSender<GatewayResponse>,
-    tx_queue: VecDeque<GatewayTransaction>,
+    tx_queue: VecDeque<(GatewayTransaction, usize)>,
     cancel_notify: Arc<Notify>,
-    tx_map: HashMap<Signature, GatewayTransaction>,
     max_tx_attempt: NonZeroUsize,
     // TODO: Check if this is necessary, since there is already flow control in QUIC
     // Moreover, most QUIC API are instantaneous and do not block
@@ -631,73 +643,38 @@ enum TxSenderWorkerError {
 struct TxSenderWorkerCompleted {
     err: Option<TxSenderWorkerError>,
     rx: mpsc::Receiver<GatewayTransaction>,
-    pending_tx: VecDeque<GatewayTransaction>,
+    pending_tx: VecDeque<(GatewayTransaction, usize)>,
     canceled: bool,
 }
 
 impl QuicTxSenderWorker {
-    async fn send_tx(&mut self, tx_sig: Signature) -> Result<SentOk, SendTxError> {
-        let tx = self.tx_map.get(&tx_sig).expect("tx should be in tx_map");
-        let remote_peer_identity = tx.remote_peer;
+    async fn send_tx(&mut self, tx: Bytes) -> Result<SentOk, SendTxError> {
         let t = Instant::now();
-
-        for attempt in 1..=self.max_tx_attempt.get() {
-            let mut uni = self.connection.open_uni().await?;
-            let result = uni.write_all(&tx.wire).await.map_err(|e| match e {
-                WriteError::Stopped(var_int) => SendTxError::StreamStopped(var_int),
-                WriteError::ConnectionLost(connection_error) => {
-                    SendTxError::ConnectionError(connection_error)
-                }
-                WriteError::ClosedStream => SendTxError::StreamClosed,
-                WriteError::ZeroRttRejected => SendTxError::ZeroRttRejected,
-            });
-
-            if let Err(e) = result {
-                quic_send_attempts_inc(self.remote_peer, self.connection.remote_address(), "error");
-
-                if attempt == self.max_tx_attempt.get()
-                    || matches!(
-                        e,
-                        SendTxError::ZeroRttRejected | SendTxError::ConnectionError(_)
-                    )
-                {
-                    tracing::trace!(
-                        "Giving up sending transaction: {} to remote peer: {} after {} attempts: {:?}",
-                        tx_sig,
-                        remote_peer_identity,
-                        attempt,
-                        e
-                    );
-                    return Err(e);
-                }
-
-                tracing::trace!(
-                    "Failed to send transaction: {} to remote peer: {} on attempt {}/{}: {:?}",
-                    tx_sig,
-                    remote_peer_identity,
-                    attempt,
-                    self.max_tx_attempt,
-                    e
-                );
-                continue;
+        let mut uni = self.connection.open_uni().await?;
+        uni.write_all(&tx).await.map_err(|e| match e {
+            WriteError::Stopped(var_int) => SendTxError::StreamStopped(var_int),
+            WriteError::ConnectionLost(connection_error) => {
+                SendTxError::ConnectionError(connection_error)
             }
-
-            // Dropping the uni is doing the same thing as finish.
-            drop(uni);
-            break;
-        }
-
+            WriteError::ClosedStream => SendTxError::StreamClosed,
+            WriteError::ZeroRttRejected => SendTxError::ZeroRttRejected,
+        })?;
         let e2e_time = t.elapsed();
-        Ok(SentOk { e2e_time })
+        let ok = SentOk { e2e_time };
+        Ok(ok)
     }
-
-    fn handle_tx_sent_result(
+    async fn process_tx(
         &mut self,
-        tx_sig: Signature,
-        result: Result<SentOk, SendTxError>,
-    ) -> Result<(), TxSenderWorkerError> {
+        tx: GatewayTransaction,
+        attempt: usize,
+    ) -> Option<TxSenderWorkerError> {
+        let result = self.send_tx(tx.wire.clone()).await;
+        let remote_addr = self.connection.remote_address();
+        let tx_sig = tx.tx_sig;
         match result {
             Ok(sent_ok) => {
+                quic_send_attempts_inc(self.remote_peer, remote_addr, "success");
+                incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "success");
                 tracing::debug!(
                     "Tx sent to remote peer: {} in {:?}",
                     self.remote_peer,
@@ -708,56 +685,79 @@ impl QuicTxSenderWorker {
                     remote_peer_addr: self.remote_peer_addr,
                     tx_sig,
                 };
-                self.tx_map.remove(&tx_sig);
                 let _ = self.output_tx.send(GatewayResponse::TxSent(resp));
                 observe_send_transaction_e2e_latency(self.remote_peer, sent_ok.e2e_time);
                 let path_stats = self.connection.stats().path;
                 let current_mut = path_stats.current_mtu;
                 set_leader_mtu(self.remote_peer, current_mut);
                 observe_leader_rtt(self.remote_peer, path_stats.rtt);
-                let remote_addr = self.connection.remote_address();
                 quic_send_attempts_inc(self.remote_peer, remote_addr, "success");
-                Ok(())
+                None
             }
-            Err(send_err) => match send_err {
-                SendTxError::ConnectionError(connection_error) => {
-                    Err(TxSenderWorkerError::ConnectionLost(connection_error))
-                }
-                SendTxError::StreamStopped(_) | SendTxError::StreamClosed => {
-                    tracing::trace!(
-                        "Stream stopped or closed for tx: {} to remote peer: {}",
-                        tx_sig,
-                        self.remote_peer
-                    );
+            Err(e) => {
+                quic_send_attempts_inc(self.remote_peer, remote_addr, "error");
+                if attempt >= self.max_tx_attempt.get() {
+                    incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "error");
                     let resp = GatewayTxFailed {
                         remote_peer_identity: self.remote_peer,
                         remote_peer_addr: self.remote_peer_addr,
+                        failure_reason: e.clone(),
                         tx_sig,
-                        failure_reason: send_err,
                     };
-                    let _ = self.output_tx.send(GatewayResponse::TxFailed(resp));
-                    Ok(())
-                }
-                SendTxError::ZeroRttRejected => {
                     tracing::warn!(
-                        "0-RTT rejected by remote peer: {} for tx: {}",
+                        "Giving up sending transaction: {} to remote peer: {} after {} attempts: {:?}",
+                        tx_sig,
                         self.remote_peer,
-                        tx_sig
+                        attempt,
+                        e
                     );
-                    Err(TxSenderWorkerError::ZeroRttRejected)
+                    let _ = self.output_tx.send(GatewayResponse::TxFailed(resp));
+                } else {
+                    tracing::trace!(
+                        "Retrying to send transaction: {} to remote peer: {} after {} attempts: {:?}",
+                        tx_sig,
+                        self.remote_peer,
+                        attempt,
+                        e
+                    );
+                    self.tx_queue.push_back((tx, attempt + 1));
                 }
-            },
+
+                match e {
+                    SendTxError::ConnectionError(connection_error) => {
+                        Some(TxSenderWorkerError::ConnectionLost(connection_error))
+                    }
+                    SendTxError::StreamStopped(_) | SendTxError::StreamClosed => {
+                        tracing::trace!(
+                            "Stream stopped or closed for tx: {} to remote peer: {}",
+                            tx_sig,
+                            self.remote_peer
+                        );
+                        None
+                    }
+                    SendTxError::ZeroRttRejected => {
+                        tracing::warn!(
+                            "0-RTT rejected by remote peer: {} for tx: {}",
+                            self.remote_peer,
+                            tx_sig
+                        );
+                        Some(TxSenderWorkerError::ZeroRttRejected)
+                    }
+                }
+            }
         }
     }
 
-    async fn process_tx_queue_if_any(&mut self) -> Option<TxSenderWorkerError> {
-        while let Some(tx) = self.tx_queue.pop_front() {
-            let tx_sig = tx.tx_sig;
-            self.tx_map.insert(tx_sig, tx);
-            let result = self.send_tx(tx_sig).await;
-            match self.handle_tx_sent_result(tx_sig, result) {
-                Ok(_) => continue,
-                Err(e) => return Some(e),
+    async fn try_process_tx_in_queue(&mut self) -> Option<TxSenderWorkerError> {
+        while let Some((tx, attempt)) = self.tx_queue.pop_front() {
+            tracing::trace!(
+                "Processing tx: {} for remote peer: {} with attempt: {}",
+                tx.tx_sig,
+                self.remote_peer,
+                attempt
+            );
+            if let Some(e) = self.process_tx(tx, attempt).await {
+                return Some(e);
             }
         }
         None
@@ -765,9 +765,14 @@ impl QuicTxSenderWorker {
 
     async fn run(mut self) -> TxSenderWorkerCompleted {
         let mut canceled = false;
-
         let maybe_err = loop {
-            if let Some(e) = self.process_tx_queue_if_any().await {
+            tracing::trace!(
+                "worker {} tick loop -- queue size: {}",
+                self.remote_peer,
+                self.tx_queue.len()
+            );
+
+            if let Some(e) = self.try_process_tx_in_queue().await {
                 break Some(e);
             }
 
@@ -775,7 +780,8 @@ impl QuicTxSenderWorker {
                 maybe = self.incoming_rx.recv() => {
                     match maybe {
                         Some(tx) => {
-                            self.tx_queue.push_back(tx);
+                            tracing::trace!("Received tx: {} for remote peer: {}", tx.tx_sig, self.remote_peer);
+                            self.tx_queue.push_back((tx, 1));
                         }
                         None => {
                             tracing::debug!("Transaction sender inlet closed for remote peer: {:?}", self.remote_peer);
@@ -795,9 +801,12 @@ impl QuicTxSenderWorker {
             }
         };
 
-        self.tx_queue
-            .extend(std::mem::take(&mut self.tx_map).into_values());
-
+        tracing::trace!(
+            "Transaction sender worker for remote peer: {:?} completed with error: {:?}, canceled: {}",
+            self.remote_peer,
+            maybe_err,
+            canceled
+        );
         TxSenderWorkerCompleted {
             err: maybe_err,
             canceled,
@@ -1082,17 +1091,16 @@ impl TokioQuicGatewayRuntime {
             remote_peer_identity,
             reason
         );
-        let _ = self
-            .tx_queues
-            .remove(&remote_peer_identity)
-            .into_iter()
-            .flatten()
-            .map(|tx| TxDrop {
+        if let Some(tx_queues) = self.tx_queues.remove(&remote_peer_identity) {
+            let total = tx_queues.len();
+            metrics::jet::incr_quic_gw_drop_tx_cnt(remote_peer_identity, total as u64);
+            let tx_drop = TxDrop {
                 remote_peer_identity,
-                tx_sig: tx.tx_sig,
                 drop_reason: reason.clone(),
-            })
-            .try_for_each(|txdrop| self.response_outlet.send(GatewayResponse::TxDrop(txdrop)));
+                dropped_gateway_tx_vec: tx_queues,
+            };
+            let _ = self.response_outlet.send(GatewayResponse::TxDrop(tx_drop));
+        }
     }
 
     fn unreachable_peer(&mut self, remote_peer_identity: Pubkey) {
@@ -1164,7 +1172,6 @@ impl TokioQuicGatewayRuntime {
             cancel_notify: Arc::clone(&cancel_notify),
             max_tx_attempt: self.config.max_send_attempt,
             tx_send_timeout: self.config.send_timeout,
-            tx_map: Default::default(),
         };
 
         let worker_fut = worker.run();
@@ -1293,6 +1300,7 @@ impl TokioQuicGatewayRuntime {
             match handle.sender.try_send(tx) {
                 Ok(_) => {
                     tracing::trace!("{tx_id} sent to worker");
+                    metrics::jet::incr_quic_gw_tx_relayed_to_worker(remote_peer_identity);
                 }
                 Err(e) => match e {
                     mpsc::error::TrySendError::Full(tx) => {
@@ -1303,9 +1311,10 @@ impl TokioQuicGatewayRuntime {
                         );
                         let txdrop = TxDrop {
                             remote_peer_identity,
-                            tx_sig: tx.tx_sig,
                             drop_reason: TxDropReason::RateLimited,
+                            dropped_gateway_tx_vec: VecDeque::from([(tx, 1)]),
                         };
+                        metrics::jet::incr_quic_gw_drop_tx_cnt(remote_peer_identity, 1);
                         let _ = self.response_outlet.send(GatewayResponse::TxDrop(txdrop));
                     }
                     mpsc::error::TrySendError::Closed(tx) => {
@@ -1313,7 +1322,7 @@ impl TokioQuicGatewayRuntime {
                         self.tx_queues
                             .entry(remote_peer_identity)
                             .or_default()
-                            .push_back(tx);
+                            .push_back((tx, 1));
                     }
                 },
             }
@@ -1324,7 +1333,7 @@ impl TokioQuicGatewayRuntime {
             self.tx_queues
                 .entry(remote_peer_identity)
                 .or_default()
-                .push_back(tx);
+                .push_back((tx, 1));
             tracing::trace!("queuing tx: {:?}", tx_id);
 
             // Check if we are not already connecting to this remote peer.
@@ -1371,7 +1380,6 @@ impl TokioQuicGatewayRuntime {
                     .tx_worker_task_meta_map
                     .remove(&id)
                     .expect("tx worker meta");
-
                 self.active_staked_sorted_remote_peer
                     .remove(&remote_peer_identity);
                 self.remote_peer_addr_watcher.forget(remote_peer_identity);
@@ -1393,19 +1401,15 @@ impl TokioQuicGatewayRuntime {
                     is_evicted_conn
                 );
 
-                while let Ok(tx) = worker_completed.rx.try_recv() {
-                    // Add to pending_tx so it gets rescued below
-                    worker_completed.pending_tx.push_back(tx);
-                }
                 // It's possible that the worker failed while having pending transactions.
                 // We need to "rescue" those transactions if any and if the worker didn't fail due to fatal errors.
 
                 let tx_to_rescue = self.tx_queues.entry(remote_peer_identity).or_default();
                 while let Ok(tx) = worker_completed.rx.try_recv() {
-                    tx_to_rescue.push_back(tx);
+                    tx_to_rescue.push_back((tx, 1));
                 }
-                while let Some(tx) = worker_completed.pending_tx.pop_front() {
-                    tx_to_rescue.push_back(tx);
+                while let Some((tx, attempt)) = worker_completed.pending_tx.pop_front() {
+                    tx_to_rescue.push_back((tx, attempt));
                 }
 
                 let is_peer_unreachable = worker_completed
