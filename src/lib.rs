@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 use {
     std::io::{self, IsTerminal},
     tracing_subscriber::{

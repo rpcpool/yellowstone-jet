@@ -27,7 +27,7 @@ pub fn stake_to_per100ms_limit(stake: u64, total_stake: u64) -> u64 {
     }
 
     // Comes from jet repository in `stake.rs`
-    (80_000f64 * stake as f64 / total_stake as f64).floor() as u64
+    (160_000f64 * stake as f64 / total_stake as f64).floor() as u64
 }
 
 pub fn stake_to_max_stream(stake: u64, total_stake: u64) -> u64 {

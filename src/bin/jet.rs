@@ -482,6 +482,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         RpcServerType::Admin {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group_syncer))),
             allowed_identity: config.identity.expected,
+            cluster_tpu_info: Arc::new(cluster_tpu_info),
         },
     )
     .await?;
