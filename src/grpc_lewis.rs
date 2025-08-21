@@ -89,7 +89,7 @@ impl LewisEventHandler {
                     failed.remote_peer_identity,
                     Some(failed.remote_peer_addr),
                     slot,
-                    Some(failed.failure_reason.to_string()),
+                    Some(failed.failure_reason.clone()),
                     false,
                     vec![],
                 );

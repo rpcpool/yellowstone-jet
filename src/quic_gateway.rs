@@ -459,7 +459,7 @@ pub struct GatewayTransaction {
     pub remote_peer: Pubkey,
 }
 
-#[derive(thiserror::Error, Debug, Clone)]
+#[derive(thiserror::Error, Debug)]
 pub enum SendTxError {
     #[error(transparent)]
     ConnectionError(#[from] ConnectionError),
@@ -483,7 +483,7 @@ pub struct GatewayTxFailed {
     pub remote_peer_identity: Pubkey,
     pub remote_peer_addr: SocketAddr,
     pub tx_sig: Signature,
-    pub failure_reason: SendTxError,
+    pub failure_reason: String,
 }
 
 #[derive(Clone, Debug, Display)]
@@ -618,7 +618,6 @@ impl ConnectingTask {
 /// benchmarks conducted by the Anza team indicate that this approach degrades performance rather than improving it.
 struct QuicTxSenderWorker {
     remote_peer: Pubkey,
-    remote_peer_addr: SocketAddr,
     connection: Arc<Connection>,
     incoming_rx: mpsc::Receiver<GatewayTransaction>,
     output_tx: mpsc::UnboundedSender<GatewayResponse>,
@@ -682,7 +681,7 @@ impl QuicTxSenderWorker {
                 );
                 let resp = GatewayTxSent {
                     remote_peer_identity: self.remote_peer,
-                    remote_peer_addr: self.remote_peer_addr,
+                    remote_peer_addr: self.connection.remote_address(),
                     tx_sig,
                 };
                 let _ = self.output_tx.send(GatewayResponse::TxSent(resp));
@@ -700,8 +699,8 @@ impl QuicTxSenderWorker {
                     incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "error");
                     let resp = GatewayTxFailed {
                         remote_peer_identity: self.remote_peer,
-                        remote_peer_addr: self.remote_peer_addr,
-                        failure_reason: e.clone(),
+                        remote_peer_addr: self.connection.remote_address(),
+                        failure_reason: e.to_string(),
                         tx_sig,
                     };
                     tracing::warn!(
@@ -1161,7 +1160,6 @@ impl TokioQuicGatewayRuntime {
 
         let worker = QuicTxSenderWorker {
             remote_peer: remote_peer_identity,
-            remote_peer_addr,
             connection,
             incoming_rx: rx,
             output_tx,
