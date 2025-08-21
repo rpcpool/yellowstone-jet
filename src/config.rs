@@ -553,6 +553,9 @@ pub struct ConfigLewisEvents {
     /// gRPC endpoint for Lewis event service
     pub endpoint: String,
 
+    /// Optional X-Token for authentication
+    pub x_token: Option<String>,
+
     /// Events gRPC queue size
     #[serde(default = "ConfigLewisEvents::default_queue_size_grpc")]
     pub queue_size_grpc: usize,

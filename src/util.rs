@@ -11,7 +11,26 @@ use {
         task::{JoinError, JoinHandle},
         time::{Duration, sleep},
     },
+    tonic::{Request, Status, metadata::AsciiMetadataValue},
 };
+
+/// Creates an x-token interceptor function for gRPC authentication
+///
+/// This returns a closure that implements the `Interceptor` trait,
+/// which can be used with any tonic-generated client's `with_interceptor` method.
+/// If x_token is None, returns a no-op interceptor.
+pub fn create_x_token_interceptor(
+    x_token: Option<String>,
+) -> impl tonic::service::Interceptor + Clone {
+    let token_value = x_token.and_then(|token| AsciiMetadataValue::try_from(token).ok());
+
+    move |mut request: Request<()>| -> Result<Request<()>, Status> {
+        if let Some(ref token) = token_value {
+            request.metadata_mut().insert("x-token", token.clone());
+        }
+        Ok(request)
+    }
+}
 
 pub type BlockHeight = u64;
 

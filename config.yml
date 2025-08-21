@@ -118,6 +118,8 @@ quic:
 lewis_events:
   # grpc endpoint for lewis event service
   endpoint: "http://localhost:8005"
+  # Optional token for access to gRPC
+  x_token: null
   # jet instance identifier (default: none)
   jet_id: "jet-123"
   # batching settings

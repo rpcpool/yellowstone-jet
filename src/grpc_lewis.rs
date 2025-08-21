@@ -6,7 +6,7 @@ use {
             Event, EventAck, EventJet, event, transaction_tracker_client::TransactionTrackerClient,
         },
         quic_gateway::GatewayResponse,
-        util::IncrementalBackoff,
+        util::{IncrementalBackoff, create_x_token_interceptor},
     },
     futures::SinkExt,
     solana_clock::Slot,
@@ -250,10 +250,11 @@ async fn connect_and_stream(
     let channel = create_channel(config).await?;
     info!("Connected to Lewis");
 
-    let mut client = TransactionTrackerClient::new(channel);
+    // Always use interceptor (it's a no-op if x_token is None)
+    let interceptor = create_x_token_interceptor(config.x_token.clone());
+    let mut client = TransactionTrackerClient::with_interceptor(channel, interceptor);
 
     let (mut tx, rx_stream) = futures::channel::mpsc::channel(config.queue_size_grpc);
-
     let response = client.track_events(rx_stream);
 
     // Local batch buffer
