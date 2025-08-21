@@ -116,18 +116,27 @@ quic:
 
 # Lewis Events Configuration
 lewis_events:
-  # Lewis Event gRPC endpoint
+  # grpc endpoint for lewis event service
   endpoint: "http://localhost:8005"
-  # Lewis Event gRPC queue size
-  queue_size_grpc: 1000
-  # Lewis Event buffer queue size - Aggregator sends to this channel
-  queue_size_buffer: 100000
-  # Jet ID to use for events
-  jet_id: "jet-test-123"
-  # Aggregation timeout - how long to wait for all attempts to be received
-  aggregation_timeout: 30s
-  # Check interval for timeouts only (not for completion)
-  check_interval: 1s
+  # jet instance identifier (default: none)
+  jet_id: "jet-123"
+  # batching settings
+  batch_size_threshold: 512        # default: 512
+  batch_timeout: 1000ms            # default: 1000ms
+  # channel sizes
+  queue_size_grpc: 10000           # default: 10000
+  event_buffer_size: 100000        # default: 100000
+  # connection settings
+  connect_timeout: 10s             # default: 10s
+  keepalive_interval: 30s          # default: 30s
+  keepalive_timeout: 10s           # default: 10s
+  keep_alive_while_idle: true      # default: true
+  # retry settings
+  max_reconnect_attempts: 3        # default: 3
+  reconnect_initial_interval: 1000ms # default: 1000ms
+  reconnect_max_interval: 30s       # default: 30s
+  # stream settings
+  stream_timeout: 300s               # default: 300s (0 means no timeout)
 
 features:
   enabled_features:

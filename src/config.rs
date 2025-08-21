@@ -550,7 +550,7 @@ impl ConfigExtraTpuForward {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigLewisEvents {
-    /// lewis gRPC metrics endpoint
+    /// gRPC endpoint for Lewis event service
     pub endpoint: String,
 
     /// Events gRPC queue size
@@ -592,6 +592,39 @@ pub struct ConfigLewisEvents {
         with = "humantime_serde"
     )]
     pub keepalive_timeout: Duration,
+
+    /// Size of internal event buffer between handler and client
+    #[serde(default = "ConfigLewisEvents::default_event_buffer_size")]
+    pub event_buffer_size: usize,
+
+    /// Keep HTTP2 connection alive even when idle
+    #[serde(default = "ConfigLewisEvents::default_keep_alive_while_idle")]
+    pub keep_alive_while_idle: bool,
+
+    /// Maximum number of reconnection attempts
+    #[serde(default = "ConfigLewisEvents::default_max_reconnect_attempts")]
+    pub max_reconnect_attempts: usize,
+
+    /// Initial interval for reconnection backoff
+    #[serde(
+        default = "ConfigLewisEvents::default_reconnect_initial_interval",
+        with = "humantime_serde"
+    )]
+    pub reconnect_initial_interval: Duration,
+
+    /// Maximum interval for reconnection backoff
+    #[serde(
+        default = "ConfigLewisEvents::default_reconnect_max_interval",
+        with = "humantime_serde"
+    )]
+    pub reconnect_max_interval: Duration,
+
+    /// Maximum time for the entire stream
+    #[serde(
+        default = "ConfigLewisEvents::default_stream_timeout",
+        with = "humantime_serde"
+    )]
+    pub stream_timeout: Duration,
 }
 
 impl ConfigLewisEvents {
@@ -600,11 +633,11 @@ impl ConfigLewisEvents {
     }
 
     const fn default_batch_size_threshold() -> u64 {
-        128
+        512
     }
 
     const fn default_batch_timeout() -> Duration {
-        Duration::from_millis(100)
+        Duration::from_millis(1000)
     }
 
     const fn default_connect_timeout() -> Duration {
@@ -617,6 +650,30 @@ impl ConfigLewisEvents {
 
     const fn default_keepalive_timeout() -> Duration {
         Duration::from_secs(10)
+    }
+
+    const fn default_event_buffer_size() -> usize {
+        100_000
+    }
+
+    const fn default_keep_alive_while_idle() -> bool {
+        true
+    }
+
+    const fn default_max_reconnect_attempts() -> usize {
+        3
+    }
+
+    const fn default_reconnect_initial_interval() -> Duration {
+        Duration::from_millis(1000)
+    }
+
+    const fn default_reconnect_max_interval() -> Duration {
+        Duration::from_secs(30)
+    }
+
+    const fn default_stream_timeout() -> Duration {
+        Duration::from_secs(300) // 0 means no timeout
     }
 }
 

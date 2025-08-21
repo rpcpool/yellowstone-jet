@@ -6,6 +6,7 @@ use {
             Event, EventAck, EventJet, event, transaction_tracker_client::TransactionTrackerClient,
         },
         quic_gateway::GatewayResponse,
+        util::IncrementalBackoff,
     },
     futures::SinkExt,
     solana_clock::Slot,
@@ -17,9 +18,9 @@ use {
         sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     },
-    tokio::sync::mpsc,
-    tonic::transport::Endpoint,
-    tracing::{debug, info, warn},
+    tokio::{sync::mpsc, time::Duration},
+    tonic::transport::{Channel, Endpoint},
+    tracing::{debug, error, info, warn},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -41,11 +42,14 @@ pub enum LewisClientError {
 
     #[error("Failed to receive acknowledgment from Lewis: {0}")]
     AckError(tonic::Status),
+
+    #[error("Max reconnection attempts exceeded")]
+    MaxReconnectAttemptsExceeded,
 }
 
 #[derive(Clone)]
 pub struct LewisEventHandler {
-    tx: mpsc::UnboundedSender<Event>,
+    tx: mpsc::Sender<Event>,
     jet_id: String,
 }
 
@@ -96,14 +100,14 @@ impl LewisEventHandler {
                 self.emit(event);
             }
             GatewayResponse::TxDrop(dropped) => {
-                // Iterate over all dropped transactions
+                let drop_reason_str = dropped.drop_reason.to_string();
                 for (gateway_tx, _attempt_count) in &dropped.dropped_gateway_tx_vec {
                     let event = self.build_event(
                         gateway_tx.tx_sig,
                         dropped.remote_peer_identity,
                         None, // No TPU addr for dropped
                         slot,
-                        Some(dropped.drop_reason.to_string()),
+                        Some(drop_reason_str.clone()),
                         false,
                         vec![],
                     );
@@ -148,8 +152,9 @@ impl LewisEventHandler {
     }
 
     fn emit(&self, event: Event) {
-        if self.tx.send(event).is_err() {
-            warn!("Lewis event channel closed, dropping event");
+        // Drop on buffer full
+        if let Err(e) = self.tx.try_send(event) {
+            warn!("Lewis event channel full or closed, dropping event: {}", e);
             metrics::lewis_events_dropped_inc();
         }
     }
@@ -165,111 +170,215 @@ pub fn create_lewis_pipeline(
         return (None, None);
     };
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(config.event_buffer_size);
     let jet_id = config.jet_id.clone().unwrap_or_default();
 
     let handler = Arc::new(LewisEventHandler { tx, jet_id });
     let fut = run_lewis_client(config, rx);
 
     info!("Lewis event pipeline created");
-
     (Some(handler), Some(fut))
 }
 
 async fn run_lewis_client(
     config: ConfigLewisEvents,
-    mut rx: mpsc::UnboundedReceiver<Event>,
+    mut rx: mpsc::Receiver<Event>,
 ) -> Result<(), LewisClientError> {
-    match connect_and_stream(&config, &mut rx).await {
-        Ok(()) => {
-            info!("Lewis event stream completed normally");
-            Ok(())
+    let mut attempt = 0;
+
+    let mut backoff = IncrementalBackoff::new(
+        config.reconnect_initial_interval,
+        config.reconnect_max_interval,
+    );
+
+    loop {
+        if attempt == 0 {
+            backoff.init();
         }
-        Err(e) => {
-            warn!("Lewis connection failed: {}. Draining remaining events", e);
-            // Drain to prevent blocking
-            while rx.recv().await.is_some() {}
-            Err(e)
+
+        match connect_and_stream(&config, &mut rx).await {
+            Ok(()) => {
+                info!("Lewis event stream completed normally");
+                backoff.reset();
+                return Ok(());
+            }
+            Err(e) => {
+                attempt += 1;
+
+                if attempt >= config.max_reconnect_attempts {
+                    error!(
+                        "Max reconnection attempts ({}) exceeded",
+                        config.max_reconnect_attempts
+                    );
+                    // Drain remaining events to prevent blocking
+                    while rx.recv().await.is_some() {
+                        metrics::lewis_events_dropped_inc();
+                    }
+                    return Err(LewisClientError::MaxReconnectAttemptsExceeded);
+                }
+
+                warn!(
+                    "Lewis connection failed (attempt {}/{}): {}. Retrying...",
+                    attempt, config.max_reconnect_attempts, e
+                );
+
+                backoff.maybe_tick().await;
+            }
         }
     }
 }
 
-async fn connect_and_stream(
-    config: &ConfigLewisEvents,
-    rx: &mut mpsc::UnboundedReceiver<Event>,
-) -> Result<(), LewisClientError> {
-    debug!("Connecting to Lewis at {}", config.endpoint);
-
-    let channel = Endpoint::from_shared(config.endpoint.clone())?
+async fn create_channel(config: &ConfigLewisEvents) -> Result<Channel, LewisClientError> {
+    let endpoint = Endpoint::from_shared(config.endpoint.clone())?
         .connect_timeout(config.connect_timeout)
         .http2_keep_alive_interval(config.keepalive_interval)
         .keep_alive_timeout(config.keepalive_timeout)
-        .keep_alive_while_idle(true)
+        .keep_alive_while_idle(config.keep_alive_while_idle);
+
+    endpoint
         .connect()
         .await
-        .map_err(|e| LewisClientError::ConnectionError(e.to_string()))?;
+        .map_err(|e| LewisClientError::ConnectionError(e.to_string()))
+}
 
+async fn connect_and_stream(
+    config: &ConfigLewisEvents,
+    rx: &mut mpsc::Receiver<Event>,
+) -> Result<(), LewisClientError> {
+    debug!("Connecting to Lewis at {}", config.endpoint);
+
+    let channel = create_channel(config).await?;
     info!("Connected to Lewis");
 
     let mut client = TransactionTrackerClient::new(channel);
-    let (tx, rx_stream) = futures::channel::mpsc::channel(config.queue_size_grpc);
+
+    let (mut tx, rx_stream) = futures::channel::mpsc::channel(config.queue_size_grpc);
 
     let response = client.track_events(rx_stream);
-    let mut tx = Box::pin(tx);
 
-    let mut pending = 0u64;
-    let mut last_flush = tokio::time::Instant::now();
+    // Local batch buffer
+    let mut batch = Vec::with_capacity(config.batch_size_threshold as usize);
+    let mut flush_interval = tokio::time::interval(config.batch_timeout);
+    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // Stream timeout
+    let stream_deadline = if config.stream_timeout > Duration::ZERO {
+        Some(tokio::time::Instant::now() + config.stream_timeout)
+    } else {
+        None
+    };
 
     tokio::pin!(response);
 
     loop {
+        // Check stream timeout
+        if let Some(deadline) = stream_deadline {
+            if tokio::time::Instant::now() >= deadline {
+                warn!("Stream timeout reached after {:?}", config.stream_timeout);
+                if !batch.is_empty() {
+                    send_batch(&mut tx, &mut batch).await?;
+                }
+                break;
+            }
+        }
+
         tokio::select! {
-            maybe_event = rx.recv() => {
-                match maybe_event {
-                    Some(event) => {
-                        tx.send(event).await
-                            .map_err(|e| LewisClientError::StreamSendError(e.to_string()))?;
-                        pending += 1;
-                        metrics::lewis_events_sent_inc();
+            // Handle incoming events
+            Some(event) = rx.recv() => {
+                batch.push(event);
 
-                        // Batch events
-                        if pending >= config.batch_size_threshold ||
-                           last_flush.elapsed() > config.batch_timeout {
-                            tx.flush().await
-                                .map_err(|e| LewisClientError::StreamFlushError(e.to_string()))?;
-                            debug!("Flushed {} events", pending);
-                            pending = 0;
-                            last_flush = tokio::time::Instant::now();
-                        }
-                    }
-                    None => {
-                        // Channel closed, flush and complete
-                        if pending > 0 {
-                            tx.flush().await
-                                .map_err(|e| LewisClientError::StreamFlushError(e.to_string()))?;
-                        }
-                        drop(tx);
+                if batch.len() >= config.batch_size_threshold as usize {
+                    send_batch(&mut tx, &mut batch).await?;
+                    flush_interval.reset();
+                }
+            }
 
-                        match response.await {
-                            Ok(resp) => {
-                                let _ack: EventAck = resp.into_inner();
-                                info!("Lewis acknowledged stream completion");
-                            }
-                            Err(status) => {
-                                return Err(LewisClientError::AckError(status));
-                            }
+            // Timeout-based flush
+            _ = flush_interval.tick() => {
+                if !batch.is_empty() {
+                    debug!("Flushing batch on timeout ({:?})", config.batch_timeout);
+                    send_batch(&mut tx, &mut batch).await?;
+                }
+            }
+
+            // Monitor gRPC stream health
+            result = &mut response => {
+                match result {
+                    Ok(resp) => {
+                        let _ack: EventAck = resp.into_inner();
+                        info!("Lewis stream completed with acknowledgment");
+
+                        // Send any remaining events before returning
+                        if !batch.is_empty() {
+                            send_batch(&mut tx, &mut batch).await?;
                         }
                         return Ok(());
+                    }
+                    Err(status) => {
+                        warn!("Lewis stream failed: {}", status);
+                        return Err(LewisClientError::AckError(status));
                     }
                 }
             }
 
-            _ = &mut response => {
-                warn!("Lewis stream ended unexpectedly");
-                return Err(LewisClientError::StreamTerminated);
+            else => {
+                if !batch.is_empty() {
+                    send_batch(&mut tx, &mut batch).await?;
+                }
+                break;
             }
         }
     }
+
+    drop(tx);
+
+    // Wait for final acknowledgment with timeout
+    let ack_timeout = tokio::time::timeout(Duration::from_secs(5), response);
+
+    match ack_timeout.await {
+        Ok(Ok(resp)) => {
+            let _ack: EventAck = resp.into_inner();
+            info!("Lewis acknowledged stream completion");
+            Ok(())
+        }
+        Ok(Err(status)) => {
+            warn!("Lewis acknowledgment failed: {}", status);
+            Err(LewisClientError::AckError(status))
+        }
+        Err(_) => {
+            warn!("Lewis acknowledgment timed out");
+            Ok(())
+        }
+    }
+}
+
+async fn send_batch(
+    tx: &mut futures::channel::mpsc::Sender<Event>,
+    batch: &mut Vec<Event>,
+) -> Result<(), LewisClientError> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    debug!("Sending batch of {} events", batch.len());
+    let batch_size = batch.len();
+
+    for event in batch.drain(..) {
+        tx.send(event)
+            .await
+            .map_err(|e| LewisClientError::StreamSendError(e.to_string()))?;
+    }
+
+    tx.flush()
+        .await
+        .map_err(|e| LewisClientError::StreamFlushError(e.to_string()))?;
+
+    for _ in 0..batch_size {
+        metrics::lewis_events_sent_inc();
+    }
+
+    debug!("Successfully sent batch of {} events", batch_size);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -284,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_event_creation() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(100);
         let handler = LewisEventHandler {
             tx,
             jet_id: "test-jet".to_string(),
@@ -311,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_gateway_response_sent() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(100);
         let handler = LewisEventHandler {
             tx,
             jet_id: "test-jet".to_string(),
