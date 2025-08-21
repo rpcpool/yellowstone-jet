@@ -618,7 +618,7 @@ impl ConnectingTask {
 /// benchmarks conducted by the Anza team indicate that this approach degrades performance rather than improving it.
 struct QuicTxSenderWorker {
     remote_peer: Pubkey,
-    connection: Arc<Connection>,
+    connection: Connection,
     incoming_rx: mpsc::Receiver<GatewayTransaction>,
     output_tx: mpsc::UnboundedSender<GatewayResponse>,
     tx_queue: VecDeque<(GatewayTransaction, usize)>,
@@ -1103,6 +1103,7 @@ impl TokioQuicGatewayRuntime {
     }
 
     fn unreachable_peer(&mut self, remote_peer_identity: Pubkey) {
+        metrics::jet::inc_quic_gw_unreachable_peer_count(remote_peer_identity);
         self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::RemotePeerUnreachable);
     }
 
@@ -1153,7 +1154,6 @@ impl TokioQuicGatewayRuntime {
     fn install_worker(&mut self, remote_peer_identity: Pubkey, connection: Connection) {
         let (tx, rx) = mpsc::channel(self.config.transaction_sender_worker_channel_capacity);
 
-        let connection = Arc::new(connection);
         let remote_peer_addr = connection.remote_address();
         let output_tx = self.response_outlet.clone();
         let cancel_notify = Arc::new(Notify::new());
@@ -1424,17 +1424,16 @@ impl TokioQuicGatewayRuntime {
                     tracing::trace!("Remote peer: {remote_peer_identity} tx worker was canceled");
                 }
 
+                metrics::jet::incr_quic_gw_connection_close_cnt();
                 if is_peer_unreachable {
                     // If the peer is unreachable, we drop all queued transactions for it.
                     self.unreachable_peer(remote_peer_identity);
-                    metrics::jet::incr_quic_gw_connection_close_cnt();
                 } else if is_evicted_conn {
                     // If the worker was schedule for eviction, we simply drop all queued transactions
                     // because evicted workers are not expected to reconnect soon since they have been
                     // chosen to be eviction strategy. We don't want to be stuck in a loop
                     // where we keep evicting the same peer, so we drop the queued transactions.
                     // and start from a clean slate.
-                    metrics::jet::incr_quic_gw_connection_close_cnt();
                     tracing::trace!(
                         "Remote peer: {} tx worker was canceled, will not reconnect",
                         remote_peer_identity
@@ -1659,22 +1658,10 @@ impl TokioQuicGatewayRuntime {
             .leader_prediction_lookahead
             .map(|nz| nz.get() as u64)
         {
-            // Whatever the lookahead we are using, next prediction deadline should be equal to
-            // half of the lookahead period in combined slot time.
-            // Say we have 10 leaders LH, each leaders gets 4 consecutive slots,
-            // so we have 40 slots in total.
-            // Once we predicted the next leaders for next 40 slots, there is no need
-            // to predict them again for at least half of that time, thus the division by 2.
-            // We also don't wait the full 40 slots, so we can start predicting again earlier before any
-            // incoming transaction request arrives.
-            // Lastly, the floor is 200ms.
-            // You may be wondering why we don't use tokio sleep or tick,
-            // since this is a on the critical path of transaction sending, I don't want to add too much overhead.
-            // Tokio timed based primitives usually hides mutexes and other synchronization primitives behind
-            // a layer of abstraction, which can introduce latency and complexity.
-            // Mutex would be acquire on each sleep registration or cancelation (which happen alot when using tokio::select! macro).
-            let wait_dur_ms = (lh * NUM_CONSECUTIVE_LEADER_SLOTS * DEFAULT_MS_PER_SLOT) / 2;
-            let wait_dur = Duration::from_millis(wait_dur_ms.max(DEFAULT_MS_PER_SLOT / 2));
+            // Predict every 3 slot.
+            let wait_dur_ms = DEFAULT_MS_PER_SLOT * (NUM_CONSECUTIVE_LEADER_SLOTS - 1);
+            let wait_dur =
+                Duration::from_millis(wait_dur_ms).max(Duration::from_millis(DEFAULT_MS_PER_SLOT));
             self.next_leader_prediction_deadline = Instant::now() + wait_dur;
 
             let upcoming_leaders = self
