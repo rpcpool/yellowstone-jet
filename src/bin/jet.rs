@@ -1,4 +1,3 @@
-// main.rs
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 use {
@@ -29,12 +28,13 @@ use {
         sync::{Mutex, oneshot, watch},
         task::JoinHandle,
     },
-    tracing::{info, warn},
+    tracing::{error, info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{ConfigJet, PrometheusConfig, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
+        grpc_lewis::create_lewis_pipeline,
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         jet_gateway::spawn_jet_gw_listener,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
@@ -171,42 +171,6 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
     Ok(())
 }
 
-// fn spawn_lewis_metric_subscriber(
-//     config: Option<ConfigMetricsUpstream>,
-//     mut rx: broadcast::Receiver<QuicClientMetric>,
-// ) -> JoinHandle<()> {
-//     let grpc_metrics = GrpcMetricsClient::new(config);
-//     tokio::spawn(async move {
-//         loop {
-//             match rx.recv().await {
-//                 Ok(metric) => match metric {
-//                     QuicClientMetric::SendAttempts {
-//                         sig,
-//                         leader,
-//                         leader_tpu_addr,
-//                         slots,
-//                         error,
-//                     } => {
-//                         grpc_metrics.emit_send_attempt(
-//                             &sig,
-//                             &leader,
-//                             slots.as_slice(),
-//                             leader_tpu_addr,
-//                             error,
-//                         );
-//                     }
-//                 },
-//                 Err(broadcast::error::RecvError::Closed) => {
-//                     break;
-//                 }
-//                 Err(broadcast::error::RecvError::Lagged(_)) => {
-//                     warn!("lewis metrics subscriber lagged behind");
-//                 }
-//             }
-//         }
-//     })
-// }
-
 ///
 /// This task keeps the stake metrics up to date for the current identity.
 ///
@@ -331,6 +295,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         GrpcRootedTxReceiver::new(rooted_tx_geyser_rx);
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
+
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
         stake_info_map: stake_info_map.clone(),
         gateway_tx_channel_capacity: 10000,
@@ -402,22 +367,22 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         (sink, source)
     };
 
+    // Set up Lewis event tracking pipeline
+    let (lewis_handler, lewis_fut) = create_lewis_pipeline(config.lewis_events.clone());
+
     let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
         shield_policy_store,
         scheduler_out,
         quic_gateway_bidi,
         config.send_transaction_service.leader_forward_count,
+        lewis_handler,
     );
 
     tg.spawn_cancelable(
         "transaction_forwarder",
         async move { tx_forwader.run().await },
     );
-
-    // TODO check if really need lewis
-    // let quic_tx_metrics_listener = quic_tx_sender.subscribe_metrics();
-    // let lewis = spawn_lewis_metric_subscriber(config.metrics_upstream, quic_tx_metrics_listener);
 
     let mut jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
         vec![Box::new(gateway_identity_updater)];
@@ -494,9 +459,21 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         keep_stake_metrics_up_to_date_task(identity_observer.clone(), stake_info_map.clone()),
     );
 
-    // tg.spawn_cancelable("lewis", async move {
-    //     lewis.await.expect("lewis");
-    // });
+    // Spawn Lewis client task if configured
+    if let Some(fut) = lewis_fut {
+        tg.spawn_with_shutdown("lewis_client", |mut stop| async move {
+            tokio::select! {
+                result = fut => {
+                    if let Err(e) = result {
+                        error!("Lewis client error: {}", e);
+                    }
+                }
+                _ = &mut stop => {
+                    info!("Shutting down Lewis client");
+                }
+            }
+        });
+    }
 
     tg.spawn_with_shutdown("geyser", |mut stop| async move {
         tokio::select! {

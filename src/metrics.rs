@@ -127,11 +127,7 @@ pub mod jet {
         static ref QUIC_IDENTITY_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);
         static ref QUIC_IDENTITY_EXPECTED_VALUE: Mutex<Option<Pubkey>> = Mutex::new(None);
 
-        static ref METRICS_UPSTREAM_PUSH: IntCounterVec = IntCounterVec::new(
-            Opts::new("metrics_upstream_push_total", "Total number of events pushed to send queue"),
-            &["status"]
-        ).unwrap();
-        static ref METRICS_UPSTREAM_FEED: IntCounter = IntCounter::new("metrics_upstream_feed_total", "Total number of events feed to gRPC").unwrap();
+
 
         static ref GATEWAY_CONNECTED: IntGaugeVec = IntGaugeVec::new(
             Opts::new("gateway_connected", "Connected gateway endpoint"),
@@ -261,6 +257,17 @@ pub mod jet {
         static ref QUIC_GW_LEADER_PREDICTION_MISS: IntCounter = IntCounter::new(
             "quic_gw_leader_prediction_miss",
             "Number of times the leader prediction was uselessly used to proactively connect to a remote peer"
+        ).unwrap();
+
+        // Lewis Metrics
+       static ref LEWIS_EVENTS_DROPPED: IntCounter = IntCounter::new(
+            "lewis_events_dropped_total",
+            "Total number of events dropped due to channel closure"
+        ).unwrap();
+
+        static ref LEWIS_EVENTS_SENT: IntCounter = IntCounter::new(
+            "lewis_events_sent_total",
+            "Total number of events sent to Lewis gRPC stream"
         ).unwrap();
 
         static ref QUIC_GW_DROP_TX_CNT: IntCounterVec = IntCounterVec::new(
@@ -507,8 +514,7 @@ pub mod jet {
             register!(GRPC_SLOT_RECEIVED);
             register!(LEADER_MTU);
             register!(LEADER_RTT);
-            register!(METRICS_UPSTREAM_FEED);
-            register!(METRICS_UPSTREAM_PUSH);
+
             register!(QUIC_IDENTITY);
             register!(QUIC_IDENTITY_EXPECTED);
             register!(QUIC_SEND_ATTEMPTS);
@@ -540,6 +546,11 @@ pub mod jet {
             register!(QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED);
             register!(QUIC_GW_LEADER_PREDICTION_HIT);
             register!(QUIC_GW_LEADER_PREDICTION_MISS);
+
+            // Lewis Metrics
+            register!(LEWIS_EVENTS_DROPPED);
+            register!(LEWIS_EVENTS_SENT);
+
             register!(QUIC_GW_DROP_TX_CNT);
             register!(QUIC_GW_WORKER_TX_PROCESS_CNT);
             register!(QUIC_GW_TX_RELAYED_TO_WORKER_CNT);
@@ -747,16 +758,6 @@ pub mod jet {
             .inc();
     }
 
-    pub fn metrics_upstream_push_inc(status: Result<(), ()>) {
-        METRICS_UPSTREAM_PUSH
-            .with_label_values(&[if status.is_ok() { "ok" } else { "overflow" }])
-            .inc()
-    }
-
-    pub fn metrics_upstream_feed_inc() {
-        METRICS_UPSTREAM_FEED.inc()
-    }
-
     pub fn gateway_set_connected(endpoints: &[String], endpoint: String) {
         for endpoint in endpoints {
             GATEWAY_CONNECTED
@@ -775,7 +776,14 @@ pub mod jet {
                 .set(0);
         }
     }
+    // Lewis Metrics
+    pub fn lewis_events_dropped_inc() {
+        LEWIS_EVENTS_DROPPED.inc();
+    }
 
+    pub fn lewis_events_sent_inc() {
+        LEWIS_EVENTS_SENT.inc();
+    }
     pub fn observe_cluster_tpu_lock_time(method: &str, lock_type: &str, duration: Duration) {
         CLUSTER_TPU_LOCK_ACQUISITION_TIME
             .with_label_values(&[method, lock_type])

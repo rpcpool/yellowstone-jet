@@ -696,7 +696,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     // the remote peer closed the uni stream right after it opened it.
     // If we send a too little payload, even if the remote peer closed the uni stream, it will not trigger a connection lost,
     // because quinn will be so fast that it will send the payload before the remote peer closes the stream.
-    let huge_payload = Bytes::from(vec![0u8; 1024 * 1024 * 100]); // 100MB payload 
+    let huge_payload = Bytes::from(vec![0u8; 1024 * 1024 * 100]); // 100MB payload
     let gateway_kp = Keypair::new();
     let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =

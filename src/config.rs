@@ -65,8 +65,8 @@ pub struct ConfigJet {
     /// Quic config
     pub quic: ConfigQuic,
 
-    /// Send metrics to lewis
-    pub metrics_upstream: Option<ConfigMetricsUpstream>,
+    /// Send events to Lewis
+    pub lewis_events: Option<ConfigLewisEvents>,
 
     /// Features Flags
     #[serde(default)]
@@ -549,24 +549,134 @@ impl ConfigExtraTpuForward {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ConfigMetricsUpstream {
-    /// lewis gRPC metrics endpoint
+pub struct ConfigLewisEvents {
+    /// gRPC endpoint for Lewis event service
     pub endpoint: String,
+
+    /// Optional X-Token for authentication
+    pub x_token: Option<String>,
+
     /// Events gRPC queue size
-    #[serde(default = "ConfigMetricsUpstream::default_queue_size_grpc")]
+    #[serde(default = "ConfigLewisEvents::default_queue_size_grpc")]
     pub queue_size_grpc: usize,
-    /// Event buffer queue size
-    #[serde(default = "ConfigMetricsUpstream::default_queue_size_buffer")]
-    pub queue_size_buffer: usize,
+
+    /// Jet ID to use for events
+    #[serde(default)]
+    pub jet_id: Option<String>,
+
+    /// Batch size threshold - number of events before forcing a flush
+    #[serde(default = "ConfigLewisEvents::default_batch_size_threshold")]
+    pub batch_size_threshold: u64,
+
+    /// Batch timeout - max time to wait before flushing events
+    #[serde(
+        default = "ConfigLewisEvents::default_batch_timeout",
+        with = "humantime_serde"
+    )]
+    pub batch_timeout: Duration,
+
+    /// Connection timeout for Lewis gRPC
+    #[serde(
+        default = "ConfigLewisEvents::default_connect_timeout",
+        with = "humantime_serde"
+    )]
+    pub connect_timeout: Duration,
+
+    /// HTTP2 keepalive interval
+    #[serde(
+        default = "ConfigLewisEvents::default_keepalive_interval",
+        with = "humantime_serde"
+    )]
+    pub keepalive_interval: Duration,
+
+    /// Keepalive timeout
+    #[serde(
+        default = "ConfigLewisEvents::default_keepalive_timeout",
+        with = "humantime_serde"
+    )]
+    pub keepalive_timeout: Duration,
+
+    /// Size of internal event buffer between handler and client
+    #[serde(default = "ConfigLewisEvents::default_event_buffer_size")]
+    pub event_buffer_size: usize,
+
+    /// Keep HTTP2 connection alive even when idle
+    #[serde(default = "ConfigLewisEvents::default_keep_alive_while_idle")]
+    pub keep_alive_while_idle: bool,
+
+    /// Maximum number of reconnection attempts
+    #[serde(default = "ConfigLewisEvents::default_max_reconnect_attempts")]
+    pub max_reconnect_attempts: usize,
+
+    /// Initial interval for reconnection backoff
+    #[serde(
+        default = "ConfigLewisEvents::default_reconnect_initial_interval",
+        with = "humantime_serde"
+    )]
+    pub reconnect_initial_interval: Duration,
+
+    /// Maximum interval for reconnection backoff
+    #[serde(
+        default = "ConfigLewisEvents::default_reconnect_max_interval",
+        with = "humantime_serde"
+    )]
+    pub reconnect_max_interval: Duration,
+
+    /// Maximum time for the entire stream
+    #[serde(
+        default = "ConfigLewisEvents::default_stream_timeout",
+        with = "humantime_serde"
+    )]
+    pub stream_timeout: Duration,
 }
 
-impl ConfigMetricsUpstream {
+impl ConfigLewisEvents {
     const fn default_queue_size_grpc() -> usize {
-        1_000
+        10_000
     }
 
-    const fn default_queue_size_buffer() -> usize {
+    const fn default_batch_size_threshold() -> u64 {
+        512
+    }
+
+    const fn default_batch_timeout() -> Duration {
+        Duration::from_millis(1000)
+    }
+
+    const fn default_connect_timeout() -> Duration {
+        Duration::from_secs(10)
+    }
+
+    const fn default_keepalive_interval() -> Duration {
+        Duration::from_secs(30)
+    }
+
+    const fn default_keepalive_timeout() -> Duration {
+        Duration::from_secs(10)
+    }
+
+    const fn default_event_buffer_size() -> usize {
         100_000
+    }
+
+    const fn default_keep_alive_while_idle() -> bool {
+        true
+    }
+
+    const fn default_max_reconnect_attempts() -> usize {
+        3
+    }
+
+    const fn default_reconnect_initial_interval() -> Duration {
+        Duration::from_millis(1000)
+    }
+
+    const fn default_reconnect_max_interval() -> Duration {
+        Duration::from_secs(30)
+    }
+
+    const fn default_stream_timeout() -> Duration {
+        Duration::from_secs(300) // 0 means no timeout
     }
 }
 

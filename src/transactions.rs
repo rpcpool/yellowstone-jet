@@ -3,13 +3,14 @@ use {
         blockhash_queue::BlockHeightService,
         cluster_tpu_info::ClusterTpuInfo,
         grpc_geyser::GrpcUpdateMessage,
+        grpc_lewis::LewisEventHandler,
         metrics::jet as metrics,
         quic_gateway::{GatewayResponse, GatewayTransaction},
         rooted_transaction_state::{RootedTxEffect, RootedTxEvent, RootedTxStateMachine},
         util::CommitmentLevel,
     },
     bytes::Bytes,
-    solana_clock::MAX_PROCESSING_AGE,
+    solana_clock::{MAX_PROCESSING_AGE, Slot},
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_transaction::versioned::VersionedTransaction,
@@ -34,6 +35,7 @@ pub type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
 ///
 pub trait UpcomingLeaderSchedule {
     fn leader_lookahead(&self, leader_forward_lookahead: usize) -> Vec<Pubkey>;
+    fn get_current_slot(&self) -> Slot;
 }
 
 impl UpcomingLeaderSchedule for ClusterTpuInfo {
@@ -42,6 +44,10 @@ impl UpcomingLeaderSchedule for ClusterTpuInfo {
             .into_iter()
             .map(|tpu| tpu.leader)
             .collect()
+    }
+
+    fn get_current_slot(&self) -> Slot {
+        self.latest_seen_slot()
     }
 }
 
@@ -548,6 +554,7 @@ pub struct TransactionFanout {
     transaction_send_set: JoinSet<Result<Signature, SendTransactionError>>,
     transaction_send_set_meta: HashMap<task::Id, Signature>,
     inflight_transactions: HashSet<Signature>,
+    lewis_handler: Option<Arc<LewisEventHandler>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -619,6 +626,7 @@ impl TransactionFanout {
         incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
         quic_gateway_bidi: QuicGatewayBidi,
         leader_fwd_count: usize,
+        lewis_handler: Option<Arc<LewisEventHandler>>,
     ) -> Self {
         Self {
             leader_schedule_service,
@@ -630,6 +638,7 @@ impl TransactionFanout {
             transaction_send_set: JoinSet::new(),
             transaction_send_set_meta: HashMap::new(),
             inflight_transactions: HashSet::new(),
+            lewis_handler,
         }
     }
 
@@ -648,7 +657,7 @@ impl TransactionFanout {
                 maybe = self.gateway_response_rx.recv() => {
                     match maybe {
                         Some(response) => {
-                            self.handle_gateway_response(response);
+                            self.handle_gateway_response(&response);
                         }
                         None => {
                             error!("gateway response channel is closed");
@@ -664,7 +673,12 @@ impl TransactionFanout {
         }
     }
 
-    fn handle_gateway_response(&mut self, response: GatewayResponse) {
+    fn handle_gateway_response(&mut self, response: &GatewayResponse) {
+        // Forward to Lewis if handler is configured
+        if let Some(handler) = &self.lewis_handler {
+            let current_slot = self.leader_schedule_service.get_current_slot();
+            handler.handle_gateway_response(response, current_slot);
+        }
         match response {
             GatewayResponse::TxSent(gateway_tx_sent) => {
                 let tx_sig = gateway_tx_sent.tx_sig;
@@ -682,7 +696,7 @@ impl TransactionFanout {
                 self.inflight_transactions.remove(&tx_sig);
             }
             GatewayResponse::TxDrop(tx_drop) => {
-                for (gw_tx, _curr_attempt) in tx_drop.dropped_gateway_tx_vec {
+                for (gw_tx, _curr_attempt) in &tx_drop.dropped_gateway_tx_vec {
                     let tx_sig = gw_tx.tx_sig;
                     tracing::trace!("transaction {tx_sig} dropped by QUIC gateway");
                     self.inflight_transactions.remove(&tx_sig);
@@ -729,11 +743,18 @@ impl TransactionFanout {
         let leader_fwd = self.leader_fwd_count;
         let gateway_sink = self.tx_gateway_sender.clone();
         let signature = tx.signature;
+        let lewis_handler = self.lewis_handler.clone();
+
         let send_fut = async move {
             let next_leaders = leader_schedule_service.leader_lookahead(leader_fwd);
+            let current_slot = leader_schedule_service.get_current_slot();
 
             for dest in next_leaders {
                 if !policy_store_service.is_allowed(&tx.policies, &dest)? {
+                    // Report skip to Lewis
+                    if let Some(handler) = &lewis_handler {
+                        handler.handle_skip(tx.signature, dest, current_slot, &tx.policies);
+                    }
                     metrics::sts_tpu_denied_inc_by(1);
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
                     continue;

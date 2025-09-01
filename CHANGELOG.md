@@ -10,6 +10,14 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+## [14.6.0]
+
+- Added Lewis event tracking for transaction lifecycle visibility
+- New `lewis_events` configuration section for gRPC event streaming
+- Track transaction sends, failures, and policy skips via Lewis integration
+- Added `lewis-dummy-server` binary for testing
+- Added metrics: `lewis_events_dropped_total`, `lewis_events_sent_total`
+
 ## [14.5.0]
 
 - More metrics for slot timings

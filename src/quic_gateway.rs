@@ -247,7 +247,7 @@ enum GatewayCommand {
     MultiStepIdentitySynchronization(MultiStepIdentitySynchronizationCommand),
 }
 
-enum TokioGateawyTaskMeta {
+enum TokioGatewayTaskMeta {
     DropAllWorkers,
 }
 
@@ -389,7 +389,7 @@ pub(crate) struct TokioQuicGatewayRuntime {
     cnc_rx: mpsc::Receiver<GatewayCommand>,
 
     tasklet: JoinSet<()>,
-    tasklet_meta: HashMap<Id, TokioGateawyTaskMeta>,
+    tasklet_meta: HashMap<Id, TokioGatewayTaskMeta>,
 
     last_peer_activity: HashMap<Pubkey, Instant>,
 
@@ -460,7 +460,7 @@ pub struct GatewayTransaction {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum SendTxError {
+pub enum SendTxError {
     #[error(transparent)]
     ConnectionError(#[from] ConnectionError),
     #[error("Failed to send transaction to remote peer {0:?}")]
@@ -474,13 +474,16 @@ enum SendTxError {
 #[derive(Debug)]
 pub struct GatewayTxSent {
     pub remote_peer_identity: Pubkey,
+    pub remote_peer_addr: SocketAddr,
     pub tx_sig: Signature,
 }
 
 #[derive(Debug)]
 pub struct GatewayTxFailed {
     pub remote_peer_identity: Pubkey,
+    pub remote_peer_addr: SocketAddr,
     pub tx_sig: Signature,
+    pub failure_reason: String,
 }
 
 #[derive(Clone, Debug, Display)]
@@ -659,7 +662,6 @@ impl QuicTxSenderWorker {
         let ok = SentOk { e2e_time };
         Ok(ok)
     }
-
     async fn process_tx(
         &mut self,
         tx: GatewayTransaction,
@@ -679,6 +681,7 @@ impl QuicTxSenderWorker {
                 );
                 let resp = GatewayTxSent {
                     remote_peer_identity: self.remote_peer,
+                    remote_peer_addr: self.connection.remote_address(),
                     tx_sig,
                 };
                 let _ = self.output_tx.send(GatewayResponse::TxSent(resp));
@@ -696,6 +699,8 @@ impl QuicTxSenderWorker {
                     incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "error");
                     let resp = GatewayTxFailed {
                         remote_peer_identity: self.remote_peer,
+                        remote_peer_addr: self.connection.remote_address(),
+                        failure_reason: e.to_string(),
                         tx_sig,
                     };
                     tracing::warn!(
@@ -813,7 +818,7 @@ impl QuicTxSenderWorker {
 ///
 /// Base trait for connection eviction strategy.
 ///
-/// Connection eviction is called when the QUIC gateway does not local port available
+/// Connection eviction is called when the QUIC gateway does not have a local port available
 /// to use for new QUIC connections.
 ///
 pub trait ConnectionEvictionStrategy {
@@ -835,7 +840,7 @@ pub trait ConnectionEvictionStrategy {
     ///
     /// Post Conditions:
     ///
-    /// 0 <= eviction plan length <= `plan_ahead_size`.  
+    /// 0 <= eviction plan length <= `plan_ahead_size`.
     ///
     fn plan_eviction(
         &self,
@@ -849,8 +854,8 @@ pub trait ConnectionEvictionStrategy {
 
 #[derive(Debug, Default)]
 pub struct StakeSortedPeerSet {
-    peer_stake_map: HashMap<Pubkey, u64>,
-    sorted_map: BTreeMap<u64, HashSet<Pubkey>>,
+    peer_stake_map: HashMap<Pubkey, u64 /* stake */>,
+    sorted_map: BTreeMap<u64 /* stake */, HashSet<Pubkey>>,
 }
 
 impl StakeSortedPeerSet {
@@ -950,37 +955,37 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
 
 /// Here's the simplified flow of a transaction through the QUIC gateway:
 ///
-///  ┌────────────┐      ┌────────────┐       ┌───────────────┐                           
+///  ┌────────────┐      ┌────────────┐       ┌───────────────┐
 ///  │Transaction │      │  QUIC      │       │ TxSenderWorker│        (Remote Validator)
-///  │ Source     ┼──1──►│ Gateway    ┼──2────►               ┼──3────►                   
-///  └────────────┘      └────▲───────┘       └─────┬─────────┘                           
-///                           │                     │                                     
-///                           │                     │                                     
+///  │ Source     ┼──1──►│ Gateway    ┼──2────►               ┼──3────►
+///  └────────────┘      └────▲───────┘       └─────┬─────────┘
+///                           │                     │
+///                           │                     │
 ///                           └───────4*─Failure────┘
 ///
 ///
 /// Lazy connection establishment:
-///                                                        
-///  ┌───────────────┐                                     
-///  │New Transaction│                                     
-///  │  for Peer "X" │                                     
-///  └───────┬───────┘                                     
-///          forward                                        
-///          │                                             
+///
+///  ┌───────────────┐
+///  │New Transaction│
+///  │  for Peer "X" │
+///  └───────┬───────┘
+///          forward
+///          │
 ///   ┌──────▼─────────┐           ┌─────────────────────┐
 ///   │ Do I have a    │           │    Send it to       │
 ///   │a TxSenderWorker┼───Yes─────►TxSenderWork(#peer X)│
 ///   │ for Peer "X"?  │           └─────────────────────┘
-///   └──────┬─────────┘                                   
-///          No                                            
-///          │                                             
-///   ┌──────▼────────────┐                                
-///   │  Queue the        │                                
-///   │ transaction       │                                
-///   │  and schedule     │                                
-///   │ connection attempt│                                
-///   │  to peer "X"      │                                
-///   └───────────────────┘                     
+///   └──────┬─────────┘
+///          No
+///          │
+///   ┌──────▼────────────┐
+///   │  Queue the        │
+///   │ transaction       │
+///   │  and schedule     │
+///   │ connection attempt│
+///   │  to peer "X"      │
+///   └───────────────────┘
 ///
 impl TokioQuicGatewayRuntime {
     ///
@@ -1225,6 +1230,7 @@ impl TokioQuicGatewayRuntime {
                     }
                     Err(connect_err) => {
                         metrics::jet::incr_quic_gw_connection_failure_cnt();
+
                         match connect_err {
                             ConnectingError::ConnectError(
                                 quinn::ConnectError::EndpointStopping,
@@ -1483,7 +1489,7 @@ impl TokioQuicGatewayRuntime {
 
         let ah = self.tasklet.spawn(fut);
         self.tasklet_meta
-            .insert(ah.id(), TokioGateawyTaskMeta::DropAllWorkers);
+            .insert(ah.id(), TokioGatewayTaskMeta::DropAllWorkers);
     }
 
     ///
@@ -1592,7 +1598,7 @@ impl TokioQuicGatewayRuntime {
         let meta = self.tasklet_meta.remove(&id).expect("tasklet meta");
 
         match meta {
-            TokioGateawyTaskMeta::DropAllWorkers => {
+            TokioGatewayTaskMeta::DropAllWorkers => {
                 tracing::info!(
                     "finished graceful drop of all transaction workers with : {result:?}"
                 );

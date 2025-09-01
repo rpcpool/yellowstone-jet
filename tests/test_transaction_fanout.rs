@@ -67,6 +67,11 @@ impl UpcomingLeaderSchedule for FakeLeaderSchedule {
         let schedule = self.share.read().unwrap();
         schedule[..leader_forward_lookahead].to_vec()
     }
+    fn get_current_slot(&self) -> solana_clock::Slot {
+        // For testing purposes, we can return a dummy slot.
+        // In a real implementation, this would return the current slot.
+        0
+    }
 }
 
 #[tokio::test]
@@ -95,6 +100,7 @@ async fn it_should_fanout_three_times() {
         source,
         gateway_bidi,
         FANOUT_FACTOR,
+        None,
     );
     let _fanout_jh = tokio::spawn(async move {
         fanout.run().await;
@@ -153,6 +159,7 @@ async fn it_should_apply_shield_policies() {
         source,
         gateway_bidi,
         FANOUT_FACTOR,
+        None,
     );
     let _fanout_jh = tokio::spawn(async move {
         fanout.run().await;

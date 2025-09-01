@@ -28,7 +28,7 @@ use {
         pubkey_challenger::{OneTimeAuthToken, append_nonce_and_sign},
         rpc::rpc_solana_like::RpcServerImpl as RpcServerImplSolanaLike,
         stake::StakeInfoMap,
-        util::{IncrementalBackoff, ms_since_epoch},
+        util::{IncrementalBackoff, create_x_token_interceptor, ms_since_epoch},
         version::VERSION,
     },
     anyhow::Context,
@@ -45,8 +45,6 @@ use {
     },
     tonic::{
         Request, Status,
-        metadata::{AsciiMetadataValue, errors::InvalidMetadataValue},
-        service::Interceptor,
         transport::channel::{ClientTlsConfig, Endpoint},
     },
     tracing::{debug, error, info},
@@ -108,7 +106,7 @@ pub struct GrpcServer {}
 async fn get_jet_gw_subscribe_auth_token(
     signer: ArcSigner,
     endpoint: String,
-    x_token: GrpcClientXToken,
+    x_token: Option<String>,
 ) -> anyhow::Result<OneTimeAuthToken> {
     let channel = Endpoint::from_shared(endpoint.clone())?
         .connect_timeout(Duration::from_secs(3))
@@ -116,7 +114,9 @@ async fn get_jet_gw_subscribe_auth_token(
         .tls_config(ClientTlsConfig::new().with_native_roots())?
         .connect()
         .await?;
-    let mut client = JetGatewayClient::with_interceptor(channel, x_token);
+
+    let interceptor = create_x_token_interceptor(x_token);
+    let mut client = JetGatewayClient::with_interceptor(channel, interceptor);
 
     let auth_req = AuthRequest {
         auth_step: Some(auth_request::AuthStep::BeginAuth(GetChallengeRequest {
@@ -183,7 +183,7 @@ async fn get_jet_gw_subscribe_auth_token(
 pub async fn grpc_subscribe_jet_gw(
     signer: ArcSigner,
     endpoint: String,
-    x_token: GrpcClientXToken,
+    x_token: Option<String>,
     stream_buffer_size: usize,
     features: FeatureSet,
 ) -> anyhow::Result<(
@@ -207,7 +207,8 @@ pub async fn grpc_subscribe_jet_gw(
         .connect()
         .await?;
 
-    let mut client = JetGatewayClient::with_interceptor(channel, x_token);
+    let interceptor = create_x_token_interceptor(x_token);
+    let mut client = JetGatewayClient::with_interceptor(channel, interceptor);
 
     // Set up authenticated connection
     let mut subscribe_req = Request::new(init_rx);
@@ -492,7 +493,7 @@ impl GrpcServer {
         impl Sink<SubscribeRequest, Error = futures::channel::mpsc::SendError> + use<>,
         impl Stream<Item = Result<SubscribeResponse, Status>> + use<>,
     )> {
-        let x_token = GrpcClientXToken::new(x_token)?;
+        let x_token = x_token.cloned();
 
         let mut tasks = JoinSet::new();
         for endpoint in endpoints.iter().cloned() {
@@ -531,34 +532,5 @@ impl GrpcServer {
             }
         }
         Err(last_err.expect("error should exist"))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GrpcClientXToken {
-    x_token: Option<AsciiMetadataValue>,
-}
-
-impl Interceptor for GrpcClientXToken {
-    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        if let Some(x_token) = self.x_token.clone() {
-            request.metadata_mut().insert("x-token", x_token);
-        }
-        Ok(request)
-    }
-}
-
-impl GrpcClientXToken {
-    pub fn new<T>(x_token: Option<T>) -> anyhow::Result<Self>
-    where
-        T: TryInto<AsciiMetadataValue, Error = InvalidMetadataValue>,
-    {
-        Ok(Self {
-            x_token: x_token.map(|x_token| x_token.try_into()).transpose()?,
-        })
-    }
-
-    pub const fn none() -> Self {
-        Self { x_token: None }
     }
 }

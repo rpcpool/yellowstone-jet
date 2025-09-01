@@ -1,0 +1,77 @@
+syntax = "proto3";
+option go_package = "github.com/rpcpool/lewis";
+
+package lewis;
+
+service TransactionTracker {
+	rpc Track(Transactions) returns (Empty) {}
+	rpc TrackEvents (stream Event) returns (EventAck) {} // This is the Lewis V2 API
+}
+
+message Transactions {
+	Metadata metadata = 1;
+	repeated bytes transactions = 2; // whole solana transactions.
+}
+
+message Metadata {
+	string origin = 1;
+	int64 timestamp = 2;
+	uint64 slot = 3;
+}
+
+message Empty {}
+
+message EventAck {}
+
+message Event {
+	oneof event {
+		EventCascade cascade = 1;
+		EventJet jet = 2;
+		// EventBlockInclusion block_inclusion = 3; NOTE: can't be reveived because it's calculated on lewis side
+	}
+}
+
+// This event can occur multiple times:
+// - the customer can send the same transaction multiple times
+// - the tx can be sent to multiple cascade instances
+message EventCascade {
+	string origin = 1;              // TODO: split this into multiple fields
+	int64 ts = 2; 				 	// TODO: is the timestamp in seconds or milliseconds?
+	uint64 slot = 3;                // The latest slot that the cascade has seen (via WS)
+	string req_id = 4;
+	string cascade_id = 5;
+	bytes tx = 6;                   // whole solana transaction (raw binary)
+	TransactionOptions options = 7;
+	bool lewis_write_detailed = 8;  // if lewis should write detailed logs to the database
+	bytes sig = 9;	                // - the transaction id (signature)
+}
+
+message TransactionOptions {
+	string encoding = 1;
+	bool skip_preflight = 2;
+	string preflight_commitment = 3;
+	uint32 max_retries = 4;
+	uint64 min_context_slot = 5;
+}
+
+message EventJet {
+	string req_id = 1;
+	string cascade_id = 2;          // - from which cascade instance jet received the transaction
+	string jet_gateway_id = 3;      // - the jet gateway id
+	string jet_id = 4;              // - the jet gateway id
+	bytes sig = 5;	                // - the transaction id (signature)
+	uint64 slot = 7;                // - the slot we sent the transaction to the leader.
+	int64 ts = 8;          // - the timestamp when sent the transaction
+  string validator = 9;  // - the validator identifier that the transaction was sent
+  string tpu_addr = 10;  // - the TPU address of the validator to which the transaction was sent
+  string error = 11;    // - error message if sending failed
+  bool skipped = 12;     // - if the transaction was skipped because of shield policy
+  repeated string shield_policies = 13; // the shield policies used on this transaction
+}
+
+message EventBlockInclusion {
+	uint64 slot = 1;      // - the slot of the block
+	int64 blocktime = 2;  // - the blocktime
+	string producer = 3;  // - the block producer
+	int64 slot_delta = 4; // - the slot delta
+}
