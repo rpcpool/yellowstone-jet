@@ -555,6 +555,7 @@ pub struct TransactionFanout {
     transaction_send_set_meta: HashMap<task::Id, Signature>,
     inflight_transactions: HashSet<Signature>,
     lewis_handler: Option<Arc<LewisEventHandler>>,
+    extra_fwd: Arc<[Pubkey]>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -626,6 +627,8 @@ impl TransactionFanout {
         incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
         quic_gateway_bidi: QuicGatewayBidi,
         leader_fwd_count: usize,
+        // Extra remote peer to forward too
+        extra_fwd: Vec<Pubkey>,
         lewis_handler: Option<Arc<LewisEventHandler>>,
     ) -> Self {
         Self {
@@ -639,6 +642,7 @@ impl TransactionFanout {
             transaction_send_set_meta: HashMap::new(),
             inflight_transactions: HashSet::new(),
             lewis_handler,
+            extra_fwd: extra_fwd.into(),
         }
     }
 
@@ -744,16 +748,15 @@ impl TransactionFanout {
         let gateway_sink = self.tx_gateway_sender.clone();
         let signature = tx.signature;
         let lewis_handler = self.lewis_handler.clone();
-
+        let extra_fwd = Arc::clone(&self.extra_fwd);
         let send_fut = async move {
             let next_leaders = leader_schedule_service.leader_lookahead(leader_fwd);
             let current_slot = leader_schedule_service.get_current_slot();
-
-            for dest in next_leaders {
-                if !policy_store_service.is_allowed(&tx.policies, &dest)? {
+            for dest in next_leaders.iter() {
+                if !policy_store_service.is_allowed(&tx.policies, dest)? {
                     // Report skip to Lewis
                     if let Some(handler) = &lewis_handler {
-                        handler.handle_skip(tx.signature, dest, current_slot, &tx.policies);
+                        handler.handle_skip(tx.signature, *dest, current_slot, &tx.policies);
                     }
                     metrics::sts_tpu_denied_inc_by(1);
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
@@ -762,7 +765,24 @@ impl TransactionFanout {
                 let gateway_tx = GatewayTransaction {
                     tx_sig: tx.signature,
                     wire: tx.wire_transaction.clone(),
-                    remote_peer: dest,
+                    remote_peer: *dest,
+                };
+                gateway_sink
+                    .send(gateway_tx)
+                    .await
+                    .map_err(|_| SendTransactionError::GatewayClosed)?;
+            }
+
+            for extra in extra_fwd.iter() {
+                if next_leaders.contains(extra) {
+                    // We don't send it twice.
+                    continue;
+                }
+                // We don't apply policy here.
+                let gateway_tx = GatewayTransaction {
+                    tx_sig: tx.signature,
+                    wire: tx.wire_transaction.clone(),
+                    remote_peer: *extra,
                 };
                 gateway_sink
                     .send(gateway_tx)

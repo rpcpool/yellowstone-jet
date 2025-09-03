@@ -100,6 +100,7 @@ async fn it_should_fanout_three_times() {
         source,
         gateway_bidi,
         FANOUT_FACTOR,
+        Vec::new(),
         None,
     );
     let _fanout_jh = tokio::spawn(async move {
@@ -159,6 +160,7 @@ async fn it_should_apply_shield_policies() {
         source,
         gateway_bidi,
         FANOUT_FACTOR,
+        Vec::new(),
         None,
     );
     let _fanout_jh = tokio::spawn(async move {

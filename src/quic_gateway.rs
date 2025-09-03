@@ -60,7 +60,8 @@ use {
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
-        crypto::rustls::QuicClientConfig, ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt, WriteError
+        ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
+        WriteError, crypto::rustls::QuicClientConfig,
     },
     solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
@@ -70,19 +71,20 @@ use {
     solana_signature::Signature,
     solana_signer::Signer,
     solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
-    solana_tls_utils::{new_dummy_x509_certificate, QuicClientCertificate, SkipServerVerification},
+    solana_tls_utils::{QuicClientCertificate, SkipServerVerification, new_dummy_x509_certificate},
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroUsize,
-        sync::{atomic::AtomicBool, Arc, Mutex as StdMutex},
+        sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
         task::Poll,
         time::{Duration, Instant},
     },
     tokio::{
         runtime::Handle,
         sync::{
-            mpsc::{self}, Barrier, Notify
+            Barrier, Notify,
+            mpsc::{self},
         },
         task::{self, Id, JoinError, JoinHandle, JoinSet},
         time::interval,
@@ -446,12 +448,12 @@ impl LeaderTpuInfoService for ClusterTpuInfo {
 
 pub struct OverrideTpuInfoService<I> {
     pub override_vec: Vec<TpuOverrideInfo>,
-    pub other: I
+    pub other: I,
 }
 
 impl<I> LeaderTpuInfoService for OverrideTpuInfoService<I>
 where
-    I: LeaderTpuInfoService
+    I: LeaderTpuInfoService,
 {
     fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
         self.override_vec

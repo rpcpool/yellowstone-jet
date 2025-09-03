@@ -1,6 +1,5 @@
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
-use yellowstone_jet::quic_gateway::{LeaderTpuInfoService, OverrideTpuInfoService};
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
@@ -40,8 +39,9 @@ use {
         jet_gateway::spawn_jet_gw_listener,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
         quic_gateway::{
-            IgnorantLeaderPredictor, QuicGatewayConfig, StakeBasedEvictionStrategy,
-            TokioQuicGatewaySession, TokioQuicGatewaySpawner, UpcomingLeaderPredictor,
+            IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
+            QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
+            TokioQuicGatewaySpawner, UpcomingLeaderPredictor,
         },
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
@@ -300,10 +300,11 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
 
-    let leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static> = Arc::new(OverrideTpuInfoService {
-        override_vec: config.quic.tpu_info_override.clone(),
-        other: cluster_tpu_info.clone(),
-    });
+    let leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static> =
+        Arc::new(OverrideTpuInfoService {
+            override_vec: config.quic.tpu_info_override.clone(),
+            other: cluster_tpu_info.clone(),
+        });
 
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
         stake_info_map: stake_info_map.clone(),
@@ -385,6 +386,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         scheduler_out,
         quic_gateway_bidi,
         config.send_transaction_service.leader_forward_count,
+        config.send_transaction_service.extra_tpu_forward,
         lewis_handler,
     );
 

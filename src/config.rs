@@ -315,7 +315,7 @@ pub struct ConfigSendTransactionService {
     pub relay_only_mode: bool,
 
     /// Extra TPU forward (transactions would be always sent to these nodes)
-    /// WARNING: this feature is experimental and may change in the future
+    /// regardless of the transaction yellowstone-shield policies.
     #[serde(default, deserialize_with = "deser_pubkey_vec")]
     pub extra_tpu_forward: Vec<Pubkey>,
 }
@@ -475,33 +475,31 @@ pub struct ConfigQuic {
 
     ///
     /// The TPU address rewrite map for QUIC connections.
-    /// 
+    ///
     #[serde(default)]
-    pub tpu_info_override: Vec<TpuOverrideInfo>
+    pub tpu_info_override: Vec<TpuOverrideInfo>,
 }
-
 
 ///
 /// Specifies how to rewrite TPU addresses for QUIC connections for a specific remote peer.
-/// 
+///
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TpuOverrideInfo {
     ///
     /// The remote peer's public key to overide the TPU address for.
-    /// 
+    ///
     #[serde(deserialize_with = "deserialize_pubkey")]
     pub remote_peer: Pubkey,
     ///
     /// The QUIC TPU address to use for the remote peer.
-    /// 
+    ///
     pub quic_tpu: SocketAddr,
-    /// 
+    ///
     /// The QUIC TPU forward address to use for the remote peer.
-    /// 
+    ///
     pub quic_tpu_forward: SocketAddr,
 }
-
 
 impl ConfigQuic {
     pub const fn default_connection_prediction_lookahead() -> Option<NonZeroUsize> {
@@ -590,9 +588,7 @@ pub struct ConfigExtraTpuForward {
     pub quic_forwards: Option<SocketAddr>,
 }
 
-impl ConfigExtraTpuForward {
-    
-}
+impl ConfigExtraTpuForward {}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
