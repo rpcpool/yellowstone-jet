@@ -1,5 +1,6 @@
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
+use yellowstone_jet::quic_gateway::{LeaderTpuInfoService, OverrideTpuInfoService};
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
@@ -299,10 +300,15 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
 
+    let leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static> = Arc::new(OverrideTpuInfoService {
+        override_vec: config.quic.tpu_info_override.clone(),
+        other: cluster_tpu_info.clone(),
+    });
+
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
         stake_info_map: stake_info_map.clone(),
         gateway_tx_channel_capacity: 10000,
-        leader_tpu_info_service: Arc::new(cluster_tpu_info.clone()),
+        leader_tpu_info_service,
     };
 
     let connection_predictor = if config.quic.connection_prediction_lookahead.is_some() {

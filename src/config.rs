@@ -477,7 +477,7 @@ pub struct ConfigQuic {
     /// The TPU address rewrite map for QUIC connections.
     /// 
     #[serde(default)]
-    pub tpu_address_rewrite_map: Vec<TpuOverrideInfo>
+    pub tpu_info_override: Vec<TpuOverrideInfo>
 }
 
 

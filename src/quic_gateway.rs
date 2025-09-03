@@ -44,7 +44,7 @@
 use {
     crate::{
         cluster_tpu_info::ClusterTpuInfo,
-        config::ConfigQuicTpuPort,
+        config::{ConfigQuicTpuPort, TpuOverrideInfo},
         crypto_provider::crypto_provider,
         identity::JetIdentitySyncMember,
         metrics::{
@@ -60,8 +60,7 @@ use {
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
-        ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
-        WriteError, crypto::rustls::QuicClientConfig,
+        crypto::rustls::QuicClientConfig, ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt, WriteError
     },
     solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
@@ -71,20 +70,19 @@ use {
     solana_signature::Signature,
     solana_signer::Signer,
     solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
-    solana_tls_utils::{QuicClientCertificate, SkipServerVerification, new_dummy_x509_certificate},
+    solana_tls_utils::{new_dummy_x509_certificate, QuicClientCertificate, SkipServerVerification},
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroUsize,
-        sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, Mutex as StdMutex},
         task::Poll,
         time::{Duration, Instant},
     },
     tokio::{
         runtime::Handle,
         sync::{
-            Barrier, Notify,
-            mpsc::{self},
+            mpsc::{self}, Barrier, Notify
         },
         task::{self, Id, JoinError, JoinHandle, JoinSet},
         time::interval,
@@ -443,6 +441,31 @@ impl LeaderTpuInfoService for ClusterTpuInfo {
         self.get_cluster_nodes()
             .get(&leader_pubkey)
             .and_then(|node| node.tpu_forwards_quic)
+    }
+}
+
+pub struct OverrideTpuInfoService<I> {
+    pub override_vec: Vec<TpuOverrideInfo>,
+    pub other: I
+}
+
+impl<I> LeaderTpuInfoService for OverrideTpuInfoService<I>
+where
+    I: LeaderTpuInfoService
+{
+    fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+        self.override_vec
+            .iter()
+            .find(|info| info.remote_peer == leader_pubkey)
+            .map(|info| info.quic_tpu)
+            .or_else(|| self.other.get_quic_tpu_socket_addr(leader_pubkey))
+    }
+    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+        self.override_vec
+            .iter()
+            .find(|info| info.remote_peer == leader_pubkey)
+            .map(|info| info.quic_tpu_forward)
+            .or_else(|| self.other.get_quic_tpu_fwd_socket_addr(leader_pubkey))
     }
 }
 
