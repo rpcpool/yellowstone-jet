@@ -29,6 +29,26 @@ use {
     yellowstone_vixen::config::YellowstoneConfig,
 };
 
+fn deserialize_pubkey<'de, D>(deserializer: D) -> Result<Pubkey, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer)?
+        .parse()
+        .map_err(de::Error::custom)
+}
+
+fn deser_pubkey_vec<'de, D>(deserializer: D) -> Result<Vec<Pubkey>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let strings = Vec::<String>::deserialize(deserializer)?;
+    strings
+        .into_iter()
+        .map(|s| s.parse().map_err(de::Error::custom))
+        .collect()
+}
+
 pub async fn load_config<T>(path: impl AsRef<Path>) -> anyhow::Result<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -265,7 +285,7 @@ pub struct ConfigListenSolanaLike {
     pub proxy_preflight_check: bool,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigSendTransactionService {
     /// Default max retries of sending transaction
@@ -293,6 +313,11 @@ pub struct ConfigSendTransactionService {
     /// Drop transactions from the pool once max retries limit is reached (landed statistic would be invalid)
     #[serde(default)]
     pub relay_only_mode: bool,
+
+    /// Extra TPU forward (transactions would be always sent to these nodes)
+    /// WARNING: this feature is experimental and may change in the future
+    #[serde(default, deserialize_with = "deser_pubkey_vec")]
+    pub extra_tpu_forward: Vec<Pubkey>,
 }
 
 impl ConfigSendTransactionService {
@@ -447,7 +472,36 @@ pub struct ConfigQuic {
     ///
     #[serde(default = "ConfigQuic::default_connection_prediction_lookahead")]
     pub connection_prediction_lookahead: Option<NonZeroUsize>,
+
+    ///
+    /// The TPU address rewrite map for QUIC connections.
+    /// 
+    #[serde(default)]
+    pub tpu_address_rewrite_map: Vec<TpuOverrideInfo>
 }
+
+
+///
+/// Specifies how to rewrite TPU addresses for QUIC connections for a specific remote peer.
+/// 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TpuOverrideInfo {
+    ///
+    /// The remote peer's public key to overide the TPU address for.
+    /// 
+    #[serde(deserialize_with = "deserialize_pubkey")]
+    pub remote_peer: Pubkey,
+    ///
+    /// The QUIC TPU address to use for the remote peer.
+    /// 
+    pub quic_tpu: SocketAddr,
+    /// 
+    /// The QUIC TPU forward address to use for the remote peer.
+    /// 
+    pub quic_tpu_forward: SocketAddr,
+}
+
 
 impl ConfigQuic {
     pub const fn default_connection_prediction_lookahead() -> Option<NonZeroUsize> {
@@ -528,7 +582,7 @@ pub enum ConfigQuicTpuPort {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigExtraTpuForward {
-    #[serde(deserialize_with = "ConfigExtraTpuForward::deserialize_pubkey")]
+    #[serde(deserialize_with = "deserialize_pubkey")]
     pub leader: Pubkey,
     #[serde(default)]
     pub quic: Option<SocketAddr>,
@@ -537,14 +591,7 @@ pub struct ConfigExtraTpuForward {
 }
 
 impl ConfigExtraTpuForward {
-    fn deserialize_pubkey<'de, D>(deserializer: D) -> Result<Pubkey, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(de::Error::custom)
-    }
+    
 }
 
 #[derive(Debug, Clone, Deserialize)]
