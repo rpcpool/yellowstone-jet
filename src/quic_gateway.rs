@@ -2449,7 +2449,7 @@ mod leader_tpu_info_service_test {
         let service = FakeTpuInfoService::from_iter(vec![(pk1, pk1_tpu_info), (pk2, pk2_tpu_info)]);
 
         let override_svc = OverrideTpuInfoService {
-            other: service,
+            other: service.clone(),
             override_vec: vec![TpuOverrideInfo {
                 remote_peer: pk1,
                 quic_tpu: "127.0.0.1:9000".parse().unwrap(),
@@ -2471,5 +2471,18 @@ mod leader_tpu_info_service_test {
             override_svc.get_quic_dest_addr(pk2, crate::config::ConfigQuicTpuPort::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8002".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8003".parse().unwrap()));
+
+        // It should work with empty override spec too
+        let override_svc = OverrideTpuInfoService {
+            other: service.clone(),
+            override_vec: vec![],
+        };
+
+        let actual_fwd =
+            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Forwards);
+        let actual_normal =
+            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Normal);
+        assert_eq!(actual_normal, Some("127.0.0.1:8000".parse().unwrap()));
+        assert_eq!(actual_fwd, Some("127.0.0.1:8001".parse().unwrap()));
     }
 }
