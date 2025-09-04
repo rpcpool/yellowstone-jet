@@ -50,95 +50,82 @@ listen_solana_like:
   # Allow to do sanitize check on RPC server (required for ALTs), supported only on patched nodes
   # If option set to `true`` then Jet would check `sanitizeTransaction` method before start
   # See https://github.com/rpcpool/solana-public/tree/v1.17.31-rpc-sanitize-tx
-  proxy_sanitize_check: true
+  # RECOMMENDED: false
+  proxy_sanitize_check: false
   # Allow to do preflight check on RPC server (simulateTransaction)
-  proxy_preflight_check: true
+  # RECOMMENDED: false
+  proxy_preflight_check: false
 
-# Send retry options
+
+# Send retry options 
 send_transaction_service:
+  # Send transaction to number of leaders (include the current leader)
+  # if set to `2` : send to current leader + next leader.
+  leader_forward_count: 2
+  
+  # relay_only_mode : effectively no retry is schedule per transaction, simply fanout to upcoming leaders.
+  #
+  # ignores `default_max_retries`, `service_max_retries`, `stop_send_on_commitment` and `retry_rate`
+  # WE RECOMMEND setting relay_only_mode=true, for staked jet instance for best performance.
+  # retry can add a lot of overhead and is better handled by the original transaction sender (the client).
+  relay_only_mode: true
+  
   # Default max retries of sending transaction
-  default_max_retries: null
+  # only interpreted if `relay_only_mode: false`
+  default_max_retries: 0
+  
   # Service max retries
-  service_max_retries: 300
-  # Stop send transaction when landed at specified commitment
-  stop_send_on_commitment: confirmed
-  # The number of upcoming leaders to which to forward transactions
-  leader_forward_count: 3
+  # only interpreted if `relay_only_mode: false`
+  service_max_retries: 0
+  
   # Try to send transaction every retry_rate duration
+  # only interpreted if `relay_only_mode: false`
   retry_rate: 1s
-  # Drop transactions from the pool once max retries limit is reached (landed statistic would be invalid)
-  relay_only_mode: false
 
-# Quic config
 quic:
-  # Total number of pools (one pool per remote address, i.e. one per leader)
-  # Solana value is 1024
-  # https://github.com/solana-labs/solana/blob/v1.17.31/connection-cache/src/connection_cache.rs#L22
-  connection_max_pools: 256
-  # TPU connection pool size per remote address
-  # Default is `solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE` -- (1 from 1.17.33 / 1.18.12, previous value is 4)
-  connection_pool_size: 1
-  # Number of immediate retries in case of failed send (not applied to timedout)
-  # Solana do not retry, atlas doing 4 retries, by default we keep same limit as Solana
+  # Maximum number of concurrent connections to remote peers validators.
+  # We recommend 1024, since most of the stake is cover by 1024 validators.
+  max_concurrent_connection: 1024
+  # How many "endpoint" to host connections.
+  # Each endpoint creates an Event loop that actual send the transaction to remote peers.
+  # Many connections can share the same endpoint.
+  # For maximum performance, it should be equal to `max_concurrent_connections`
+  # default: 5
+  endpoint_count: 1024
+  # Number of immediate retries in case of failed send
   send_retry_count: 1
+  # How far in the leader schedule from current slot should we pre-emptively warm-up connections.
+  # default is none, we recommend 10
+  connection_prediction_lookahead: 10
   # Kind of Quic port: `normal` or `forwards`
-  tpu_port: normal
-  # Quic handshake timeout.
-  # Default is `solana_sdk::quic::QUIC_CONNECTION_HANDSHAKE_TIMEOUT` -- 60s
-  connection_handshake_timeout: 2s
-  # Maximum duration of inactivity to accept before timing out the connection.
-  # https://docs.rs/quinn/0.10.2/quinn/struct.TransportConfig.html#method.max_idle_timeout
-  # Default is `solana_sdk::quic::QUIC_KEEP_ALIVE` -- 2s
-  max_idle_timeout: 2s
-  # Period of inactivity before sending a keep-alive packet
-  # https://docs.rs/quinn/0.10.2/quinn/struct.TransportConfig.html#method.keep_alive_interval
-  # Default is `solana_sdk::quic::QUIC_KEEP_ALIVE` -- 1s
-  keep_alive_interval: 1s
-  # Send tx timeout, for batches value multipled by number of transactions in the batch
-  # Solana default value is 10 seconds
-  send_timeout: 10s
-  # Ports used by QUIC endpoints
-  # https://docs.rs/solana-net-utils/1.18.11/solana_net_utils/constant.VALIDATOR_PORT_RANGE.html
-  # Default is `solana_net_utils::VALIDATOR_PORT_RANGE` -- `8000..10000`
+  tpu_port: forwards
+  # Quic handshake timeout ~ timeout to connect to a remote peer.
+  # Default is `solana_sdk::quic::QUIC_CONNECTION_HANDSHAKE_TIMEOUT` -- 2s
+  # we recommend 4s, or 6-8s if you are geographically localted APAC (Asia-Pacific)
+  connection_handshake_timeout: 4s
+  # The outbound udp port range to use.
+  # The range must be greater than or equal to `endpoint_count` and cover at least 5 ports.
   endpoint_port_range:
-    start: 8000
-    end: 10000
-  # See `solana_streamer::nonblocking::quic::compute_max_allowed_uni_streams`
-  # https://github.com/anza-xyz/agave/blob/v1.17.31/streamer/src/nonblocking/quic.rs#L244-L279
-  # Minumum value is `QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS` -- for unstaked nodes, 128
-  # Value for staked calculated from total stake, but maximum is `QUIC_MAX_STAKED_CONCURRENT_STREAMS`
-  send_max_concurrent_streams: 128
-  # Extra TPU forward (transactions would be always sent to these nodes)
-  # extra_tpu_forward:
-  #   - leader: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-  #     quic: 208.61.229.3:8442
-  #     quic_forwards: 208.61.229.3:8443
+    start: 35000
+    end: 45000
 
-# Lewis Events Configuration
-lewis_events:
-  # grpc endpoint for lewis event service
-  endpoint: "http://localhost:8005"
-  # Optional token for access to gRPC
-  x_token: null
-  # jet instance identifier (default: none)
-  jet_id: "jet-123"
-  # batching settings
-  batch_size_threshold: 512        # default: 512
-  batch_timeout: 1000ms            # default: 1000ms
-  # channel sizes
-  queue_size_grpc: 10000           # default: 10000
-  event_buffer_size: 100000        # default: 100000
-  # connection settings
-  connect_timeout: 10s             # default: 10s
-  keepalive_interval: 30s          # default: 30s
-  keepalive_timeout: 10s           # default: 10s
-  keep_alive_while_idle: true      # default: true
-  # retry settings
-  max_reconnect_attempts: 3        # default: 3
-  reconnect_initial_interval: 1000ms # default: 1000ms
-  reconnect_max_interval: 30s       # default: 30s
-  # stream settings
-  stream_timeout: 300s               # default: 300s (0 means no timeout)
+
+# For staked jet instance, we recomend the following quic + send_transaction_service configuration:
+# quic:
+#   max_concurrent_connection: 1024
+#   endpoint_count: 1024
+#   send_retry_count: 1
+#   connection_handshake_timeout: 4s
+#   tpu_port: forwards
+#   endpoint_port_range:
+#     start: 35000
+#     end: 45000
+#   connection_prediction_lookahead: 10
+
+# send_transaction_service:
+#   leader_forward_count: 3
+#   relay_only_mode: true
+
 
 features:
   enabled_features:

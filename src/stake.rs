@@ -206,8 +206,8 @@ impl RefreshStakeInfoMapTask {
             }
         };
 
-        if self.current_epoch == current_epoch || !force {
-            tracing::info!("Epoch unchanged, skipping stake info refresh");
+        if self.current_epoch == current_epoch && !force {
+            tracing::debug!("Epoch unchanged, skipping stake info refresh");
             return;
         }
 

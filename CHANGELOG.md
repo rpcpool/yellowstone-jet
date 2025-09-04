@@ -12,12 +12,18 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [14.6.0]
 
+### Features
+
 - Added Lewis event tracking for transaction lifecycle visibility
 - New `lewis_events` configuration section for gRPC event streaming
 - Track transaction sends, failures, and policy skips via Lewis integration
 - Added `lewis-dummy-server` binary for testing
 - Added metrics: `lewis_events_dropped_total`, `lewis_events_sent_total`
 - Skip transaction subscription in gRPC Geyser when relay-only mode is enabled
+
+### Fixes
+
+- Bug fix `stake.rs` [#72](https://github.com/rpcpool/yellowstone-jet/issues/72)
 
 ## [14.5.0]
 
