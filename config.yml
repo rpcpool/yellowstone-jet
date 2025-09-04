@@ -82,6 +82,11 @@ send_transaction_service:
   # only interpreted if `relay_only_mode: false`
   retry_rate: 1s
 
+  # For each transaction you can add additional fanout destination to send to.
+  # extra_fanout:
+  #   - 5mWE4TqvycLcWnzdQ7ep8ug1bQ86ePjXsvDTxDfNYtUi
+  #   - 6c5SxCmmpKviR2CtmEUk9VQZFPakJTZZcghZ5BqqoysM
+
 quic:
   # Maximum number of concurrent connections to remote peers validators.
   # We recommend 1024, since most of the stake is cover by 1024 validators.
@@ -108,6 +113,14 @@ quic:
   endpoint_port_range:
     start: 35000
     end: 45000
+
+  # You can override the default TPU information for specific remote peers.
+  # This will override any gossip information regarding tpu information of remote peers.
+  # You can also add private identity which are not official validator here.
+  # tpu_info_override:
+  #   - remote_peer: 5mWE4TqvycLcWnzdQ7ep8ug1bQ86ePjXsvDTxDfNYtUi
+  #     quic_tpu: 10.0.1.0:8000
+  #     quic_tpu_forward: 10.0.1.0:8001
 
 
 # For staked jet instance, we recomend the following quic + send_transaction_service configuration:
