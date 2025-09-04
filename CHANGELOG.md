@@ -17,6 +17,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 - Track transaction sends, failures, and policy skips via Lewis integration
 - Added `lewis-dummy-server` binary for testing
 - Added metrics: `lewis_events_dropped_total`, `lewis_events_sent_total`
+- Skip transaction subscription in gRPC Geyser when relay-only mode is enabled
 
 ## [14.5.0]
 

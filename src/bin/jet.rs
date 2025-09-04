@@ -273,8 +273,11 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     };
 
     let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
-    let (geyser, mut geyser_handle) =
-        GeyserSubscriber::new(shutdown_geyser_rx, config.upstream.grpc.clone());
+    let (geyser, mut geyser_handle) = GeyserSubscriber::new(
+        shutdown_geyser_rx,
+        config.upstream.grpc.clone(),
+        config.send_transaction_service.relay_only_mode,
+    );
     let blockhash_queue = BlockhashQueue::new(&geyser);
 
     let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(

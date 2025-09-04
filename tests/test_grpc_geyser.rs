@@ -80,9 +80,13 @@ async fn test_block_meta_before_slot_update() {
     ];
     let stream = stream::iter(messages);
 
-    let _ =
-        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
-            .await;
+    let _ = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &Some(transactions_tx),
+    )
+    .await;
 
     // Verify slot update
     let slot_update = slots_rx.recv().await.unwrap();
@@ -115,9 +119,13 @@ async fn test_non_commitment_status_no_block_meta() {
     ];
     let stream = stream::iter(messages);
 
-    let _ =
-        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
-            .await;
+    let _ = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &Some(transactions_tx),
+    )
+    .await;
 
     // Verify we got all the slot updates
     assert_eq!(
@@ -156,9 +164,13 @@ async fn test_multiple_commitment_statuses() {
     ];
     let stream = stream::iter(messages);
 
-    let _ =
-        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
-            .await;
+    let _ = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &Some(transactions_tx),
+    )
+    .await;
 
     // Verify we get block meta for each commitment level
     let meta1 = block_meta_rx.recv().await.unwrap();
@@ -205,9 +217,13 @@ async fn test_slot_tracking_cleanup_on_finalized() {
     ];
     let stream = stream::iter(messages);
 
-    let result =
-        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
-            .await;
+    let result = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &Some(transactions_tx),
+    )
+    .await;
 
     // Stream ends, so we expect an error
     assert!(result.is_err());
@@ -238,9 +254,13 @@ async fn test_transaction_status_handling() {
     ];
     let stream = stream::iter(messages);
 
-    let _ =
-        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
-            .await;
+    let _ = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &Some(transactions_tx),
+    )
+    .await;
 
     // Verify transactions were sent
     match transactions_rx.recv().await.unwrap() {
@@ -272,9 +292,13 @@ async fn test_stream_error_handling() {
     ];
     let stream = stream::iter(messages);
 
-    let result =
-        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
-            .await;
+    let result = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &Some(transactions_tx),
+    )
+    .await;
 
     // Should return StreamError
     assert!(result.is_err());
@@ -295,9 +319,13 @@ async fn test_invalid_block_meta() {
     let messages = vec![Ok(invalid_meta)];
     let stream = stream::iter(messages);
 
-    let result =
-        GeyserSubscriber::process_grpc_stream(stream, &slots_tx, &block_meta_tx, &transactions_tx)
-            .await;
+    let result = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &Some(transactions_tx),
+    )
+    .await;
 
     // Should return MissingBlockHeight error
     assert!(result.is_err());

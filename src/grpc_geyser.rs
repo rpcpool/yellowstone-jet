@@ -164,10 +164,19 @@ impl GeyserSubscriber {
     pub fn new(
         shutdown_rx: oneshot::Receiver<()>,
         primary_grpc: ConfigUpstreamGrpc,
+        relay_only_mode: bool,
     ) -> (Self, GeyserHandle) {
         let (slots_tx, _) = broadcast::channel(QUEUE_SIZE_SLOT_UPDATE);
         let (block_meta_tx, _) = broadcast::channel(QUEUE_SIZE_BLOCKMETA_UPDATE);
-        let (transactions_tx, transactions_rx) = mpsc::channel(QUEUE_SIZE_TRANSACTIONS);
+
+        // Only create transaction subscription if not in relay-only mode
+        let (transactions_tx, transactions_rx) = if !relay_only_mode {
+            let (tx, rx) = mpsc::channel(QUEUE_SIZE_TRANSACTIONS);
+            (Some(tx), Some(rx))
+        } else {
+            info!("Relay-only mode enabled, skipping transaction subscription in gRPC Geyser");
+            (None, None)
+        };
 
         let geyser_handle = tokio::spawn(Self::grpc_subscribe(
             shutdown_rx,
@@ -175,6 +184,7 @@ impl GeyserSubscriber {
             slots_tx.clone(),
             block_meta_tx.clone(),
             transactions_tx,
+            relay_only_mode,
         ));
         let geyser_handle = GeyserHandle {
             inner: geyser_handle,
@@ -183,7 +193,7 @@ impl GeyserSubscriber {
         let geyser = Self {
             slots_tx,
             block_meta_tx,
-            transactions_rx: Arc::new(Mutex::new(Some(transactions_rx))),
+            transactions_rx: Arc::new(Mutex::new(transactions_rx)),
         };
 
         (geyser, geyser_handle)
@@ -194,7 +204,8 @@ impl GeyserSubscriber {
         primary_grpc: ConfigUpstreamGrpc,
         slots_tx: broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
+        transactions_tx: Option<mpsc::Sender<GrpcUpdateMessage>>,
+        relay_only_mode: bool,
     ) -> Result<()> {
         let endpoint = primary_grpc.endpoint;
         let x_token = primary_grpc.x_token;
@@ -212,7 +223,7 @@ impl GeyserSubscriber {
             // Try to open connection with timeout
             let stream = match time::timeout(
                 Duration::from_secs(30),
-                Self::grpc_open(&endpoint, x_token.as_deref(), true),
+                Self::grpc_open(&endpoint, x_token.as_deref(), true, relay_only_mode),
             )
             .await
             {
@@ -248,7 +259,7 @@ impl GeyserSubscriber {
         mut stream: S,
         slots_tx: &broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
+        transactions_tx: &Option<mpsc::Sender<GrpcUpdateMessage>>,
     ) -> Result<()>
     where
         S: Stream<Item = std::result::Result<SubscribeUpdate, Status>> + Unpin,
@@ -283,7 +294,7 @@ impl GeyserSubscriber {
         slot_tracking: &mut BTreeMap<Slot, SlotTrackingInfo>,
         slots_tx: &broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
+        transactions_tx: &Option<mpsc::Sender<GrpcUpdateMessage>>,
     ) -> Result<()> {
         let msg_start = Instant::now();
         let msg_type = match &msg.update_oneof {
@@ -306,7 +317,12 @@ impl GeyserSubscriber {
                 .await
             }
             Some(UpdateOneof::TransactionStatus(tx_status)) => {
-                Self::handle_transaction_status(tx_status, transactions_tx).await
+                if let Some(tx_channel) = transactions_tx {
+                    Self::handle_transaction_status(tx_status, tx_channel).await
+                } else {
+                    // Skip transaction processing in relay-only mode
+                    Ok(())
+                }
             }
             Some(UpdateOneof::BlockMeta(block_meta)) => {
                 Self::handle_block_meta(block_meta, slot_tracking, block_meta_tx, transactions_tx)
@@ -332,7 +348,7 @@ impl GeyserSubscriber {
         slot_tracking: &mut BTreeMap<Slot, SlotTrackingInfo>,
         slots_tx: &broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
+        transactions_tx: &Option<mpsc::Sender<GrpcUpdateMessage>>,
     ) -> Result<()> {
         let handle_start = Instant::now();
         let SubscribeUpdateSlot { slot, status, .. } = slot_update;
@@ -375,22 +391,25 @@ impl GeyserSubscriber {
                     }
                 }
 
-                let send_start = Instant::now();
-                match transactions_tx
-                    .send(GrpcUpdateMessage::BlockMeta(block_meta))
-                    .await
-                {
-                    Ok(_) => {
-                        metrics::observe_grpc_channel_send_time(
-                            "transactions",
-                            send_start.elapsed(),
-                        );
-                    }
-                    Err(_) => {
-                        metrics::incr_grpc_channel_send_failures("transactions");
-                        return Err(GeyserError::ChannelSendFailed {
-                            channel: "transactions",
-                        });
+                // Only send to transactions channel if not in relay-only mode
+                if let Some(tx_channel) = transactions_tx {
+                    let send_start = Instant::now();
+                    match tx_channel
+                        .send(GrpcUpdateMessage::BlockMeta(block_meta))
+                        .await
+                    {
+                        Ok(_) => {
+                            metrics::observe_grpc_channel_send_time(
+                                "transactions",
+                                send_start.elapsed(),
+                            );
+                        }
+                        Err(_) => {
+                            metrics::incr_grpc_channel_send_failures("transactions");
+                            return Err(GeyserError::ChannelSendFailed {
+                                channel: "transactions",
+                            });
+                        }
                     }
                 }
             }
@@ -454,7 +473,7 @@ impl GeyserSubscriber {
         block_meta_update: SubscribeUpdateBlockMeta,
         slot_tracking: &mut BTreeMap<Slot, SlotTrackingInfo>,
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
+        transactions_tx: &Option<mpsc::Sender<GrpcUpdateMessage>>,
     ) -> Result<()> {
         let SubscribeUpdateBlockMeta {
             slot,
@@ -503,22 +522,25 @@ impl GeyserSubscriber {
                         }
                     }
 
-                    let send_start = Instant::now();
-                    match transactions_tx
-                        .send(GrpcUpdateMessage::BlockMeta(block_meta))
-                        .await
-                    {
-                        Ok(_) => {
-                            metrics::observe_grpc_channel_send_time(
-                                "transactions",
-                                send_start.elapsed(),
-                            );
-                        }
-                        Err(_) => {
-                            metrics::incr_grpc_channel_send_failures("transactions");
-                            return Err(GeyserError::ChannelSendFailed {
-                                channel: "transactions",
-                            });
+                    // Only send to transactions channel if not in relay-only mode
+                    if let Some(tx_channel) = transactions_tx {
+                        let send_start = Instant::now();
+                        match tx_channel
+                            .send(GrpcUpdateMessage::BlockMeta(block_meta))
+                            .await
+                        {
+                            Ok(_) => {
+                                metrics::observe_grpc_channel_send_time(
+                                    "transactions",
+                                    send_start.elapsed(),
+                                );
+                            }
+                            Err(_) => {
+                                metrics::incr_grpc_channel_send_failures("transactions");
+                                return Err(GeyserError::ChannelSendFailed {
+                                    channel: "transactions",
+                                });
+                            }
                         }
                     }
                 }
@@ -545,6 +567,7 @@ impl GeyserSubscriber {
         endpoint: &str,
         x_token: Option<&str>,
         full: bool,
+        relay_only_mode: bool,
     ) -> Result<impl Stream<Item = std::result::Result<SubscribeUpdate, Status>> + use<>> {
         let mut backoff = IncrementalBackoff::default();
         loop {
@@ -590,18 +613,44 @@ impl GeyserSubscriber {
                 (hashmap! {}, hashmap! {})
             };
 
-            match client.subscribe_once(SubscribeRequest {
+            let mut request = SubscribeRequest {
                 slots,
-                transactions_status: hashmap! { "".to_owned() => SubscribeRequestFilterTransactions::default() },
                 blocks_meta,
                 commitment: Some(GrpcCommitmentLevel::Processed as i32),
                 ..SubscribeRequest::default()
-            }).await {
+            };
+
+            // Only add transaction subscription if not in relay-only mode
+            if !relay_only_mode {
+                request.transactions_status =
+                    hashmap! { "".to_owned() => SubscribeRequestFilterTransactions::default() };
+            }
+
+            match client.subscribe_once(request).await {
                 Ok(stream) => {
-                    if full {
-                        info!("subscribed on slot (all statuses), transactions statuses and blocks meta ({endpoint})");
+                    let mode_suffix = if relay_only_mode {
+                        " (relay-only, no transactions)"
                     } else {
-                        info!("subscribed on transactions statuses ({endpoint})");
+                        ""
+                    };
+                    if full {
+                        info!(
+                            "subscribed on slot (all statuses){} and blocks meta ({endpoint}){mode_suffix}",
+                            if relay_only_mode {
+                                ""
+                            } else {
+                                ", transactions statuses"
+                            }
+                        );
+                    } else {
+                        info!(
+                            "subscribed{} ({endpoint}){mode_suffix}",
+                            if relay_only_mode {
+                                ""
+                            } else {
+                                " on transactions statuses"
+                            }
+                        );
                     }
                     return Ok(stream);
                 }
