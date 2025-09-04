@@ -14,11 +14,9 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Features
 
-- Added Lewis event tracking for transaction lifecycle visibility
-- New `lewis_events` configuration section for gRPC event streaming
-- Track transaction sends, failures, and policy skips via Lewis integration
+- Added Lewis event tracking support for transaction lifecycle visibility [#53](https://github.com/rpcpool/yellowstone-jet/issues/53)
 - Added `lewis-dummy-server` binary for testing
-- Added metrics: `lewis_events_dropped_total`, `lewis_events_sent_total`
+- Added prometheus metrics: `lewis_events_dropped_total`, `lewis_events_sent_total`
 - Added `tpu_info_override` config option + `extra_fanout` option [#69](https://github.com/rpcpool/yellowstone-jet/issues/69)
 
 ### Fixes
