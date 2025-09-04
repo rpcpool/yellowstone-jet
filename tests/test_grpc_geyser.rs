@@ -84,7 +84,8 @@ async fn test_block_meta_before_slot_update() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &Some(transactions_tx),
+        &transactions_tx,
+        true,
     )
     .await;
 
@@ -123,7 +124,8 @@ async fn test_non_commitment_status_no_block_meta() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &Some(transactions_tx),
+        &transactions_tx,
+        true,
     )
     .await;
 
@@ -168,7 +170,8 @@ async fn test_multiple_commitment_statuses() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &Some(transactions_tx),
+        &transactions_tx,
+        true,
     )
     .await;
 
@@ -221,7 +224,8 @@ async fn test_slot_tracking_cleanup_on_finalized() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &Some(transactions_tx),
+        &transactions_tx,
+        true,
     )
     .await;
 
@@ -258,7 +262,8 @@ async fn test_transaction_status_handling() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &Some(transactions_tx),
+        &transactions_tx,
+        true,
     )
     .await;
 
@@ -296,7 +301,8 @@ async fn test_stream_error_handling() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &Some(transactions_tx),
+        &transactions_tx,
+        true,
     )
     .await;
 
@@ -323,7 +329,8 @@ async fn test_invalid_block_meta() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &Some(transactions_tx),
+        &transactions_tx,
+        true,
     )
     .await;
 

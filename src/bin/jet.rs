@@ -276,7 +276,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let (geyser, mut geyser_handle) = GeyserSubscriber::new(
         shutdown_geyser_rx,
         config.upstream.grpc.clone(),
-        config.send_transaction_service.relay_only_mode,
+        !config.send_transaction_service.relay_only_mode,
     );
     let blockhash_queue = BlockhashQueue::new(&geyser);
 
