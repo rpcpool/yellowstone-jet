@@ -66,8 +66,8 @@ send_transaction_service:
   # relay_only_mode : effectively no retry is schedule per transaction, simply fanout to upcoming leaders.
   #
   # ignores `default_max_retries`, `service_max_retries`, `stop_send_on_commitment` and `retry_rate`
-  # WE RECOMMAND setting relay_only_mode=true, for staked jet instance for best performance.
-  # retry can add alot of overhead and is better handled by the original transaction sender (the client).
+  # WE RECOMMEND setting relay_only_mode=true, for staked jet instance for best performance.
+  # retry can add a lot of overhead and is better handled by the original transaction sender (the client).
   relay_only_mode: true
   
   # Default max retries of sending transaction
