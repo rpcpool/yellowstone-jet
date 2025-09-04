@@ -175,3 +175,64 @@ async fn it_should_apply_shield_policies() {
     assert_eq!(actual_tx.tx_sig, actual_tx.tx_sig);
     assert_eq!(actual_tx.remote_peer, my_schedule[2]);
 }
+
+#[tokio::test]
+async fn it_should_support_extra_fanout() {
+    const FANOUT_FACTOR: usize = 3;
+    let (sink, source) = mpsc::unbounded_channel();
+    let (gateway_tx, mut gateway_rx) = mpsc::channel(100);
+    let (_gateway_response_tx, gateway_response_rx) = mpsc::unbounded_channel();
+    let gateway_bidi = QuicGatewayBidi {
+        sink: gateway_tx,
+        source: gateway_response_rx,
+    };
+    let fake_schedule = FakeLeaderSchedule::default();
+
+    let extra_fanout_pubkeys = vec![Pubkey::new_unique(), Pubkey::new_unique()];
+
+    let my_schedule = vec![
+        Pubkey::new_unique(),
+        Pubkey::new_unique(),
+        Pubkey::new_unique(),
+        Pubkey::new_unique(),
+    ];
+    fake_schedule.set_schedule(my_schedule.clone());
+
+    let mut fanout = TransactionFanout::new(
+        Arc::new(fake_schedule),
+        Arc::new(AlwaysAllowTransactionPolicyStore),
+        source,
+        gateway_bidi,
+        FANOUT_FACTOR,
+        extra_fanout_pubkeys.clone(),
+        None,
+    );
+    let _fanout_jh = tokio::spawn(async move {
+        fanout.run().await;
+    });
+
+    let tx = create_send_transaction_request(Hash::new_unique(), 0);
+    let tx = Arc::new(tx);
+    sink.send(Arc::clone(&tx)).unwrap();
+
+    let mut actual_tx_sent = vec![];
+    for _i in 0..FANOUT_FACTOR + extra_fanout_pubkeys.len() {
+        let actual_tx = gateway_rx.recv().await.unwrap();
+        actual_tx_sent.push(actual_tx);
+    }
+
+    assert_eq!(
+        actual_tx_sent.len(),
+        FANOUT_FACTOR + extra_fanout_pubkeys.len()
+    );
+    assert!(
+        extra_fanout_pubkeys
+            .iter()
+            .chain(my_schedule.iter().take(FANOUT_FACTOR))
+            .all(|extra_pk| {
+                actual_tx_sent
+                    .iter()
+                    .any(|sent| sent.remote_peer == *extra_pk)
+            })
+    );
+}

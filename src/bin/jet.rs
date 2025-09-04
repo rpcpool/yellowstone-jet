@@ -386,7 +386,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         scheduler_out,
         quic_gateway_bidi,
         config.send_transaction_service.leader_forward_count,
-        config.send_transaction_service.extra_tpu_forward,
+        config.send_transaction_service.extra_fanout,
         lewis_handler,
     );
 

@@ -446,6 +446,9 @@ impl LeaderTpuInfoService for ClusterTpuInfo {
     }
 }
 
+///
+/// A service that overrides TPU information for specific peers.
+///
 pub struct OverrideTpuInfoService<I> {
     pub override_vec: Vec<TpuOverrideInfo>,
     pub other: I,
@@ -2365,5 +2368,108 @@ mod stake_based_eviction_strategy_test {
         // It should propose to evict the lowest staked peer
         assert_eq!(eviction_plan.len(), 1);
         assert!(eviction_plan.contains(&peer3));
+    }
+}
+
+#[cfg(test)]
+mod leader_tpu_info_service_test {
+    use {
+        crate::{
+            config::TpuOverrideInfo,
+            quic_gateway::{LeaderTpuInfoService, OverrideTpuInfoService},
+        },
+        solana_pubkey::Pubkey,
+        std::{
+            collections::HashMap,
+            net::SocketAddr,
+            sync::{Arc, RwLock},
+        },
+    };
+
+    #[derive(Debug, Clone)]
+    struct TpuInfo {
+        normal: SocketAddr,
+        fwd: SocketAddr,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct FakeTpuInfoService {
+        // Fake implementation details
+        inner: Arc<RwLock<HashMap<Pubkey, TpuInfo>>>,
+    }
+
+    impl LeaderTpuInfoService for FakeTpuInfoService {
+        fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+            self.inner
+                .read()
+                .unwrap()
+                .get(&leader_pubkey)
+                .map(|info| info.normal)
+        }
+
+        fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+            self.inner
+                .read()
+                .unwrap()
+                .get(&leader_pubkey)
+                .map(|info| info.fwd)
+        }
+    }
+
+    impl FakeTpuInfoService {
+        fn from_iter<IT>(it: IT) -> Self
+        where
+            IT: IntoIterator<Item = (Pubkey, TpuInfo)>,
+        {
+            let mut inner = HashMap::default();
+            for (pubkey, info) in it {
+                inner.insert(pubkey, info);
+            }
+            Self {
+                inner: Arc::new(RwLock::new(inner)),
+            }
+        }
+    }
+
+    #[test]
+    fn test_override_tpu_info() {
+        // Test the override functionality of the TPU info service
+        let pk1 = Pubkey::new_unique();
+        let pk1_tpu_info = TpuInfo {
+            normal: "127.0.0.1:8000".parse().unwrap(),
+            fwd: "127.0.0.1:8001".parse().unwrap(),
+        };
+
+        let pk2 = Pubkey::new_unique();
+        let pk2_tpu_info = TpuInfo {
+            normal: "127.0.0.1:8002".parse().unwrap(),
+            fwd: "127.0.0.1:8003".parse().unwrap(),
+        };
+
+        let service = FakeTpuInfoService::from_iter(vec![(pk1, pk1_tpu_info), (pk2, pk2_tpu_info)]);
+
+        let override_svc = OverrideTpuInfoService {
+            other: service,
+            override_vec: vec![TpuOverrideInfo {
+                remote_peer: pk1,
+                quic_tpu: "127.0.0.1:9000".parse().unwrap(),
+                quic_tpu_forward: "127.0.0.1:9001".parse().unwrap(),
+            }],
+        };
+
+        let actual_fwd =
+            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Forwards);
+        let actual_normal =
+            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Normal);
+        assert_eq!(actual_normal, Some("127.0.0.1:9000".parse().unwrap()));
+        assert_eq!(actual_fwd, Some("127.0.0.1:9001".parse().unwrap()));
+
+        // It should not override anything if there is no override spec
+        let actual_fwd =
+            override_svc.get_quic_dest_addr(pk2, crate::config::ConfigQuicTpuPort::Forwards);
+        let actual_normal =
+            override_svc.get_quic_dest_addr(pk2, crate::config::ConfigQuicTpuPort::Normal);
+        assert_eq!(actual_normal, Some("127.0.0.1:8002".parse().unwrap()));
+        assert_eq!(actual_fwd, Some("127.0.0.1:8003".parse().unwrap()));
     }
 }

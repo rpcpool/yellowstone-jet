@@ -314,10 +314,10 @@ pub struct ConfigSendTransactionService {
     #[serde(default)]
     pub relay_only_mode: bool,
 
-    /// Extra TPU forward (transactions would be always sent to these nodes)
+    /// Extra forward (transactions would be always sent to these nodes)
     /// regardless of the transaction yellowstone-shield policies.
     #[serde(default, deserialize_with = "deser_pubkey_vec")]
-    pub extra_tpu_forward: Vec<Pubkey>,
+    pub extra_fanout: Vec<Pubkey>,
 }
 
 impl ConfigSendTransactionService {
