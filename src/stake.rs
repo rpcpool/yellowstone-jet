@@ -197,12 +197,8 @@ impl RefreshStakeInfoMapTask {
         let current_epoch = match self.rpc.get_epoch_info().await {
             Ok(epoch_info) => epoch_info.epoch,
             Err(err) => {
-                if err.is_transient() {
-                    tracing::error!("Failed to get epoch info: {:?}", err);
-                    return;
-                } else {
-                    panic!("Failed to get epoch info: {:?}", err);
-                }
+                tracing::error!("Failed to get epoch info: {:?}", err);
+                return;
             }
         };
 
@@ -210,8 +206,6 @@ impl RefreshStakeInfoMapTask {
             tracing::debug!("Epoch unchanged, skipping stake info refresh");
             return;
         }
-
-        self.current_epoch = current_epoch;
 
         let resp = self.rpc.get_vote_accounts().await;
         match resp {
@@ -222,13 +216,12 @@ impl RefreshStakeInfoMapTask {
                 let mut shared = self.shared.write().expect("lock poisoned");
                 shared.mapping = stake_mappings;
                 shared.total_stake = total_stake;
+
+                self.current_epoch = current_epoch;
             }
             Err(err) => {
-                if err.is_transient() {
-                    tracing::error!("Failed to get vote accounts: {:?}", err);
-                } else {
-                    panic!("Failed to get vote accounts: {:?}", err);
-                }
+                tracing::error!("Failed to get vote accounts: {:?}", err);
+                return;
             }
         }
         let e = t.elapsed();
