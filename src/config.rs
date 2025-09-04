@@ -422,12 +422,6 @@ pub struct ConfigQuic {
     #[deprecated]
     pub send_max_concurrent_streams: usize,
 
-    /// Extra TPU forward (transactions would be always sent to these nodes)
-    /// DEPRECATED
-    #[serde(default)]
-    #[deprecated]
-    pub extra_tpu_forward: Vec<ConfigExtraTpuForward>,
-
     ///
     /// How many endpoints to create for the QUIC gateway.
     ///
