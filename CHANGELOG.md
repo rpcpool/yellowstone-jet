@@ -19,11 +19,12 @@ The minor version will be incremented upon a breaking change and the patch versi
 - Track transaction sends, failures, and policy skips via Lewis integration
 - Added `lewis-dummy-server` binary for testing
 - Added metrics: `lewis_events_dropped_total`, `lewis_events_sent_total`
-- Skip transaction subscription in gRPC Geyser when relay-only mode is enabled
+- Added `tpu_info_override` config option + `extra_fanout` option [#69](https://github.com/rpcpool/yellowstone-jet/issues/69)
 
 ### Fixes
 
 - Bug fix `stake.rs` [#72](https://github.com/rpcpool/yellowstone-jet/issues/72)
+- Skip transaction subscription in gRPC Geyser when relay-only mode is enabled [#71](https://github.com/rpcpool/yellowstone-jet/issues/71)
 
 ## [14.5.0]
 
