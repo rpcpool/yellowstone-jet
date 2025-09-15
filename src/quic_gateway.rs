@@ -1275,7 +1275,7 @@ impl TokioQuicGatewayRuntime {
                                 self.spawn_connecting(remote_peer_identity, connection_attempt + 1);
                             }
                             whatever => {
-                                tracing::error!(
+                                tracing::warn!(
                                     "Failed to connect to remote peer: {remote_peer_identity}: {whatever:?}"
                                 );
                                 self.unreachable_peer(remote_peer_identity);
