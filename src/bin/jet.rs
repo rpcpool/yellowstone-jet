@@ -424,8 +424,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await?;
 
+
     let jet_gw_listener = match config.jet_gateway {
         Some(config_jet_gateway) => {
+            let jet_gw_cancellation_token = jet_cancellation_token.child_token();
             if config_jet_gateway.endpoints.is_empty() {
                 warn!("no endpoints for jet-gateway with existed config");
                 None
@@ -444,6 +446,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                     expected_identity,
                     config.features,
                     jet_gw_identity,
+                    jet_gw_cancellation_token,
                 );
                 jet_identity_sync_members.push(Box::new(jet_gw_identity_updater));
                 Some(jet_gw_fut.boxed())
