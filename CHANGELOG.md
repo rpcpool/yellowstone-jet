@@ -10,6 +10,10 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+## [14.6.3]
+
+- Added more details in log during connection error
+
 ## [14.6.2]
 
 - Fixed `cluster_identity_stake` prometheus metric that was not getting updated
