@@ -58,6 +58,7 @@ impl JetIdentitySyncGroup {
         // Wait for all members to pause before updating the identity
         barrier.wait().await;
         self.identity = new_identity.insecure_clone();
+        self.watcher.send_replace(self.identity.pubkey());
         self.members = members;
     }
 
@@ -74,5 +75,64 @@ impl JetIdentityUpdater for JetIdentitySyncGroup {
 
     async fn get_identity(&self) -> Pubkey {
         self.identity.pubkey()
+    }
+}
+
+
+#[cfg(test)]
+mod test {
+    use {
+        super::*,
+        crate::rpc::rpc_admin::JetIdentityUpdater,
+        solana_keypair::Keypair,
+        std::sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct TestMember {
+        id: usize,
+        pause_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl JetIdentitySyncMember for TestMember {
+        async fn pause_for_identity_update(
+            &self,
+            _new_identity: Keypair,
+            barrier: Arc<tokio::sync::Barrier>,
+        ) {
+            let pause_count = Arc::clone(&self.pause_count);
+            tokio::spawn(async move {
+                pause_count.fetch_add(1, Ordering::SeqCst);
+                barrier.wait().await;
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn test_identity_sync_group() {
+        let member_count = 5;
+        let pause_count = Arc::new(AtomicUsize::new(0));
+        let members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync>> = (0..member_count)
+            .map(|i| {
+                Box::new(TestMember {
+                    id: i,
+                    pause_count: Arc::clone(&pause_count),
+                }) as Box<dyn JetIdentitySyncMember + Send + Sync>
+            })
+            .collect();
+
+        let initial_identity = Keypair::new();
+        let mut sync_group = JetIdentitySyncGroup::new(initial_identity.insecure_clone(), members);
+        let identity_watcher = sync_group.get_identity_watcher();
+        assert_eq!(sync_group.get_identity().await, initial_identity.pubkey());
+        assert_eq!(*identity_watcher.borrow(), initial_identity.pubkey());
+        assert_eq!(pause_count.load(Ordering::SeqCst), 0);
+
+        let new_identity = Keypair::new();
+        sync_group.update_identity(new_identity.insecure_clone()).await;
+
+        assert_eq!(sync_group.get_identity().await, new_identity.pubkey());
+        assert_eq!(pause_count.load(Ordering::SeqCst), member_count);
+        assert_eq!(*identity_watcher.borrow(), new_identity.pubkey());
     }
 }
