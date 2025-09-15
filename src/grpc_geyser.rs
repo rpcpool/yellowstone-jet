@@ -3,40 +3,23 @@ use {
         config::ConfigUpstreamGrpc,
         metrics::jet as metrics,
         util::{BlockHeight, CommitmentLevel, IncrementalBackoff, SlotStatus},
-    },
-    futures::{
-        FutureExt, TryFutureExt,
-        stream::{Stream, StreamExt},
-    },
-    maplit::hashmap,
-    semver::{Version, VersionReq},
-    serde::Deserialize,
-    solana_clock::Slot,
-    solana_hash::{Hash, ParseHashError},
-    solana_signature::Signature,
-    std::{
+    }, futures::{
+        stream::{Stream, StreamExt}, FutureExt, TryFutureExt
+    }, maplit::hashmap, semver::{Version, VersionReq}, serde::Deserialize, solana_clock::Slot, solana_hash::{Hash, ParseHashError}, solana_signature::Signature, std::{
         collections::BTreeMap,
         future::Future,
         sync::Arc,
         time::{Duration, Instant},
-    },
-    tokio::{
-        sync::{Mutex, broadcast, mpsc, oneshot},
+    }, tokio::{
+        sync::{broadcast, mpsc, Mutex},
         task::{JoinError, JoinHandle},
         time,
-    },
-    tonic::transport::channel::ClientTlsConfig,
-    tracing::{debug, error, info, warn},
-    yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
-    yellowstone_grpc_proto::{
+    }, tokio_util::sync::CancellationToken, tonic::transport::channel::ClientTlsConfig, tracing::{debug, error, info, warn}, yellowstone_grpc_client::{GeyserGrpcClient, Interceptor}, yellowstone_grpc_proto::{
         prelude::{
-            BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel,
-            SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots,
-            SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta,
-            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
+            subscribe_update::UpdateOneof, BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel, SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots, SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot, SubscribeUpdateTransactionStatus
         },
         tonic::Status,
-    },
+    }
 };
 
 const QUEUE_SIZE_SLOT_UPDATE: usize = 10_000;
@@ -162,9 +145,9 @@ pub struct GeyserSubscriber {
 
 impl GeyserSubscriber {
     pub fn new(
-        shutdown_rx: oneshot::Receiver<()>,
         primary_grpc: ConfigUpstreamGrpc,
         include_transactions: bool,
+        cancellation_token: CancellationToken,
     ) -> (Self, GeyserHandle) {
         let (slots_tx, _) = broadcast::channel(QUEUE_SIZE_SLOT_UPDATE);
         let (block_meta_tx, _) = broadcast::channel(QUEUE_SIZE_BLOCKMETA_UPDATE);
@@ -175,12 +158,12 @@ impl GeyserSubscriber {
         }
 
         let geyser_handle = tokio::spawn(Self::grpc_subscribe(
-            shutdown_rx,
             primary_grpc,
             slots_tx.clone(),
             block_meta_tx.clone(),
             transactions_tx,
             include_transactions,
+            cancellation_token,
         ));
         let geyser_handle = GeyserHandle {
             inner: geyser_handle,
@@ -196,12 +179,12 @@ impl GeyserSubscriber {
     }
 
     async fn grpc_subscribe(
-        mut shutdown_rx: oneshot::Receiver<()>,
         primary_grpc: ConfigUpstreamGrpc,
         slots_tx: broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: broadcast::Sender<BlockMetaWithCommitment>,
         transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
         include_transactions: bool,
+        cancellation_token: CancellationToken
     ) -> Result<()> {
         let endpoint = primary_grpc.endpoint;
         let x_token = primary_grpc.x_token;
@@ -210,10 +193,8 @@ impl GeyserSubscriber {
             Self::reset_slot_metrics();
 
             // Check for shutdown before attempting connection
-            match shutdown_rx.try_recv() {
-                Ok(()) => return Ok(()),
-                Err(oneshot::error::TryRecvError::Closed) => return Ok(()),
-                Err(oneshot::error::TryRecvError::Empty) => {} // Continue
+            if cancellation_token.is_cancelled() {
+                return Ok(());
             }
 
             // Try to open connection with timeout
@@ -242,6 +223,7 @@ impl GeyserSubscriber {
                 &block_meta_tx,
                 &transactions_tx,
                 include_transactions,
+                cancellation_token.clone(),
             )
             .await
             {
@@ -263,34 +245,46 @@ impl GeyserSubscriber {
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
         transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
         include_transactions: bool,
+        cancellation_token: CancellationToken,
     ) -> Result<()>
     where
         S: Stream<Item = std::result::Result<SubscribeUpdate, Status>> + Unpin,
     {
         let mut slot_tracking = BTreeMap::<Slot, SlotTrackingInfo>::new();
 
-        while let Some(message) = stream.next().await {
-            match message {
-                Ok(msg) => {
-                    Self::handle_grpc_message(
-                        msg,
-                        &mut slot_tracking,
-                        slots_tx,
-                        block_meta_tx,
-                        transactions_tx,
-                        include_transactions,
-                    )
-                    .await?;
-
-                    metrics::set_slot_tracking_btreemap_size(slot_tracking.len());
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    info!("gRPC stream processing: cancellation token triggered, shutting down...");
+                    return Ok(());
                 }
-                Err(error) => {
-                    return Err(GeyserError::StreamError(error));
+
+                // Prioritize stream processing
+                message = stream.next() => {
+                    match message {
+                        Some(Ok(msg)) => {
+                            Self::handle_grpc_message(
+                                msg,
+                                &mut slot_tracking,
+                                slots_tx,
+                                block_meta_tx,
+                                transactions_tx,
+                                include_transactions,
+                            )
+                            .await?;
+
+                            metrics::set_slot_tracking_btreemap_size(slot_tracking.len());
+                        }
+                        Some(Err(error)) => {
+                            return Err(GeyserError::StreamError(error));
+                        }
+                        None => {
+                            return Err(GeyserError::StreamEnded);
+                        }
+                    }
                 }
             }
         }
-
-        Err(GeyserError::StreamEnded)
     }
 
     async fn handle_grpc_message(

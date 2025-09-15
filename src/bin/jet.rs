@@ -29,7 +29,7 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{SignalKind, signal},
-        sync::{Mutex, oneshot, watch},
+        sync::{Mutex, watch},
         task::JoinHandle,
     },
     tracing::{error, info, warn},
@@ -279,11 +279,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(AlwaysAllowTransactionPolicyStore)
     };
 
-    let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
     let (geyser, geyser_handle) = GeyserSubscriber::new(
-        shutdown_geyser_rx,
         config.upstream.grpc.clone(),
         !config.send_transaction_service.relay_only_mode,
+        jet_cancellation_token.child_token(),
     );
     let blockhash_queue = BlockhashQueue::new(&geyser);
 
@@ -546,8 +545,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                     }   
                 };
             }
-
-            let _ = shutdown_geyser_tx.send(());
 
             let task_id = get_id!(&result);
             let first = tg_name_map.remove(&task_id).unwrap_or_else(|| format!("unknown task {task_id:?}"));
