@@ -4,6 +4,7 @@ use {
     solana_hash::Hash,
     solana_signature::Signature,
     tokio::sync::{broadcast, mpsc},
+    tokio_util::sync::CancellationToken,
     yellowstone_grpc_proto::{
         prelude::{
             BlockHeight, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot,
@@ -79,13 +80,14 @@ async fn test_block_meta_before_slot_update() {
         Ok(create_slot_update(100, SlotStatus::SlotConfirmed as i32)),
     ];
     let stream = stream::iter(messages);
-
+    let cancellation_token = CancellationToken::new();
     let _ = GeyserSubscriber::process_grpc_stream(
         stream,
         &slots_tx,
         &block_meta_tx,
         &transactions_tx,
         true,
+        cancellation_token.clone(),
     )
     .await;
 
@@ -120,12 +122,14 @@ async fn test_non_commitment_status_no_block_meta() {
     ];
     let stream = stream::iter(messages);
 
+    let cancellation_token = CancellationToken::new();
     let _ = GeyserSubscriber::process_grpc_stream(
         stream,
         &slots_tx,
         &block_meta_tx,
         &transactions_tx,
         true,
+        cancellation_token.clone(),
     )
     .await;
 
@@ -166,12 +170,14 @@ async fn test_multiple_commitment_statuses() {
     ];
     let stream = stream::iter(messages);
 
+    let cancellation_token = CancellationToken::new();
     let _ = GeyserSubscriber::process_grpc_stream(
         stream,
         &slots_tx,
         &block_meta_tx,
         &transactions_tx,
         true,
+        cancellation_token.clone(),
     )
     .await;
 
@@ -220,12 +226,14 @@ async fn test_slot_tracking_cleanup_on_finalized() {
     ];
     let stream = stream::iter(messages);
 
+    let cancellation_token = CancellationToken::new();
     let result = GeyserSubscriber::process_grpc_stream(
         stream,
         &slots_tx,
         &block_meta_tx,
         &transactions_tx,
         true,
+        cancellation_token.clone(),
     )
     .await;
 
@@ -257,13 +265,14 @@ async fn test_transaction_status_handling() {
         Ok(create_transaction_status(101, &sig)),
     ];
     let stream = stream::iter(messages);
-
+    let cancellation_token = CancellationToken::new();
     let _ = GeyserSubscriber::process_grpc_stream(
         stream,
         &slots_tx,
         &block_meta_tx,
         &transactions_tx,
         true,
+        cancellation_token.clone(),
     )
     .await;
 
@@ -296,13 +305,14 @@ async fn test_stream_error_handling() {
         Err(Status::unavailable("connection lost")),
     ];
     let stream = stream::iter(messages);
-
+    let cancellation_token = CancellationToken::new();
     let result = GeyserSubscriber::process_grpc_stream(
         stream,
         &slots_tx,
         &block_meta_tx,
         &transactions_tx,
         true,
+        cancellation_token.clone(),
     )
     .await;
 
@@ -324,13 +334,14 @@ async fn test_invalid_block_meta() {
 
     let messages = vec![Ok(invalid_meta)];
     let stream = stream::iter(messages);
-
+    let cancellation_token = CancellationToken::new();
     let result = GeyserSubscriber::process_grpc_stream(
         stream,
         &slots_tx,
         &block_meta_tx,
         &transactions_tx,
         true,
+        cancellation_token.clone(),
     )
     .await;
 

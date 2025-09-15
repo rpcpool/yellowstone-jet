@@ -9,6 +9,7 @@ use {
     solana_signer::Signer,
     std::{future, sync::Arc},
     tokio::sync::mpsc::{self},
+    tokio_util::sync::CancellationToken,
 };
 
 struct IdentitySyncCommand {
@@ -44,6 +45,7 @@ pub fn spawn_jet_gw_listener(
     expected_identity: Option<Pubkey>,
     features: FeatureSet,
     initial_identity: Keypair,
+    cancellation_token: CancellationToken,
 ) -> (JetGatewayIdentityUpdater, impl Future<Output = ()>) {
     let mut current_identity = initial_identity;
     let (cnc_tx, mut cnc_rx) = mpsc::unbounded_channel::<IdentitySyncCommand>();
@@ -101,6 +103,10 @@ pub fn spawn_jet_gw_listener(
                     current_identity = command.new_identity;
                     tracing::info!("JetGatewayIdentityUpdater: received new identity: {}", current_identity.pubkey());
                     command.barrier.wait().await;
+                }
+                _ = cancellation_token.cancelled() => {
+                    tracing::info!("JetGatewayIdentityUpdater: cancellation token triggered, shutting down...");
+                    break;
                 }
             }
         }

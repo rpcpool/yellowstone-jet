@@ -105,8 +105,7 @@ pub async fn set_identity_if_expected() {
             cluster_tpu_info: mock_cluster_info,
         },
     )
-    .await
-    .expect("Error creating rpc server");
+    .await;
 
     let client = HttpClientBuilder::default()
         .build(format!("http://{}", rpc_addr))
@@ -154,8 +153,7 @@ pub async fn set_identity_wrong_keypair() {
             cluster_tpu_info: mock_cluster_info,
         },
     )
-    .await
-    .expect("Error creating rpc server");
+    .await;
 
     let client = HttpClientBuilder::default()
         .build(format!("http://{}", rpc_addr))
@@ -198,8 +196,7 @@ pub async fn set_identity_from_file() {
             cluster_tpu_info: mock_cluster_info,
         },
     )
-    .await
-    .expect("Error creating rpc server");
+    .await;
 
     let client = HttpClientBuilder::default()
         .build(format!("http://{}", rpc_addr))
@@ -247,8 +244,7 @@ pub async fn reset_identity_to_random() {
             cluster_tpu_info: mock_cluster_info,
         },
     )
-    .await
-    .expect("Error creating rpc server");
+    .await;
 
     let client = HttpClientBuilder::default()
         .build(format!("http://{}", rpc_addr))
@@ -305,8 +301,7 @@ pub async fn test_get_latest_slot() {
             cluster_tpu_info: Arc::new(mock_cluster_info),
         },
     )
-    .await
-    .expect("Error creating rpc server");
+    .await;
 
     let client = HttpClientBuilder::default()
         .build(format!("http://{}", rpc_addr))
@@ -377,8 +372,7 @@ pub async fn test_get_latest_slot_updates() {
             cluster_tpu_info: updatable_mock,
         },
     )
-    .await
-    .expect("Error creating rpc server");
+    .await;
 
     let client = HttpClientBuilder::default()
         .build(format!("http://{}", rpc_addr))

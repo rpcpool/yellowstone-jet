@@ -1,6 +1,6 @@
 use {
     crate::{
-        grpc_geyser::{BlockMetaWithCommitment, GeyserStreams},
+        grpc_geyser::BlockMetaWithCommitment,
         metrics::jet as metrics,
         util::{
             BlockHeight, CommitmentLevel, WaitShutdown, WaitShutdownJoinHandleResult,
@@ -39,20 +39,14 @@ impl WaitShutdown for BlockhashQueue {
 }
 
 impl BlockhashQueue {
-    pub fn new<G>(grpc: &G) -> Self
-    where
-        G: GeyserStreams + Send + Sync + 'static,
-    {
+    // TODO: make use Stream generic
+    pub fn new(grpc: broadcast::Receiver<BlockMetaWithCommitment>) -> Self {
         let shutdown = Arc::new(Notify::new());
         let blockmeta_map = Arc::new(StdRwLock::new(HashMap::new()));
         Self {
             blockmeta_map: Arc::clone(&blockmeta_map),
             shutdown: Arc::clone(&shutdown),
-            join_handle: Self::spawn(Self::subscribe(
-                shutdown,
-                blockmeta_map,
-                grpc.subscribe_block_meta(),
-            )),
+            join_handle: Self::spawn(Self::subscribe(shutdown, blockmeta_map, grpc)),
         }
     }
 
@@ -64,9 +58,18 @@ impl BlockhashQueue {
         loop {
             let block_meta = tokio::select! {
                 _ = shutdown.notified() => return Ok(()),
-                message = block_meta_rx.recv() => message,
-            }
-            .map_err(|error| anyhow::anyhow!("BlockhashQueue: grpc stream finished: {error:?}"))?;
+                maybe = block_meta_rx.recv() => {
+                    match maybe {
+                        Ok(block_meta) => block_meta,
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            anyhow::bail!("BlockhashQueue: grpc stream lagged, skipped {skipped} messages");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Ok(());
+                        }
+                    }
+                }
+            };
 
             // IMPORTANT Don't hold the lock across await points
             let mut blockmeta_map = blockmeta_map

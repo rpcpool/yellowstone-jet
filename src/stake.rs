@@ -19,6 +19,7 @@ use {
         time::Instant,
     },
     tokio_stream::wrappers::ReceiverStream,
+    tokio_util::sync::CancellationToken,
 };
 
 pub fn stake_to_per100ms_limit(stake: u64, total_stake: u64) -> u64 {
@@ -164,22 +165,6 @@ pub enum CacheStakeInfoMapCommand {
     Stop,
 }
 
-///
-/// Spawn mode for [`spawn_cache_stake_info_map`].
-///
-#[derive(Default)]
-pub enum SpawnMode {
-    // Launch the task in the background and return a handle to it.
-    // If the handle is dropped, the task will not be cancelled automatically.
-    #[default]
-    Detached,
-    // Launch the task in the background as long as the command-and-control channel is open.
-    Attached {
-        // command-and-control channel
-        cnc_rx: mpsc::Receiver<CacheStakeInfoMapCommand>,
-    },
-}
-
 struct RefreshStakeInfoMapTask {
     rpc: RpcClient,
     last_refresh: Instant,
@@ -187,6 +172,7 @@ struct RefreshStakeInfoMapTask {
     cnc_rx: Option<mpsc::Receiver<CacheStakeInfoMapCommand>>,
     shared: Arc<StdRwLock<StakeInfoMapInner>>,
     current_epoch: u64,
+    cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl RefreshStakeInfoMapTask {
@@ -247,6 +233,10 @@ impl RefreshStakeInfoMapTask {
                 _ = tokio::time::sleep_until(next_refresh) => {
                     self.refresh(false).await;
                 },
+                _ = self.cancellation_token.cancelled() => {
+                    tracing::info!("Cancellation token triggered, exiting RefreshStakeInfoMapTask");
+                    break;
+                }
                 maybe = command_stream.next() => {
                     match maybe {
                         Some(command) => {
@@ -279,7 +269,8 @@ impl RefreshStakeInfoMapTask {
 pub async fn spawn_cache_stake_info_map(
     rpc: RpcClient,
     interval: std::time::Duration,
-    mode: SpawnMode,
+    command_channel: Option<mpsc::Receiver<CacheStakeInfoMapCommand>>,
+    cancellation_token: CancellationToken,
 ) -> (StakeInfoMap, impl Future<Output = ()>) {
     let initial_value = rpc
         .get_vote_accounts()
@@ -302,17 +293,14 @@ pub async fn spawn_cache_stake_info_map(
     let ret = StakeInfoMap {
         inner: Arc::clone(&shared),
     };
-
     let task = RefreshStakeInfoMapTask {
         rpc,
         last_refresh: Instant::now(),
         interval,
-        cnc_rx: match mode {
-            SpawnMode::Attached { cnc_rx } => Some(cnc_rx),
-            _ => None,
-        },
+        cnc_rx: command_channel,
         shared,
         current_epoch,
+        cancellation_token: cancellation_token.clone(),
     };
 
     (ret, task.run())
@@ -325,7 +313,7 @@ pub mod tests {
             solana_rpc_utils::testkit::{
                 MockRpcSender, return_fatal_error, return_sucess, return_transient_error,
             },
-            stake::{self, CacheStakeInfoMapCommand, SpawnMode},
+            stake::{self, CacheStakeInfoMapCommand},
         },
         solana_client::{
             nonblocking::rpc_client::RpcClient,
@@ -375,11 +363,12 @@ pub mod tests {
         );
 
         let mock = RpcClient::new_sender(mock_rpc_sender.clone(), RpcClientConfig::default());
-
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
         let (stake_info_map, _handle) = stake::spawn_cache_stake_info_map(
             mock,
             std::time::Duration::from_secs(1),
             Default::default(),
+            cancellation_token,
         )
         .await;
 
@@ -400,11 +389,13 @@ pub mod tests {
     pub async fn it_should_panic_during_spawn_if_rpc_error() {
         let mock_rpc_sender = MockRpcSender::all_fatal_errors();
         let mock = RpcClient::new_sender(mock_rpc_sender, RpcClientConfig::default());
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
         tokio::spawn(async move {
             stake::spawn_cache_stake_info_map(
                 mock,
                 std::time::Duration::from_secs(1),
                 Default::default(),
+                cancellation_token,
             )
             .await
             .1
@@ -433,10 +424,12 @@ pub mod tests {
         );
         let mock = RpcClient::new_sender(mock_rpc_sender.clone(), RpcClientConfig::default());
         let (cnc_tx, cnc_rx) = mpsc::channel(10);
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
         let (stake_info_map, cache_fresh_fut) = stake::spawn_cache_stake_info_map(
             mock,
             std::time::Duration::from_secs(1),
-            SpawnMode::Attached { cnc_rx },
+            Some(cnc_rx),
+            cancellation_token,
         )
         .await;
 
@@ -518,10 +511,12 @@ pub mod tests {
         );
         let mock = RpcClient::new_sender(mock_rpc_sender.clone(), RpcClientConfig::default());
         let (cnc_tx, cnc_rx) = mpsc::channel(10);
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
         let (stake_info_map, cache_fresh_fut) = stake::spawn_cache_stake_info_map(
             mock,
             std::time::Duration::from_secs(1),
-            SpawnMode::Attached { cnc_rx },
+            Some(cnc_rx),
+            cancellation_token,
         )
         .await;
 
@@ -575,10 +570,12 @@ pub mod tests {
         );
         let mock = RpcClient::new_sender(mock_rpc_sender.clone(), RpcClientConfig::default());
         let (cnc_tx, cnc_rx) = mpsc::channel(10);
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
         let (stake_info_map, cache_fresh_fut) = stake::spawn_cache_stake_info_map(
             mock,
             std::time::Duration::from_secs(1),
-            SpawnMode::Attached { cnc_rx },
+            Some(cnc_rx),
+            cancellation_token,
         )
         .await;
 

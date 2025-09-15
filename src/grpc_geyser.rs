@@ -21,10 +21,11 @@ use {
         time::{Duration, Instant},
     },
     tokio::{
-        sync::{Mutex, broadcast, mpsc, oneshot},
+        sync::{Mutex, broadcast, mpsc},
         task::{JoinError, JoinHandle},
         time,
     },
+    tokio_util::sync::CancellationToken,
     tonic::transport::channel::ClientTlsConfig,
     tracing::{debug, error, info, warn},
     yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
@@ -153,21 +154,21 @@ impl Future for GeyserHandle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GeyserSubscriber {
-    block_meta_tx: broadcast::Sender<BlockMetaWithCommitment>,
-    slots_tx: broadcast::Sender<SlotUpdateWithStatus>,
+    block_meta_rx: broadcast::Receiver<BlockMetaWithCommitment>,
+    slots_rx: broadcast::Receiver<SlotUpdateWithStatus>,
     transactions_rx: Arc<Mutex<Option<mpsc::Receiver<GrpcUpdateMessage>>>>,
 }
 
 impl GeyserSubscriber {
     pub fn new(
-        shutdown_rx: oneshot::Receiver<()>,
         primary_grpc: ConfigUpstreamGrpc,
         include_transactions: bool,
+        cancellation_token: CancellationToken,
     ) -> (Self, GeyserHandle) {
-        let (slots_tx, _) = broadcast::channel(QUEUE_SIZE_SLOT_UPDATE);
-        let (block_meta_tx, _) = broadcast::channel(QUEUE_SIZE_BLOCKMETA_UPDATE);
+        let (slots_tx, slots_rx) = broadcast::channel(QUEUE_SIZE_SLOT_UPDATE);
+        let (block_meta_tx, block_meta_rx) = broadcast::channel(QUEUE_SIZE_BLOCKMETA_UPDATE);
 
         let (transactions_tx, transactions_rx) = mpsc::channel(QUEUE_SIZE_TRANSACTIONS);
         if !include_transactions {
@@ -175,20 +176,20 @@ impl GeyserSubscriber {
         }
 
         let geyser_handle = tokio::spawn(Self::grpc_subscribe(
-            shutdown_rx,
             primary_grpc,
             slots_tx.clone(),
             block_meta_tx.clone(),
             transactions_tx,
             include_transactions,
+            cancellation_token,
         ));
         let geyser_handle = GeyserHandle {
             inner: geyser_handle,
         };
 
         let geyser = Self {
-            slots_tx,
-            block_meta_tx,
+            slots_rx,
+            block_meta_rx,
             transactions_rx: Arc::new(Mutex::new(Some(transactions_rx))),
         };
 
@@ -196,12 +197,12 @@ impl GeyserSubscriber {
     }
 
     async fn grpc_subscribe(
-        mut shutdown_rx: oneshot::Receiver<()>,
         primary_grpc: ConfigUpstreamGrpc,
         slots_tx: broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: broadcast::Sender<BlockMetaWithCommitment>,
         transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
         include_transactions: bool,
+        cancellation_token: CancellationToken,
     ) -> Result<()> {
         let endpoint = primary_grpc.endpoint;
         let x_token = primary_grpc.x_token;
@@ -210,10 +211,8 @@ impl GeyserSubscriber {
             Self::reset_slot_metrics();
 
             // Check for shutdown before attempting connection
-            match shutdown_rx.try_recv() {
-                Ok(()) => return Ok(()),
-                Err(oneshot::error::TryRecvError::Closed) => return Ok(()),
-                Err(oneshot::error::TryRecvError::Empty) => {} // Continue
+            if cancellation_token.is_cancelled() {
+                return Ok(());
             }
 
             // Try to open connection with timeout
@@ -242,6 +241,7 @@ impl GeyserSubscriber {
                 &block_meta_tx,
                 &transactions_tx,
                 include_transactions,
+                cancellation_token.clone(),
             )
             .await
             {
@@ -263,34 +263,46 @@ impl GeyserSubscriber {
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
         transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
         include_transactions: bool,
+        cancellation_token: CancellationToken,
     ) -> Result<()>
     where
         S: Stream<Item = std::result::Result<SubscribeUpdate, Status>> + Unpin,
     {
         let mut slot_tracking = BTreeMap::<Slot, SlotTrackingInfo>::new();
 
-        while let Some(message) = stream.next().await {
-            match message {
-                Ok(msg) => {
-                    Self::handle_grpc_message(
-                        msg,
-                        &mut slot_tracking,
-                        slots_tx,
-                        block_meta_tx,
-                        transactions_tx,
-                        include_transactions,
-                    )
-                    .await?;
-
-                    metrics::set_slot_tracking_btreemap_size(slot_tracking.len());
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    info!("gRPC stream processing: cancellation token triggered, shutting down...");
+                    return Ok(());
                 }
-                Err(error) => {
-                    return Err(GeyserError::StreamError(error));
+
+                // Prioritize stream processing
+                message = stream.next() => {
+                    match message {
+                        Some(Ok(msg)) => {
+                            Self::handle_grpc_message(
+                                msg,
+                                &mut slot_tracking,
+                                slots_tx,
+                                block_meta_tx,
+                                transactions_tx,
+                                include_transactions,
+                            )
+                            .await?;
+
+                            metrics::set_slot_tracking_btreemap_size(slot_tracking.len());
+                        }
+                        Some(Err(error)) => {
+                            return Err(GeyserError::StreamError(error));
+                        }
+                        None => {
+                            return Err(GeyserError::StreamEnded);
+                        }
+                    }
                 }
             }
         }
-
-        Err(GeyserError::StreamEnded)
     }
 
     async fn handle_grpc_message(
@@ -736,11 +748,11 @@ pub trait GeyserStreams {
 #[async_trait::async_trait]
 impl GeyserStreams for GeyserSubscriber {
     fn subscribe_slots(&self) -> broadcast::Receiver<SlotUpdateWithStatus> {
-        self.slots_tx.subscribe()
+        self.slots_rx.resubscribe()
     }
 
     fn subscribe_block_meta(&self) -> broadcast::Receiver<BlockMetaWithCommitment> {
-        self.block_meta_tx.subscribe()
+        self.block_meta_rx.resubscribe()
     }
 
     async fn subscribe_transactions(&self) -> Option<mpsc::Receiver<GrpcUpdateMessage>> {

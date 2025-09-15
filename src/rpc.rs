@@ -51,7 +51,7 @@ impl fmt::Debug for RpcServer {
 }
 
 impl RpcServer {
-    pub async fn new(addr: SocketAddr, server_type: RpcServerType) -> anyhow::Result<Self> {
+    pub async fn new(addr: SocketAddr, server_type: RpcServerType) -> Self {
         let server_type_str = match server_type {
             RpcServerType::Admin { .. } => "admin",
             RpcServerType::SolanaLike { .. } => "solana-like",
@@ -111,12 +111,13 @@ impl RpcServer {
                     .map(|server| server.start(rpc_server_impl.into_rpc()))
             }
         }
-        .with_context(|| format!("Failed to start HTTP server at {addr}"))?;
+        .with_context(|| format!("Failed to start HTTP server at {addr}"))
+        .expect("Failed to start HTTP server");
         info!("started RPC {server_type_str} server on {addr}");
 
-        Ok(Self {
+        Self {
             server_handle: Arc::new(StdMutex::new(Some(server_handle))),
-        })
+        }
     }
 
     pub const fn create_solana_like_rpc_server_impl(

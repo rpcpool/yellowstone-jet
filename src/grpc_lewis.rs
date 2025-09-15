@@ -19,6 +19,7 @@ use {
         time::{SystemTime, UNIX_EPOCH},
     },
     tokio::{sync::mpsc, time::Duration},
+    tokio_util::sync::CancellationToken,
     tonic::transport::{Channel, Endpoint},
     tracing::{debug, error, info, warn},
 };
@@ -162,6 +163,7 @@ impl LewisEventHandler {
 
 pub fn create_lewis_pipeline(
     config: Option<ConfigLewisEvents>,
+    cancellation_token: CancellationToken,
 ) -> (
     Option<Arc<LewisEventHandler>>,
     Option<impl Future<Output = Result<(), LewisClientError>> + Send>,
@@ -174,7 +176,7 @@ pub fn create_lewis_pipeline(
     let jet_id = config.jet_id.clone().unwrap_or_default();
 
     let handler = Arc::new(LewisEventHandler { tx, jet_id });
-    let fut = run_lewis_client(config, rx);
+    let fut = run_lewis_client(config, rx, cancellation_token);
 
     info!("Lewis event pipeline created");
     (Some(handler), Some(fut))
@@ -183,6 +185,7 @@ pub fn create_lewis_pipeline(
 async fn run_lewis_client(
     config: ConfigLewisEvents,
     mut rx: mpsc::Receiver<Event>,
+    cancellation_token: CancellationToken,
 ) -> Result<(), LewisClientError> {
     let mut attempt = 0;
 
@@ -195,8 +198,12 @@ async fn run_lewis_client(
         if attempt == 0 {
             backoff.init();
         }
+        if cancellation_token.is_cancelled() {
+            info!("Lewis client cancellation requested, exiting");
+            return Ok(());
+        }
 
-        match connect_and_stream(&config, &mut rx).await {
+        match connect_and_stream(&config, &mut rx, cancellation_token.clone()).await {
             Ok(()) => {
                 info!("Lewis event stream completed normally");
                 backoff.reset();
@@ -244,6 +251,7 @@ async fn create_channel(config: &ConfigLewisEvents) -> Result<Channel, LewisClie
 async fn connect_and_stream(
     config: &ConfigLewisEvents,
     rx: &mut mpsc::Receiver<Event>,
+    cancellation_token: CancellationToken,
 ) -> Result<(), LewisClientError> {
     debug!("Connecting to Lewis at {}", config.endpoint);
 
@@ -276,16 +284,21 @@ async fn connect_and_stream(
         if let Some(deadline) = stream_deadline {
             if tokio::time::Instant::now() >= deadline {
                 warn!("Stream timeout reached after {:?}", config.stream_timeout);
-                if !batch.is_empty() {
-                    send_batch(&mut tx, &mut batch).await?;
-                }
                 break;
             }
         }
 
         tokio::select! {
+            // Check for cancellation
+            _ = cancellation_token.cancelled() => {
+                break;
+            }
             // Handle incoming events
-            Some(event) = rx.recv() => {
+            maybe = rx.recv() => {
+                let Some(event) = maybe else {
+                    debug!("Event channel closed, finishing stream");
+                    break;
+                };
                 batch.push(event);
 
                 if batch.len() >= config.batch_size_threshold as usize {
@@ -308,7 +321,6 @@ async fn connect_and_stream(
                     Ok(resp) => {
                         let _ack: EventAck = resp.into_inner();
                         info!("Lewis stream completed with acknowledgment");
-
                         // Send any remaining events before returning
                         if !batch.is_empty() {
                             send_batch(&mut tx, &mut batch).await?;
@@ -321,14 +333,10 @@ async fn connect_and_stream(
                     }
                 }
             }
-
-            else => {
-                if !batch.is_empty() {
-                    send_batch(&mut tx, &mut batch).await?;
-                }
-                break;
-            }
         }
+    }
+    if !batch.is_empty() {
+        send_batch(&mut tx, &mut batch).await?;
     }
 
     drop(tx);

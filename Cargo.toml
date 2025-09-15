@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "14.6.0"
+version = "14.6.1"
 authors = ["Triton One"]
 edition = "2024"
 description = "Yellowstone Jet"
@@ -101,6 +101,7 @@ yellowstone-grpc-client = "7"
 yellowstone-grpc-proto = "7"
 yellowstone-shield-store = "~0.5.2"
 yellowstone-vixen = "0.2.0"
+tokio-util = "0.7.16"
 
 [[bin]]
 name = "lewis-dummy-server"

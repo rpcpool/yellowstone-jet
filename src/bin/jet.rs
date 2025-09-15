@@ -15,6 +15,7 @@ use {
     solana_quic_definitions::QUIC_MAX_TIMEOUT,
     solana_rpc_client::http_sender::HttpSender,
     std::{
+        collections::HashMap,
         fs,
         path::PathBuf,
         sync::{
@@ -25,9 +26,11 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{SignalKind, signal},
-        sync::{Mutex, oneshot, watch},
-        task::JoinHandle,
+        sync::{Mutex, watch},
+        task::{self, JoinHandle, JoinSet},
+        time::Instant,
     },
+    tokio_util::sync::CancellationToken,
     tracing::{error, info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
@@ -48,7 +51,6 @@ use {
         solana::sanitize_transaction_support_check,
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
-        task_group::TaskGroup,
         transaction_handler::TransactionHandler,
         transactions::{
             AlwaysAllowTransactionPolicyStore, GrpcRootedTxReceiver, QuicGatewayBidi,
@@ -178,6 +180,7 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
 async fn keep_stake_metrics_up_to_date_task(
     mut stake_info_identity_observer: watch::Receiver<Pubkey>,
     stake_info_map: StakeInfoMap,
+    cancellation_token: CancellationToken,
 ) {
     loop {
         let current_identy = *stake_info_identity_observer.borrow_and_update();
@@ -201,6 +204,9 @@ async fn keep_stake_metrics_up_to_date_task(
         );
 
         tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                break;
+            }
             _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
             result = stake_info_identity_observer.changed() => {
                 result.expect("stake_info_identity_observer changed failed");
@@ -210,9 +216,10 @@ async fn keep_stake_metrics_up_to_date_task(
 }
 
 async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
-    let mut tg = TaskGroup::default();
+    let mut tg = JoinSet::default();
+    let mut tg_name_map = HashMap::<task::Id, String>::new();
     metrics::init();
-
+    let jet_cancellation_token = CancellationToken::new();
     if let Some(identity) = config.identity.expected {
         metrics::quic_set_identity_expected(identity);
     }
@@ -253,7 +260,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let (stake_info_map, stake_info_bg_fut) = spawn_cache_stake_info_map(
         rpc_client,
         config.upstream.stake_update_interval,
-        stake::SpawnMode::Detached,
+        None,
+        jet_cancellation_token.child_token(),
     )
     .await;
 
@@ -273,21 +281,22 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         Arc::new(AlwaysAllowTransactionPolicyStore)
     };
 
-    let (shutdown_geyser_tx, shutdown_geyser_rx) = oneshot::channel();
-    let (geyser, mut geyser_handle) = GeyserSubscriber::new(
-        shutdown_geyser_rx,
+    let (geyser, geyser_handle) = GeyserSubscriber::new(
         config.upstream.grpc.clone(),
         !config.send_transaction_service.relay_only_mode,
+        jet_cancellation_token.child_token(),
     );
-    let blockhash_queue = BlockhashQueue::new(&geyser);
+    let blockhash_queue = BlockhashQueue::new(geyser.subscribe_block_meta());
 
     let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
         config.upstream.rpc.clone(),
     ));
+
     let (cluster_tpu_info, cluster_tpu_info_tasks) = ClusterTpuInfo::new(
         rpc_client,
         geyser.subscribe_slots(),
         config.upstream.cluster_nodes_update_interval,
+        jet_cancellation_token.child_token(),
     )
     .await;
 
@@ -342,9 +351,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         connection_predictor,
     );
 
-    tg.spawn_cancelable("gateway", async move {
+    let ah = tg.spawn(async move {
         gateway_join_handle.await.expect("quic gateway join handle");
     });
+    tg_name_map.insert(ah.id(), "quic_gateway".to_string());
 
     let quic_gateway_bidi = QuicGatewayBidi {
         sink: gateway_tx_sink,
@@ -378,7 +388,10 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     };
 
     // Set up Lewis event tracking pipeline
-    let (lewis_handler, lewis_fut) = create_lewis_pipeline(config.lewis_events.clone());
+    let (lewis_handler, lewis_fut) = create_lewis_pipeline(
+        config.lewis_events.clone(),
+        jet_cancellation_token.child_token(),
+    );
 
     let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
@@ -390,10 +403,8 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         lewis_handler,
     );
 
-    tg.spawn_cancelable(
-        "transaction_forwarder",
-        async move { tx_forwader.run().await },
-    );
+    let ah = tg.spawn(async move { tx_forwader.run().await });
+    tg_name_map.insert(ah.id(), "transaction_fanout".to_string());
 
     let mut jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
         vec![Box::new(gateway_identity_updater)];
@@ -415,10 +426,11 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             tx_handler: tx_handler.clone(),
         },
     )
-    .await?;
+    .await;
 
     let jet_gw_listener = match config.jet_gateway {
         Some(config_jet_gateway) => {
+            let jet_gw_cancellation_token = jet_cancellation_token.child_token();
             if config_jet_gateway.endpoints.is_empty() {
                 warn!("no endpoints for jet-gateway with existed config");
                 None
@@ -429,7 +441,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                 info!("starting jet-gateway listener");
                 let stake_info = stake_info_map.clone();
                 let jet_gw_identity = initial_identity.insecure_clone();
-                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(tx_handler.clone());
+                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(tx_handler);
                 let (jet_gw_identity_updater, jet_gw_fut) = spawn_jet_gw_listener(
                     stake_info,
                     jet_gw_config,
@@ -437,12 +449,14 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                     expected_identity,
                     config.features,
                     jet_gw_identity,
+                    jet_gw_cancellation_token,
                 );
                 jet_identity_sync_members.push(Box::new(jet_gw_identity_updater));
                 Some(jet_gw_fut.boxed())
             }
         }
         _ => {
+            drop(tx_handler);
             warn!("Skipping jet-gateway listener, no config provided");
             None
         }
@@ -461,94 +475,138 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
             cluster_tpu_info: Arc::new(cluster_tpu_info),
         },
     )
-    .await?;
+    .await;
 
-    tg.spawn_cancelable("stake_cache_refresh_task", stake_info_bg_fut);
+    let ah = tg.spawn(stake_info_bg_fut);
+    tg_name_map.insert(ah.id(), "stake_refresh_task".to_string());
 
-    tg.spawn_cancelable(
-        "stake_info_metrics_update",
-        keep_stake_metrics_up_to_date_task(identity_observer.clone(), stake_info_map.clone()),
-    );
+    let ah = tg.spawn(keep_stake_metrics_up_to_date_task(
+        identity_observer.clone(),
+        stake_info_map.clone(),
+        jet_cancellation_token.child_token(),
+    ));
+    tg_name_map.insert(ah.id(), "stake_info_metrics_update".to_string());
 
     // Spawn Lewis client task if configured
     if let Some(fut) = lewis_fut {
-        tg.spawn_with_shutdown("lewis_client", |mut stop| async move {
-            tokio::select! {
-                result = fut => {
-                    if let Err(e) = result {
-                        error!("Lewis client error: {}", e);
-                    }
+        let ah = tg.spawn(
+            fut.inspect(|result| {
+                if let Err(e) = result {
+                    error!("Lewis client error: {e}");
                 }
-                _ = &mut stop => {
-                    info!("Shutting down Lewis client");
-                }
-            }
-        });
+            })
+            .map(drop),
+        );
+        tg_name_map.insert(ah.id(), "lewis_client".to_string());
     }
 
-    tg.spawn_with_shutdown("geyser", |mut stop| async move {
-        tokio::select! {
-            result = &mut geyser_handle => {
-                result.expect("geyser handle").expect("geyser result");
-            },
-            _ = &mut stop => {
-                let _ = shutdown_geyser_tx.send(());
-                geyser_handle.await.expect("geyser handle").expect("geyser result");
-            },
-        }
+    let ah = tg.spawn(async move {
+        geyser_handle
+            .await
+            .expect("geyser handle")
+            .expect("geyser result");
     });
+    tg_name_map.insert(ah.id(), "geyser".to_string());
 
-    tg.spawn_with_shutdown("blockhash_queue", |mut stop| async move {
-        tokio::select! {
-            result = blockhash_queue.clone().wait_shutdown() => {
-                result.expect("blockhash_queue");
-            },
-            _ = &mut stop => {
-                blockhash_queue.shutdown();
-                blockhash_queue.wait_shutdown().await.expect("blockhash_queue shutdown");
-            },
-        }
+    let ah = tg.spawn(async move {
+        blockhash_queue
+            .wait_shutdown()
+            .await
+            .expect("blockhash queue shutdown");
     });
+    tg_name_map.insert(ah.id(), "blockhash_queue".to_string());
 
-    tg.spawn_cancelable("cluster_tpu_info", async move {
+    let ah = tg.spawn(async move {
         cluster_tpu_info_tasks.await;
     });
+    tg_name_map.insert(ah.id(), "cluster_tpu_info".to_string());
 
-    tg.spawn_cancelable("rooted_transactions", async move {
+    let ah = tg.spawn(async move {
         rooted_tx_loop_fut.await;
     });
+    tg_name_map.insert(ah.id(), "rooted_tx_receiver".to_string());
 
     if let Some(jet_gw_listener_fut) = jet_gw_listener {
-        tg.spawn_cancelable("jet_gw_listener", jet_gw_listener_fut);
+        let ah = tg.spawn(jet_gw_listener_fut);
+        tg_name_map.insert(ah.id(), "jet_gw_listener".to_string());
     }
 
     if let Some(config_prometheus) = config.prometheus {
-        let push_gw_task =
-            spawn_push_prometheus_metrics(identity_observer.clone(), config_prometheus).await?;
-        tg.spawn_cancelable("prometheus_push_gw", async move {
+        let push_gw_task = spawn_push_prometheus_metrics(
+            identity_observer.clone(),
+            config_prometheus,
+            jet_cancellation_token.child_token(),
+        )
+        .await;
+        let ah = tg.spawn(async move {
             push_gw_task.await.expect("prometheus_push_gw");
-        })
+        });
+        tg_name_map.insert(ah.id(), "prometheus_push_gw".to_string());
     }
 
-    tg.spawn_cancelable("SIGINT", async move {
+    let ah = tg.spawn(async move {
         sigint.recv().await;
         info!("SIGINT received...");
     });
 
+    tg_name_map.insert(ah.id(), "SIGINT".to_string());
+
     local
         .run_until(async {
-            let (first, result, rest) = tg.wait_one().await.expect("task group empty");
+            let Some(result) = tg.join_next_with_id().await else {
+                panic!("no task in the task group can ever happen");
+            };
+            macro_rules! get_id {
+                ($joinset_join_result_with_id:expr) => {
+                    match $joinset_join_result_with_id {
+                        Ok((id, _)) => *id,
+                        Err(e) => e.id().clone(),
+                    }
+                };
+            }
+            jet_cancellation_token.cancel();
+            let task_id = get_id!(&result);
+            let first = tg_name_map
+                .remove(&task_id)
+                .unwrap_or_else(|| format!("unknown task {task_id:?}"));
+            warn!("shutting down, task {first} finished first with: {result:?}");
             rpc_admin.shutdown();
             rpc_solana_like.shutdown();
 
-            warn!("first task group finished {first} with  {result:?}");
-
-            for (name, result) in rest {
-                if let Err(e) = result {
-                    tracing::error!("task: {name} shutdown with: {e:?}");
+            const SHUTDOWN_DURATION: std::time::Duration = std::time::Duration::from_secs(10);
+            let shutdown_deadline = Instant::now() + SHUTDOWN_DURATION;
+            loop {
+                tokio::select! {
+                    Some(result) = tg.join_next_with_id() => {
+                        let task_id = get_id!(&result);
+                        let remaining_tasks = tg.len();
+                        let name = tg_name_map
+                            .remove(&task_id)
+                            .unwrap_or_else(|| format!("unknown task {task_id:?}"));
+                        if result.is_ok() {
+                            info!("task -- {name} : finished cleanly, {remaining_tasks} remaining");
+                        } else {
+                            warn!("task -- {name} : finished with error: {result:?}, {remaining_tasks} remaining");
+                        }
+                        if remaining_tasks == 0 {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep_until(shutdown_deadline) => {
+                        warn!("some tasks did not shut down in time, aborting them");
+                        break;
+                    }
+                    else => {
+                        break;
+                    }
                 }
             }
-
+            if !tg.is_empty() {
+                for (_id, name) in tg_name_map.iter() {
+                    warn!("task -- {name} : did not finish in time, aborting");
+                }
+            }
+            tg.abort_all();
             Ok(())
         })
         .await
@@ -557,27 +615,31 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 async fn spawn_push_prometheus_metrics(
     mut jet_identity: watch::Receiver<Pubkey>,
     config: PrometheusConfig,
-) -> anyhow::Result<JoinHandle<()>> {
+    cancellation_token: CancellationToken,
+) -> JoinHandle<()> {
     let prometheus_url = Url::parse(&config.url).expect("");
     let mut interval = tokio::time::interval(config.push_interval);
     let client = Client::new();
 
-    Ok(tokio::spawn(async move {
+    tokio::spawn(async move {
         loop {
             tokio::select! {
-            _ = interval.tick() => {
-                let current_identity = *jet_identity.borrow_and_update();
+                _ = interval.tick() => {
+                    let current_identity = *jet_identity.borrow_and_update();
 
-                if let Err(error) = client
-                    .post(prometheus_url.clone())
-                    .header("Content-Type", "text/plain")
-                    .body(inject_job_label(&collect_to_text(), "jet", &current_identity.to_string()))
-                    .send()
-                    .await {
-                        warn!(?error, "Error pushing metrics");
-                    }
+                    if let Err(error) = client
+                        .post(prometheus_url.clone())
+                        .header("Content-Type", "text/plain")
+                        .body(inject_job_label(&collect_to_text(), "jet", &current_identity.to_string()))
+                        .send()
+                        .await {
+                            warn!(?error, "Error pushing metrics");
+                        }
+                }
+                _ = cancellation_token.cancelled() => {
+                    break;
                 }
             }
         }
-    }))
+    })
 }
