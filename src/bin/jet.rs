@@ -216,7 +216,6 @@ async fn keep_stake_metrics_up_to_date_task(
 }
 
 async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
-    // let mut tg = TaskGroup::default();
     let mut tg = JoinSet::default();
     let mut tg_name_map = HashMap::<task::Id, String>::new();
     metrics::init();
