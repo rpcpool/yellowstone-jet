@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "14.6.1"
+version = "14.6.2"
 authors = ["Triton One"]
 edition = "2024"
 description = "Yellowstone Jet"

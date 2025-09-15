@@ -78,7 +78,6 @@ impl JetIdentityUpdater for JetIdentitySyncGroup {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use {
@@ -89,7 +88,7 @@ mod test {
     };
 
     struct TestMember {
-        id: usize,
+        _id: usize,
         pause_count: Arc<AtomicUsize>,
     }
 
@@ -115,7 +114,7 @@ mod test {
         let members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync>> = (0..member_count)
             .map(|i| {
                 Box::new(TestMember {
-                    id: i,
+                    _id: i,
                     pause_count: Arc::clone(&pause_count),
                 }) as Box<dyn JetIdentitySyncMember + Send + Sync>
             })
@@ -129,7 +128,9 @@ mod test {
         assert_eq!(pause_count.load(Ordering::SeqCst), 0);
 
         let new_identity = Keypair::new();
-        sync_group.update_identity(new_identity.insecure_clone()).await;
+        sync_group
+            .update_identity(new_identity.insecure_clone())
+            .await;
 
         assert_eq!(sync_group.get_identity().await, new_identity.pubkey());
         assert_eq!(pause_count.load(Ordering::SeqCst), member_count);
