@@ -220,6 +220,7 @@ pub struct SentOk {
 /// Metadata about an inflight connection attempt to a remote peer.
 ///
 struct ConnectingMeta {
+    current_client_identity: Pubkey,
     remote_peer_identity: Pubkey,
     connection_attempt: usize,
     endpoint_idx: usize,
@@ -647,6 +648,8 @@ impl ConnectingTask {
 struct QuicTxSenderWorker {
     remote_peer: Pubkey,
     connection: Connection,
+    /// The current client identity being used for the connection
+    current_client_identity: Pubkey,
     incoming_rx: mpsc::Receiver<GatewayTransaction>,
     output_tx: mpsc::UnboundedSender<GatewayResponse>,
     tx_queue: VecDeque<(GatewayTransaction, usize)>,
@@ -732,9 +735,10 @@ impl QuicTxSenderWorker {
                         tx_sig,
                     };
                     tracing::warn!(
-                        "Giving up sending transaction: {} to remote peer: {} after {} attempts: {:?}",
+                        "Giving up sending transaction: {} to remote peer: {}, client identity: {}, after {} attempts: {:?}",
                         tx_sig,
                         self.remote_peer,
+                        self.current_client_identity,
                         attempt,
                         e
                     );
@@ -1083,6 +1087,7 @@ impl TokioQuicGatewayRuntime {
         }
         .run();
         let meta = ConnectingMeta {
+            current_client_identity: self.identity.pubkey(),
             remote_peer_identity,
             connection_attempt: attempt,
             endpoint_idx,
@@ -1189,6 +1194,7 @@ impl TokioQuicGatewayRuntime {
         let worker = QuicTxSenderWorker {
             remote_peer: remote_peer_identity,
             connection,
+            current_client_identity: self.identity.pubkey(),
             incoming_rx: rx,
             output_tx,
             tx_queue: self
@@ -1230,16 +1236,31 @@ impl TokioQuicGatewayRuntime {
         match result {
             Ok((task_id, result)) => {
                 let ConnectingMeta {
+                    current_client_identity,
                     remote_peer_identity,
                     connection_attempt,
                     endpoint_idx,
                     created_at,
-                } = self.connecting_meta.remove(&task_id).unwrap();
+                } = self
+                    .connecting_meta
+                    .remove(&task_id)
+                    .expect("connecting_meta");
                 metrics::jet::observe_quic_gw_connection_time(created_at.elapsed());
                 self.endpoints_usage[endpoint_idx]
                     .connected_remote_peers
                     .remove(&remote_peer_identity);
                 let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
+
+                if self.identity.pubkey() != current_client_identity {
+                    // THIS SHOULD NOT HAPPEN SINCE ON IDENTITY CHANGE WE ABORT ALL CONNECTING TASKS
+                    // BUT JUST IN CASE, WE CHECK AGAIN.
+                    tracing::warn!(
+                        "Abandoning connection attempt to remote peer: {remote_peer_identity} since the client identity has changed"
+                    );
+                    self.spawn_connecting(remote_peer_identity, connection_attempt);
+                    return;
+                }
+
                 match result {
                     Ok(conn) => {
                         tracing::debug!("Connected to remote peer: {:?}", remote_peer_identity);
@@ -1266,17 +1287,20 @@ impl TokioQuicGatewayRuntime {
                                 // This should never happen, but if it does, we panic.
                                 // The endpoint is stopping, so we cannot connect to the remote peer.
                                 panic!(
-                                    "Endpoint is stopping, cannot connect to remote peer: {remote_peer_identity}"
+                                    "Endpoint is stopping, cannot connect to remote peer: {remote_peer_identity}, with identity: {current_client_identity}"
                                 );
                             }
                             ConnectingError::ConnectionError(_)
                                 if connection_attempt < self.config.max_connection_attempts =>
                             {
-                                self.spawn_connecting(remote_peer_identity, connection_attempt + 1);
+                                self.spawn_connecting(
+                                    remote_peer_identity,
+                                    connection_attempt.saturating_add(1),
+                                );
                             }
                             whatever => {
                                 tracing::warn!(
-                                    "Failed to connect to remote peer: {remote_peer_identity}: {whatever:?}"
+                                    "Failed to connect to remote peer: {remote_peer_identity}, with identity: {current_client_identity}, error: {whatever:?}"
                                 );
                                 self.unreachable_peer(remote_peer_identity);
                             }
@@ -1287,6 +1311,7 @@ impl TokioQuicGatewayRuntime {
             Err(join_err) => {
                 metrics::jet::incr_quic_gw_connection_failure_cnt();
                 let ConnectingMeta {
+                    current_client_identity: _,
                     remote_peer_identity,
                     connection_attempt: _,
                     endpoint_idx,
