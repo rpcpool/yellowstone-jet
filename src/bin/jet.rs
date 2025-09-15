@@ -576,7 +576,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
             const SHUTDOWN_DURATION: std::time::Duration = std::time::Duration::from_secs(10);
             let shutdown_deadline = Instant::now() + SHUTDOWN_DURATION;
-            
             loop {
                 tokio::select! {
                     Some(result) = tg.join_next_with_id() => {
@@ -603,7 +602,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
                     }
                 }
             }
-            if tg.len() > 0 {
+            if !tg.is_empty() {
                 for (_id, name) in tg_name_map.iter() {
                     warn!("task -- {name} : did not finish in time, aborting");
                 }

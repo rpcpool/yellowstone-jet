@@ -1,6 +1,6 @@
 use {
     crate::{
-        grpc_geyser::{BlockMetaWithCommitment},
+        grpc_geyser::BlockMetaWithCommitment,
         metrics::jet as metrics,
         util::{
             BlockHeight, CommitmentLevel, WaitShutdown, WaitShutdownJoinHandleResult,
@@ -40,18 +40,13 @@ impl WaitShutdown for BlockhashQueue {
 
 impl BlockhashQueue {
     // TODO: make use Stream generic
-    pub fn new(grpc: broadcast::Receiver<BlockMetaWithCommitment>) -> Self
-    {
+    pub fn new(grpc: broadcast::Receiver<BlockMetaWithCommitment>) -> Self {
         let shutdown = Arc::new(Notify::new());
         let blockmeta_map = Arc::new(StdRwLock::new(HashMap::new()));
         Self {
             blockmeta_map: Arc::clone(&blockmeta_map),
             shutdown: Arc::clone(&shutdown),
-            join_handle: Self::spawn(Self::subscribe(
-                shutdown,
-                blockmeta_map,
-                grpc,
-            )),
+            join_handle: Self::spawn(Self::subscribe(shutdown, blockmeta_map, grpc)),
         }
     }
 
