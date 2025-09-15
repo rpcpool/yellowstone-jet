@@ -14,6 +14,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Fixes
 
+- `max_streams` set to 0 is not interpreted as `None`
 - Fixed SIGINT [#77](https://github.com/rpcpool/yellowstone-jet/issues/77)
 
 ## [14.6.0]

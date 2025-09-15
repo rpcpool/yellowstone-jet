@@ -27,6 +27,7 @@ upstream:
 # jet-gateway endpoints
 # jet_gateway:
 #   # Max transactions requested from proxy (every 100ms), by default calculated from stake value
+#   # If set to 0 or null then stake based calculation is used
 #   max_streams: null
 #   # gRPC service endpoints, attempt to connect in round-robin fashion
 #   endpoints:

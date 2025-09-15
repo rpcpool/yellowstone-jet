@@ -6,10 +6,9 @@ use {
     },
     anyhow::Context,
     serde::{
-        Deserialize,
-        de::{self, Deserializer},
+        de::{self, Deserializer}, Deserialize
     },
-    solana_keypair::{Keypair, read_keypair_file},
+    solana_keypair::{read_keypair_file, Keypair},
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_pubkey::Pubkey,
     solana_quic_definitions::{
@@ -244,6 +243,7 @@ pub struct ConfigJetGatewayClient {
     /// Maximum number of permit that can be received from jet-gateway, overrides staked-based stream computation.
     /// If set to `None`, then stream size would be computed based on stake.
     /// It is clipped to the maximum staked-based stream size.
+    #[serde(default, deserialize_with = "ConfigJetGatewayClient::deserialize_maybe_nonzero_u64")]
     pub max_streams: Option<NonZeroU64>,
 
     ///
@@ -254,6 +254,15 @@ pub struct ConfigJetGatewayClient {
 }
 
 impl ConfigJetGatewayClient {
+
+    fn deserialize_maybe_nonzero_u64<'de, D>(deserializer: D) -> Result<Option<NonZeroU64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // If 0 then fallback to None.
+        Ok(Option::<u64>::deserialize(deserializer)?.and_then(NonZeroU64::new))
+    }
+
     const fn default_maximum_subscribe_attempts() -> Option<NonZeroUsize> {
         None
     }
@@ -821,4 +830,50 @@ impl PrometheusConfig {
     const fn default_push_interval() -> Duration {
         Duration::from_secs(10)
     }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deser_jet_gateway_client() {
+        let yaml = r#"
+        max_streams: null
+        endpoints:
+            - http://127.0.0.1:8002
+        # Access token
+        x_token: null
+        "#;
+
+        let cfg: ConfigJetGatewayClient = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.endpoints,
+            vec!["http://127.0.0.1:8002"]
+        );
+        assert_eq!(cfg.max_streams, None);
+        assert_eq!(cfg.x_token, None);
+
+
+        // Interpret 0 as None
+        let yaml = r#"
+        max_streams: 0
+        endpoints:
+            - http://127.0.0.1:8002
+        # Access token
+        x_token: null
+        "#;
+
+        let cfg: ConfigJetGatewayClient = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.endpoints,
+            vec!["http://127.0.0.1:8002"]
+        );
+        assert_eq!(cfg.max_streams, None);
+        assert_eq!(cfg.x_token, None);
+
+        
+    }
+
 }
