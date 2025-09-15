@@ -3,19 +3,28 @@ use {
         grpc_geyser::SlotUpdateWithStatus,
         metrics::jet as metrics,
         util::{IncrementalBackoff, SlotStatus},
-    }, futures::future::FutureExt, solana_client::{
+    },
+    futures::future::FutureExt,
+    solana_client::{
         client_error::Result as ClientResult,
         nonblocking::rpc_client::RpcClient,
         rpc_response::{RpcContactInfo, RpcLeaderSchedule},
-    }, solana_clock::{Slot, NUM_CONSECUTIVE_LEADER_SLOTS}, solana_epoch_schedule::EpochSchedule, solana_pubkey::Pubkey, std::{
+    },
+    solana_clock::{NUM_CONSECUTIVE_LEADER_SLOTS, Slot},
+    solana_epoch_schedule::EpochSchedule,
+    solana_pubkey::Pubkey,
+    std::{
         collections::HashMap,
         future::Future,
         net::SocketAddr,
         sync::{Arc, RwLock as StdRwLock},
-    }, tokio::{
+    },
+    tokio::{
         sync::broadcast,
-        time::{sleep, Duration, Instant},
-    }, tokio_util::sync::CancellationToken, tracing::{debug, info, warn}
+        time::{Duration, Instant, sleep},
+    },
+    tokio_util::sync::CancellationToken,
+    tracing::{debug, info, warn},
 };
 
 #[async_trait::async_trait]

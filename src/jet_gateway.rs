@@ -8,7 +8,8 @@ use {
     solana_pubkey::Pubkey,
     solana_signer::Signer,
     std::{future, sync::Arc},
-    tokio::sync::mpsc::{self}, tokio_util::sync::CancellationToken,
+    tokio::sync::mpsc::{self},
+    tokio_util::sync::CancellationToken,
 };
 
 struct IdentitySyncCommand {

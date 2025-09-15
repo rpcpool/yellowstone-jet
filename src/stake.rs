@@ -3,11 +3,11 @@
 /// TODO: CREATE A COMMON LIB
 use {
     crate::solana_rpc_utils::SolanaRpcErrorKindExt,
-    futures::{stream, StreamExt},
+    futures::{StreamExt, stream},
     solana_client::{nonblocking::rpc_client::RpcClient, rpc_response::RpcVoteAccountStatus},
     solana_pubkey::Pubkey,
     solana_quic_definitions::QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
-    solana_streamer::nonblocking::quic::{compute_max_allowed_uni_streams, ConnectionPeerType},
+    solana_streamer::nonblocking::quic::{ConnectionPeerType, compute_max_allowed_uni_streams},
     std::{
         collections::HashMap,
         future::Future,
@@ -18,7 +18,8 @@ use {
         sync::{mpsc, oneshot},
         time::Instant,
     },
-    tokio_stream::wrappers::ReceiverStream, tokio_util::sync::CancellationToken,
+    tokio_stream::wrappers::ReceiverStream,
+    tokio_util::sync::CancellationToken,
 };
 
 pub fn stake_to_per100ms_limit(stake: u64, total_stake: u64) -> u64 {
@@ -574,7 +575,7 @@ pub mod tests {
             mock,
             std::time::Duration::from_secs(1),
             Some(cnc_rx),
-            cancellation_token
+            cancellation_token,
         )
         .await;
 

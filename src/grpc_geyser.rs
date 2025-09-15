@@ -3,23 +3,41 @@ use {
         config::ConfigUpstreamGrpc,
         metrics::jet as metrics,
         util::{BlockHeight, CommitmentLevel, IncrementalBackoff, SlotStatus},
-    }, futures::{
-        stream::{Stream, StreamExt}, FutureExt, TryFutureExt
-    }, maplit::hashmap, semver::{Version, VersionReq}, serde::Deserialize, solana_clock::Slot, solana_hash::{Hash, ParseHashError}, solana_signature::Signature, std::{
+    },
+    futures::{
+        FutureExt, TryFutureExt,
+        stream::{Stream, StreamExt},
+    },
+    maplit::hashmap,
+    semver::{Version, VersionReq},
+    serde::Deserialize,
+    solana_clock::Slot,
+    solana_hash::{Hash, ParseHashError},
+    solana_signature::Signature,
+    std::{
         collections::BTreeMap,
         future::Future,
         sync::Arc,
         time::{Duration, Instant},
-    }, tokio::{
-        sync::{broadcast, mpsc, Mutex},
+    },
+    tokio::{
+        sync::{Mutex, broadcast, mpsc},
         task::{JoinError, JoinHandle},
         time,
-    }, tokio_util::sync::CancellationToken, tonic::transport::channel::ClientTlsConfig, tracing::{debug, error, info, warn}, yellowstone_grpc_client::{GeyserGrpcClient, Interceptor}, yellowstone_grpc_proto::{
+    },
+    tokio_util::sync::CancellationToken,
+    tonic::transport::channel::ClientTlsConfig,
+    tracing::{debug, error, info, warn},
+    yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
+    yellowstone_grpc_proto::{
         prelude::{
-            subscribe_update::UpdateOneof, BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel, SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots, SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot, SubscribeUpdateTransactionStatus
+            BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel,
+            SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots,
+            SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta,
+            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
         },
         tonic::Status,
-    }
+    },
 };
 
 const QUEUE_SIZE_SLOT_UPDATE: usize = 10_000;
@@ -136,10 +154,10 @@ impl Future for GeyserHandle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GeyserSubscriber {
-    block_meta_tx: broadcast::Sender<BlockMetaWithCommitment>,
-    slots_tx: broadcast::Sender<SlotUpdateWithStatus>,
+    block_meta_rx: broadcast::Receiver<BlockMetaWithCommitment>,
+    slots_rx: broadcast::Receiver<SlotUpdateWithStatus>,
     transactions_rx: Arc<Mutex<Option<mpsc::Receiver<GrpcUpdateMessage>>>>,
 }
 
@@ -149,8 +167,8 @@ impl GeyserSubscriber {
         include_transactions: bool,
         cancellation_token: CancellationToken,
     ) -> (Self, GeyserHandle) {
-        let (slots_tx, _) = broadcast::channel(QUEUE_SIZE_SLOT_UPDATE);
-        let (block_meta_tx, _) = broadcast::channel(QUEUE_SIZE_BLOCKMETA_UPDATE);
+        let (slots_tx, slots_rx) = broadcast::channel(QUEUE_SIZE_SLOT_UPDATE);
+        let (block_meta_tx, block_meta_rx) = broadcast::channel(QUEUE_SIZE_BLOCKMETA_UPDATE);
 
         let (transactions_tx, transactions_rx) = mpsc::channel(QUEUE_SIZE_TRANSACTIONS);
         if !include_transactions {
@@ -170,8 +188,8 @@ impl GeyserSubscriber {
         };
 
         let geyser = Self {
-            slots_tx,
-            block_meta_tx,
+            slots_rx,
+            block_meta_rx,
             transactions_rx: Arc::new(Mutex::new(Some(transactions_rx))),
         };
 
@@ -184,7 +202,7 @@ impl GeyserSubscriber {
         block_meta_tx: broadcast::Sender<BlockMetaWithCommitment>,
         transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
         include_transactions: bool,
-        cancellation_token: CancellationToken
+        cancellation_token: CancellationToken,
     ) -> Result<()> {
         let endpoint = primary_grpc.endpoint;
         let x_token = primary_grpc.x_token;
@@ -730,11 +748,11 @@ pub trait GeyserStreams {
 #[async_trait::async_trait]
 impl GeyserStreams for GeyserSubscriber {
     fn subscribe_slots(&self) -> broadcast::Receiver<SlotUpdateWithStatus> {
-        self.slots_tx.subscribe()
+        self.slots_rx.resubscribe()
     }
 
     fn subscribe_block_meta(&self) -> broadcast::Receiver<BlockMetaWithCommitment> {
-        self.block_meta_tx.subscribe()
+        self.block_meta_rx.resubscribe()
     }
 
     async fn subscribe_transactions(&self) -> Option<mpsc::Receiver<GrpcUpdateMessage>> {

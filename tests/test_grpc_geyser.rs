@@ -1,13 +1,21 @@
 use {
-    futures::stream, solana_clock::Slot, solana_hash::Hash, solana_signature::Signature, tokio::sync::{broadcast, mpsc}, tokio_util::sync::CancellationToken, yellowstone_grpc_proto::{
+    futures::stream,
+    solana_clock::Slot,
+    solana_hash::Hash,
+    solana_signature::Signature,
+    tokio::sync::{broadcast, mpsc},
+    tokio_util::sync::CancellationToken,
+    yellowstone_grpc_proto::{
         prelude::{
-            subscribe_update::UpdateOneof, BlockHeight, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot, SubscribeUpdateTransactionStatus
+            BlockHeight, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot,
+            SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
         },
         tonic::Status,
-    }, yellowstone_jet::{
+    },
+    yellowstone_jet::{
         grpc_geyser::{GeyserSubscriber, GrpcUpdateMessage, TransactionReceived},
         util::{CommitmentLevel, SlotStatus},
-    }
+    },
 };
 
 /*
@@ -79,7 +87,7 @@ async fn test_block_meta_before_slot_update() {
         &block_meta_tx,
         &transactions_tx,
         true,
-        cancellation_token.clone()
+        cancellation_token.clone(),
     )
     .await;
 
@@ -121,7 +129,7 @@ async fn test_non_commitment_status_no_block_meta() {
         &block_meta_tx,
         &transactions_tx,
         true,
-        cancellation_token.clone()
+        cancellation_token.clone(),
     )
     .await;
 
@@ -169,7 +177,7 @@ async fn test_multiple_commitment_statuses() {
         &block_meta_tx,
         &transactions_tx,
         true,
-        cancellation_token.clone()
+        cancellation_token.clone(),
     )
     .await;
 
@@ -225,7 +233,7 @@ async fn test_slot_tracking_cleanup_on_finalized() {
         &block_meta_tx,
         &transactions_tx,
         true,
-        cancellation_token.clone()
+        cancellation_token.clone(),
     )
     .await;
 
@@ -304,7 +312,7 @@ async fn test_stream_error_handling() {
         &block_meta_tx,
         &transactions_tx,
         true,
-        cancellation_token.clone()
+        cancellation_token.clone(),
     )
     .await;
 

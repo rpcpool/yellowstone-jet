@@ -133,7 +133,7 @@ impl GrpcRootedTxReceiver {
                         continue;
                     },
                     Some(GrpcUpdateMessage::BlockMeta(blockmeta)) => blockmeta,
-                    None => panic!("RootedTransactions: gRPC streamed closed"),
+                    None => break,
                 }
             };
 
@@ -653,7 +653,7 @@ impl TransactionFanout {
                     match maybe {
                         Some(newtx) => self.fwd_tx(newtx),
                         None => {
-                            error!("new transactions channel is closed");
+                            tracing::warn!("transactions channel is closed");
                             break;
                         }
                     }
