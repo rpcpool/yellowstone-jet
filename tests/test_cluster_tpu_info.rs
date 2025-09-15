@@ -1,21 +1,14 @@
 use {
-    maplit::hashmap,
-    solana_client::{
+    maplit::hashmap, solana_client::{
         client_error::Result as ClientResult,
         rpc_response::{RpcContactInfo, RpcLeaderSchedule},
-    },
-    solana_clock::Slot,
-    solana_epoch_schedule::EpochSchedule,
-    solana_pubkey::Pubkey,
-    std::{collections::HashMap, sync::Arc, time::Duration},
-    tokio::sync::{Mutex, RwLock, broadcast, mpsc},
-    yellowstone_jet::{
+    }, solana_clock::Slot, solana_epoch_schedule::EpochSchedule, solana_pubkey::Pubkey, std::{collections::HashMap, sync::Arc, time::Duration}, tokio::sync::{broadcast, mpsc, Mutex, RwLock}, tokio_util::sync::CancellationToken, yellowstone_jet::{
         cluster_tpu_info::{ClusterTpuInfo, ClusterTpuRpcClient},
         grpc_geyser::{
             BlockMetaWithCommitment, GeyserStreams, GrpcUpdateMessage, SlotUpdateWithStatus,
         },
         util::SlotStatus,
-    },
+    }
 };
 
 const fn create_contact_info(pubkey: String) -> RpcContactInfo {
@@ -41,10 +34,13 @@ const fn create_contact_info(pubkey: String) -> RpcContactInfo {
 async fn test_slot_update() {
     let mock_grpc = MockGrpc::new();
     let rpc = MockRpc::default();
+
+    let cancellation_token = CancellationToken::new();
     let (cluster_tpu, cluster_futs) = ClusterTpuInfo::new(
         Arc::new(rpc),
         mock_grpc.subscribe_slots(),
         Duration::from_secs(1),
+        cancellation_token.clone(),
     )
     .await;
     let h = tokio::spawn(cluster_futs);
@@ -79,7 +75,7 @@ async fn test_slot_update() {
 
     assert_eq!(slot_update2.slot, cluster_slot);
 
-    cluster_tpu.shutdown().await;
+    cancellation_token.cancel();
     let _ = h.await;
 }
 
@@ -95,11 +91,12 @@ async fn test_update_cluster_nodes() {
 
     let rpc = Arc::new(MockRpc::default());
     rpc.insert_cluster_nodes(node1).await;
-
+    let cancellation_token = CancellationToken::new();
     let (cluster_tpu, cluster_futs) = ClusterTpuInfo::new(
         Arc::clone(&rpc) as Arc<dyn ClusterTpuRpcClient + Send + Sync>,
         mock_grpc.subscribe_slots(),
         Duration::from_secs(1),
+        cancellation_token.clone(),
     )
     .await;
     let h = tokio::spawn(cluster_futs);
@@ -116,7 +113,7 @@ async fn test_update_cluster_nodes() {
     let cluster_nodes = cluster_tpu.get_cluster_nodes();
     assert_eq!(cluster_nodes, cluster_compare);
 
-    cluster_tpu.shutdown().await;
+    cancellation_token.cancel();
     let _ = h.await;
 }
 
@@ -134,10 +131,12 @@ async fn test_leader_schedule_doesnot_update_before_slot_confirmed() {
     let rpc = Arc::new(MockRpc::default());
     rpc.set_schedule(schedule).await;
 
+    let cancellation_token = CancellationToken::new();
     let (cluster_tpu, cluster_futs) = ClusterTpuInfo::new(
         Arc::clone(&rpc) as Arc<dyn ClusterTpuRpcClient + Send + Sync>,
         mock_grpc.subscribe_slots(),
         Duration::from_secs(1),
+        cancellation_token.clone(),
     )
     .await;
     let h = tokio::spawn(cluster_futs);
@@ -148,7 +147,7 @@ async fn test_leader_schedule_doesnot_update_before_slot_confirmed() {
     // Because we haven't sent a confirmed slot, then cluster_schedule has to be empty
     assert!(cluster_schedule == HashMap::new());
 
-    cluster_tpu.shutdown().await;
+    cancellation_token.cancel();
     let _ = h.await;
 }
 
@@ -166,11 +165,12 @@ async fn test_leader_schedule_update_after_slot_update() {
 
     let rpc = Arc::new(MockRpc::default());
     rpc.set_schedule(schedule).await;
-
+    let cancellation_token = CancellationToken::new();
     let (cluster_tpu, cluster_futs) = ClusterTpuInfo::new(
         Arc::clone(&rpc) as Arc<dyn ClusterTpuRpcClient + Send + Sync>,
         mock_grpc.subscribe_slots(),
         Duration::from_secs(1),
+        cancellation_token.clone(),
     )
     .await;
     let h = tokio::spawn(cluster_futs);
@@ -193,7 +193,7 @@ async fn test_leader_schedule_update_after_slot_update() {
     // Cluster schedule has to be updated by now
     assert!(cluster_schedule == schedule_compare);
 
-    cluster_tpu.shutdown().await;
+    cancellation_token.cancel();
     let _ = h.await;
 }
 
@@ -213,10 +213,12 @@ async fn deletes_old_slots() {
     let rpc = Arc::new(MockRpc::default());
     rpc.set_schedule(schedule).await;
 
+    let cancellation_token = CancellationToken::new();
     let (cluster_tpu, cluster_futs) = ClusterTpuInfo::new(
         Arc::clone(&rpc) as Arc<dyn ClusterTpuRpcClient + Send + Sync>,
         mock_grpc.subscribe_slots(),
         Duration::from_secs(1),
+        cancellation_token.clone(),
     )
     .await;
     let h = tokio::spawn(cluster_futs);
@@ -273,7 +275,7 @@ async fn deletes_old_slots() {
     // Cluster schedule has to be updated by now
     assert!(cluster_schedule == schedule_compare2);
 
-    cluster_tpu.shutdown().await;
+    cancellation_token.cancel();
     let _ = h.await;
 }
 
@@ -295,10 +297,12 @@ async fn test_get_tpus_in_cluster() {
     schedule.insert(key2.to_string(), vec![4, 5, 6, 7]);
     rpc.set_schedule(schedule).await;
 
+    let cancellation_token = CancellationToken::new();
     let (cluster_tpu, cluster_futs) = ClusterTpuInfo::new(
         Arc::clone(&rpc) as Arc<dyn ClusterTpuRpcClient + Send + Sync>,
         mock_grpc.subscribe_slots(),
         Duration::from_secs(1),
+        cancellation_token.clone(),
     )
     .await;
     let h = tokio::spawn(cluster_futs);
@@ -322,7 +326,7 @@ async fn test_get_tpus_in_cluster() {
     assert_eq!(tpus[0].leader, key1);
     assert_eq!(tpus[1].leader, key2);
 
-    cluster_tpu.shutdown().await;
+    cancellation_token.cancel();
     let _ = h.await;
 }
 

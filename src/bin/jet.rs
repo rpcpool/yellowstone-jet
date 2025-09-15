@@ -289,10 +289,12 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
         config.upstream.rpc.clone(),
     ));
+
     let (cluster_tpu_info, cluster_tpu_info_tasks) = ClusterTpuInfo::new(
         rpc_client,
         geyser.subscribe_slots(),
         config.upstream.cluster_nodes_update_interval,
+        jet_cancellation_token.child_token(),
     )
     .await;
 

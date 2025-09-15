@@ -3,27 +3,19 @@ use {
         grpc_geyser::SlotUpdateWithStatus,
         metrics::jet as metrics,
         util::{IncrementalBackoff, SlotStatus},
-    },
-    futures::future::FutureExt,
-    solana_client::{
+    }, futures::future::FutureExt, solana_client::{
         client_error::Result as ClientResult,
         nonblocking::rpc_client::RpcClient,
         rpc_response::{RpcContactInfo, RpcLeaderSchedule},
-    },
-    solana_clock::{NUM_CONSECUTIVE_LEADER_SLOTS, Slot},
-    solana_epoch_schedule::EpochSchedule,
-    solana_pubkey::Pubkey,
-    std::{
+    }, solana_clock::{Slot, NUM_CONSECUTIVE_LEADER_SLOTS}, solana_epoch_schedule::EpochSchedule, solana_pubkey::Pubkey, std::{
         collections::HashMap,
         future::Future,
         net::SocketAddr,
         sync::{Arc, RwLock as StdRwLock},
-    },
-    tokio::{
+    }, tokio::{
         sync::broadcast,
-        time::{Duration, Instant, sleep},
-    },
-    tracing::{debug, info, warn},
+        time::{sleep, Duration, Instant},
+    }, tokio_util::sync::CancellationToken, tracing::{debug, info, warn}
 };
 
 #[async_trait::async_trait]
@@ -142,7 +134,6 @@ impl ClusterTpuInfoInner {
 #[derive(Clone)]
 pub struct ClusterTpuInfo {
     inner: Arc<StdRwLock<ClusterTpuInfoInner>>,
-    shutdown_update: broadcast::Sender<()>,
 }
 
 impl ClusterTpuInfo {
@@ -150,10 +141,10 @@ impl ClusterTpuInfo {
         rpc: Arc<dyn ClusterTpuRpcClient + Send + Sync + 'static>,
         slots_rx: broadcast::Receiver<SlotUpdateWithStatus>,
         cluster_nodes_update_interval: Duration,
+        cancellation_token: CancellationToken,
     ) -> (Self, impl Future<Output = ()>) {
         assert_eq!(NUM_CONSECUTIVE_LEADER_SLOTS, 4);
 
-        let (tx, mut rx) = broadcast::channel(1);
         let inner = Arc::new(StdRwLock::new(ClusterTpuInfoInner {
             epoch_schedule: ClusterTpuInfoInner::get_epoch_schedule(Arc::clone(&rpc)).await,
             ..Default::default()
@@ -162,11 +153,10 @@ impl ClusterTpuInfo {
         (
             Self {
                 inner: Arc::clone(&inner),
-                shutdown_update: tx
             },
             async move {
                 tokio::select! {
-                    _ = rx.recv() => {
+                    _ = cancellation_token.cancelled() => {
                         info!("shutdown signal received in ClusterTpuInfo");
                     }
                     _ = ClusterTpuInfo::update_latest_slot_and_leader_schedule(
@@ -465,12 +455,6 @@ impl ClusterTpuInfo {
 
             metrics::observe_slot_update_loop_iteration_time(iteration_start.elapsed());
         }
-    }
-
-    // I don't really know if this is necessary. I could just add an underscore before shutdown_update and it would work
-    // In any case, those futures will be shutdown if all tx references are dropped or task_group cancels them
-    pub async fn shutdown(&self) {
-        let _ = self.shutdown_update.send(());
     }
 
     pub fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo> {
