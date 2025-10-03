@@ -1,11 +1,11 @@
 use {
     crate::{cluster_tpu_info::ClusterTpuInfoProvider, transaction_handler::TransactionHandler},
     anyhow::Context as _,
-    futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
+    futures::future::{ready, BoxFuture, FutureExt, TryFutureExt},
     hyper::{Request, Response, StatusCode},
     jsonrpsee::{
         core::http_helpers::Body,
-        server::{ServerBuilder, ServerHandle},
+        server::{ServerBuilder, ServerConfigBuilder, ServerHandle},
         types::error::{ErrorObject, ErrorObjectOwned, INVALID_PARAMS_CODE},
     },
     rpc_admin::JetIdentityUpdater,
@@ -103,9 +103,11 @@ impl RpcServer {
                 use rpc_solana_like::RpcServer;
 
                 let rpc_server_impl = Self::create_solana_like_rpc_server_impl(tx_handler);
-
-                ServerBuilder::new()
+                let config = ServerConfigBuilder::default()
                     .max_request_body_size(MAX_REQUEST_BODY_SIZE)
+                    .build();
+                ServerBuilder::new()
+                    .set_config(config)
                     .build(addr)
                     .await
                     .map(|server| server.start(rpc_server_impl.into_rpc()))
@@ -223,7 +225,7 @@ pub mod rpc_admin {
                     "set_identity_from_bytes with require_tower is not supported".to_owned(),
                 ));
             }
-            let keypair = Keypair::from_bytes(&identity_keypair).map_err(|err| {
+            let keypair = Keypair::try_from(identity_keypair.as_slice()).map_err(|err| {
                 invalid_params(format!(
                     "Failed to read identity keypair from provided byte array: {err}"
                 ))

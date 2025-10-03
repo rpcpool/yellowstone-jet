@@ -9,7 +9,7 @@ use {
     solana_client::{
         client_error::ClientErrorKind,
         nonblocking::rpc_client::RpcClient,
-        rpc_config::{RcpSanitizeTransactionConfig, RpcSimulateTransactionConfig},
+        rpc_config::RpcSimulateTransactionConfig,
         rpc_request::{RpcError, RpcResponseErrorData},
         rpc_response::{Response as RpcResponse, RpcSimulateTransactionResult, RpcVersionInfo},
     },
@@ -63,7 +63,6 @@ impl From<TransactionHandlerError> for ErrorObjectOwned {
 pub struct TransactionHandler {
     pub transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
     pub rpc: Arc<RpcClient>,
-    pub proxy_sanitize_check: bool,
     pub proxy_preflight_check: bool,
 }
 
@@ -71,13 +70,11 @@ impl TransactionHandler {
     pub fn new(
         transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
         rpc: &Arc<RpcClient>,
-        proxy_sanitize_check: bool,
         proxy_preflight_check: bool,
     ) -> Self {
         Self {
             transaction_sink,
             rpc: Arc::clone(rpc),
-            proxy_sanitize_check,
             proxy_preflight_check,
         }
     }
@@ -105,9 +102,10 @@ impl TransactionHandler {
         // Run preflight/sanitize checks if needed
         if !config.skip_preflight && self.proxy_preflight_check {
             self.handle_preflight(&transaction, &config).await?;
-        } else if !config.skip_sanitize && self.proxy_sanitize_check {
-            self.handle_sanitize(&transaction, &config).await?;
         }
+        // } else if !config.skip_sanitize && self.proxy_sanitize_check {
+        //     self.handle_sanitize(&transaction, &config).await?;
+        // }
 
         let signature = transaction.signatures[0];
         let wire_transaction = Bytes::from(bincode::serialize(&transaction)?);
@@ -166,9 +164,10 @@ impl TransactionHandler {
 
         if !config.skip_preflight && self.proxy_preflight_check {
             self.handle_preflight(&transaction, &config).await?;
-        } else if !config.skip_sanitize && self.proxy_sanitize_check {
-            self.handle_sanitize(&transaction, &config).await?;
-        } else {
+        // } else if !config.skip_sanitize && self.proxy_sanitize_check {
+        //     self.handle_sanitize(&transaction, &config).await?;
+        // } else {
+        } else { 
             transaction
                 .sanitize()
                 .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
@@ -217,32 +216,6 @@ impl TransactionHandler {
         }
     }
 
-    async fn handle_sanitize(
-        &self,
-        transaction: &VersionedTransaction,
-        config: &RpcSendTransactionConfig,
-    ) -> Result<(), TransactionHandlerError> {
-        match self
-            .rpc
-            .sanitize_transaction(
-                transaction,
-                RcpSanitizeTransactionConfig {
-                    sig_verify: true,
-                    commitment: config
-                        .preflight_commitment
-                        .map(|commitment| CommitmentConfig { commitment }),
-                    min_context_slot: config.min_context_slot,
-                    ..Default::default()
-                },
-            )
-            .await
-        {
-            Err(error) => Err(TransactionHandlerError::SanitizeCheckFailed(
-                error.to_string(),
-            )),
-            _ => Ok(()),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -255,7 +228,6 @@ mod tests {
         solana_hash::Hash,
         solana_keypair::Keypair,
         solana_message::Message,
-        solana_program::system_instruction,
         solana_pubkey::Pubkey,
         solana_signer::Signer,
         solana_transaction::Transaction,
@@ -288,16 +260,9 @@ mod tests {
                     return_data: None,
                     inner_instructions: None,
                     replacement_blockhash: None,
+                    loaded_accounts_data_size: None,
                 },
             })
-        }
-
-        async fn sanitize_transaction(
-            &self,
-            _transaction: &VersionedTransaction,
-            _config: RcpSanitizeTransactionConfig,
-        ) -> PubsubClientResult<()> {
-            Ok(())
         }
     }
 
@@ -347,29 +312,10 @@ mod tests {
 
         async fn handle_sanitize(
             &self,
-            transaction: &VersionedTransaction,
-            config: &RpcSendTransactionConfig,
+            _transaction: &VersionedTransaction,
+            _config: &RpcSendTransactionConfig,
         ) -> Result<(), TransactionHandlerError> {
-            match self
-                .rpc
-                .sanitize_transaction(
-                    transaction,
-                    RcpSanitizeTransactionConfig {
-                        sig_verify: true,
-                        commitment: config
-                            .preflight_commitment
-                            .map(|commitment| CommitmentConfig { commitment }),
-                        min_context_slot: config.min_context_slot,
-                        ..Default::default()
-                    },
-                )
-                .await
-            {
-                Err(error) => Err(TransactionHandlerError::SanitizeCheckFailed(
-                    error.to_string(),
-                )),
-                _ => Ok(()),
-            }
+            Ok(())
         }
     }
 
@@ -380,7 +326,7 @@ mod tests {
         let keypair = Keypair::new();
         let recipient = Pubkey::new_unique();
         let instruction =
-            system_instruction::transfer(&keypair.pubkey(), &recipient, 1_000_000_000_000);
+            solana_system_interface::instruction::transfer(&keypair.pubkey(), &recipient, 1_000_000_000_000);
         let message = Message::new(&[instruction], Some(&keypair.pubkey()));
         let tx = Transaction::new(&[&keypair], message, Hash::default());
         let versioned_tx = VersionedTransaction::from(tx);
@@ -402,7 +348,7 @@ mod tests {
 
         let keypair = Keypair::new();
         let recipient = Pubkey::new_unique();
-        let instruction = system_instruction::transfer(&keypair.pubkey(), &recipient, 1_000);
+        let instruction = solana_system_interface::instruction::transfer(&keypair.pubkey(), &recipient, 1_000);
         let message = Message::new(&[instruction], Some(&keypair.pubkey()));
         let tx = Transaction::new(&[&keypair], message, Hash::default());
         let versioned_tx = VersionedTransaction::from(tx);

@@ -13,12 +13,12 @@ use {
 
 #[allow(dead_code)]
 pub fn find_available_port() -> Option<u16> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     for _ in 0..100 {
         // Try up to 100 times to find an open port
         let (begin, end) = ConfigQuic::default_endpoint_port_range();
-        let port = rng.gen_range(begin..=end);
+        let port = rng.random_range(begin..=end);
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
 
         // Try to bind to the port; if successful, port is free

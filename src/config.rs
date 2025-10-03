@@ -26,7 +26,7 @@ use {
     },
     tokio::{fs, time::Duration},
     yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
-    yellowstone_vixen::config::YellowstoneConfig,
+    yellowstone_vixen_yellowstone_grpc_source::YellowstoneGrpcConfig,
 };
 
 fn deserialize_pubkey<'de, D>(deserializer: D) -> Result<Pubkey, D::Error>
@@ -224,10 +224,14 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
     ) -> Self {
         Self {
             rpc: PolicyStoreRpcConfig { endpoint: rpc },
-            grpc: YellowstoneConfig {
+            grpc: YellowstoneGrpcConfig {
                 endpoint,
                 x_token,
                 timeout: 60,
+                commitment_level: Some(yellowstone_vixen::CommitmentLevel::Finalized),
+                from_slot: None,
+                max_decoding_message_size: Some(100_000_000),
+                accept_compression: None
             },
         }
     }

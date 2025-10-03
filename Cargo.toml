@@ -19,26 +19,26 @@ bytes = "1.10.0"
 clap = { version = "4.5.2", features = ["cargo", "derive", "env"] }
 derivative = "2.2.0"
 derive_more = { version = "2.0.1", features = ["display"] }
-etcd-client = "0.14.0"
+etcd-client = "0.17.0"
 futures = "0.3.30"
 hostname = "0.4.0"
 humantime-serde = "1.1.1"
 hyper = "1.5.0"
-jsonrpsee = { version = "0.24.7", features = [
+jsonrpsee = { version = "0.26.0", features = [
     "http-client",
     "macros",
     "server",
 ] }
 lazy_static = "1.4.0"
-lru = "0.12.3"
+lru = "0.16.1"
 maplit = "1.0.2"
 pin-project = "1.1.5"
 prometheus = "0.13.3"
-prost = "0.13.3"
-prost-types = "0.13.3"
+prost = "0.14.1"
+prost-types = "0.14.1"
 quinn = "0.11.6"
 quinn-proto = "0.11.6"
-rand = "0.8.5"
+rand = "0.9.2"
 rustls = { version = "0.23.15", default-features = false }
 semver = "1.0.22"
 serde = "1.0.215"
@@ -46,49 +46,52 @@ serde_json = "1.0.116"
 serde_yaml = "0.9.25"
 
 # Agave Crates
-solana-client = "2"
-solana-connection-cache = "2"
-solana-net-utils = "2"
-solana-quic-client = "2"
-solana-rpc-client-api = "2"
-solana-streamer = "2"
-solana-tpu-client = "2"
-solana-version = "2"
-solana-rpc-client = "2"
-solana-transaction-status-client-types = "2"
-solana-system-interface = "1"
-solana-bincode = "2"
-solana-tls-utils = "2"
+solana-client = "2.2.0"
+solana-connection-cache = "2.2.0"
+solana-net-utils = "2.2.0"
+solana-quic-client = "2.2.0"
+solana-rpc-client-api = "2.2.0"
+solana-streamer = "2.2.0"
+solana-tpu-client = "2.2.0"
+solana-version = "2.2.0"
+solana-rpc-client = "2.2.0"
+solana-transaction-status-client-types = "2.2.0"
+solana-system-interface = "1.0.0"
+solana-sdk-ids = "2.2.0"
+solana-bincode = "2.0.0"
+solana-tls-utils = "2.0.0"
 # --> Anza - Solana SDK (decoupled from agave)
 solana-program = "2"
 # TEMPORARY
 reqwest = { version = "0.12.15", features = ["json"] }
 retry = "2.0.0"
-solana-instruction = "2"
-solana-pubkey = "2"
-solana-keypair = "2"
-solana-account = "2"
-solana-clock = "2"
-solana-hash = "2"
-solana-epoch-schedule = "2"
-solana-quic-definitions = "2"
-solana-signature = { version = "2", features = ["rand"] }
-solana-signer = "2"
-solana-transaction = "2"
-solana-epoch-info = "2"
-solana-commitment-config = "2"
-solana-transaction-error = "2"
-solana-message = "2"
-solana-compute-budget-interface = "2"
-solana-native-token = "2"
-solana-nonce = "2"
-solana-packet = "2"
-thiserror = "1.0.58"
+solana-instruction = "2.2.0"
+solana-pubkey = "2.2.0"
+solana-keypair = "2.2.0"
+solana-account = "2.2.0"
+solana-clock = "2.2.0"
+solana-hash = "2.2.0"
+solana-epoch-schedule = "2.2.0"
+solana-quic-definitions = "2.2.0"
+solana-signature = { version = "2.2.0", features = ["rand"] }
+solana-signer = "2.2.0"
+solana-transaction = "2.2.0"
+solana-epoch-info = "2.2.0"
+solana-commitment-config = "2.2.0"
+solana-transaction-error = "2.2.0"
+solana-transaction-status = "2.2.0"
+solana-message = "2.2.0"
+solana-compute-budget-interface = "2.2.0"
+solana-native-token = "2.2.0"
+solana-nonce = "2.2.0"
+solana-packet = "2.2.0"
+thiserror = "2.0.0"
 tokio = { version = "1.36.0", features = ["rt-multi-thread", "macros"] }
 tokio-stream = "0.1.15"
-tonic = { version = "0.12.3", features = ["tls-native-roots"] }
-tonic-health = "0.12.3"
-tower = "0.4.13"
+tonic = { version = "0.14.2", features = ["tls-native-roots"] }
+tonic-prost = "0.14.2"
+tonic-health = "0.14.2"
+tower = "0.5.2"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.1", features = [
     "ansi",
@@ -97,23 +100,26 @@ tracing-subscriber = { version = "0.3.1", features = [
 ] }
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 
-yellowstone-grpc-client = "7"
-yellowstone-grpc-proto = "7"
-yellowstone-shield-store = "~0.5.2"
-yellowstone-vixen = "0.2.0"
-tokio-util = "0.7.16"
+yellowstone-grpc-client = "9.0.0"
+yellowstone-grpc-proto = "9.0.0"
+# yellowstone-shield-store = "^0.5.2"
+yellowstone-shield-store = { git = "https://github.com/rpcpool/yellowstone-shield.git", branch = "26-unpinned-crates" }
+yellowstone-vixen = "0.5.0"
+yellowstone-vixen-yellowstone-grpc-source = "0.3.0"
+tokio-util = "^0.7.16"
 
 [[bin]]
 name = "lewis-dummy-server"
 path = "src/bin/lewis_dummy_server.rs"
 
 [build-dependencies]
-anyhow = "1.0.69"
-cargo-lock = "10.0.1"
-git-version = "0.3.9"
-protobuf-src = "1.1.0"
-tonic-build = "0.12.3"
-vergen = { version = "9.0.1", features = ["build", "rustc"] }
+anyhow = "^1.0.69"
+cargo-lock = "^10.0.1"
+git-version = "^0.3.9"
+protobuf-src = "^1.1.0"
+tonic-build = "^0.14.2"
+tonic-prost-build = "^0.14.2"
+vergen = { version = "^9.0.1", features = ["build", "rustc"] }
 
 [lints.clippy]
 clone_on_ref_ptr = "deny"
@@ -123,16 +129,6 @@ trivially_copy_pass_by_ref = "deny"
 [profile.release]
 codegen-units = 1
 lto = true
-
-[patch.crates-io]
-solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.2.19-triton-public" }
-solana-rpc-client-api = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.2.19-triton-public" }
-solana-account-decoder-client-types = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.2.19-triton-public" }
-solana-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.2.19-triton-public" }
-solana-net-utils = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.2.19-triton-public" }
-solana-streamer = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.2.19-triton-public" }
-solana-transaction-context = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.2.19-triton-public" }
-solana-transaction-status-client-types = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.2.19-triton-public" }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"

@@ -48,7 +48,7 @@ use {
         },
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
-        solana::sanitize_transaction_support_check,
+        // solana::sanitize_transaction_support_check,
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         transaction_handler::TransactionHandler,
@@ -273,7 +273,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     {
         let policy_store = PolicyStore::build()
             .config(config.upstream.clone().into())
-            .run(&local)
+            .run()
             .await?;
 
         Arc::new(policy_store) as Arc<dyn TransactionPolicyStore + Send + Sync>
@@ -410,13 +410,13 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         vec![Box::new(gateway_identity_updater)];
 
     let tx_handler_rpc = Arc::new(SolanaRpcClient::new(config.upstream.rpc.clone()));
-    let sanitize_supported = sanitize_transaction_support_check(&tx_handler_rpc)
-        .await
-        .expect("sanitize transaction support check");
+    // let sanitize_supported = sanitize_transaction_support_check(&tx_handler_rpc)
+    //     .await
+    //     .expect("sanitize transaction support check");
     let tx_handler = TransactionHandler {
         transaction_sink: scheduler_in,
         rpc: tx_handler_rpc,
-        proxy_sanitize_check: config.listen_solana_like.proxy_sanitize_check && sanitize_supported,
+        // proxy_sanitize_check: config.listen_solana_like.proxy_sanitize_check && sanitize_supported,
         proxy_preflight_check: config.listen_solana_like.proxy_preflight_check,
     };
 

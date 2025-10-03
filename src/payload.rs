@@ -280,7 +280,8 @@ impl TryFrom<(&VersionedTransaction, JetRpcSendTransactionConfig)> for Transacti
                     .map(|p| p.to_string())
                     .collect(),
                 skip_preflight: config_with_forwarding_policies.config.skip_preflight,
-                skip_sanitize: config_with_forwarding_policies.config.skip_sanitize,
+                skip_sanitize: true,
+                // skip_sanitize: config_with_forwarding_policies.config.skip_sanitize,
             }),
             timestamp: Some(ms_since_epoch()),
         }))
@@ -334,7 +335,8 @@ impl TryFrom<&TransactionConfig> for JetRpcSendTransactionConfig {
             Some(RpcSendTransactionConfig {
                 max_retries: proto_config.max_retries.map(|r| r as usize),
                 skip_preflight: proto_config.skip_preflight,
-                skip_sanitize: proto_config.skip_sanitize,
+                // skip_sanitize: proto_config.skip_sanitize,
+                // skip_sanitize: true,
                 preflight_commitment: None,
                 encoding: None,
                 min_context_slot: None,
@@ -371,7 +373,7 @@ mod tests {
             Some(RpcSendTransactionConfig {
                 encoding: Some(UiTransactionEncoding::Base58),
                 skip_preflight: true,
-                skip_sanitize: true,
+                // skip_sanitize: true,
                 ..Default::default()
             }),
             None,
@@ -485,7 +487,7 @@ mod tests {
         let config = JetRpcSendTransactionConfig::new(
             Some(RpcSendTransactionConfig {
                 skip_preflight: true,
-                skip_sanitize: true,
+                // skip_sanitize: true,
                 encoding: Some(UiTransactionEncoding::Base64),
                 ..Default::default()
             }),
@@ -501,7 +503,6 @@ mod tests {
         assert!(decoded_config.is_some());
         let config_with_forwarding_policies = decoded_config.unwrap();
         assert!(config_with_forwarding_policies.config.skip_preflight);
-        assert!(config_with_forwarding_policies.config.skip_sanitize);
         Ok(())
     }
 
@@ -511,7 +512,6 @@ mod tests {
         let original_config = JetRpcSendTransactionConfig::new(
             Some(RpcSendTransactionConfig {
                 skip_preflight: true,
-                skip_sanitize: false,
                 max_retries: Some(3),
                 preflight_commitment: None,
                 encoding: Some(UiTransactionEncoding::Base64),
@@ -532,10 +532,6 @@ mod tests {
         assert_eq!(
             config_with_forwarding_policies.config.skip_preflight,
             original_config.config.skip_preflight
-        );
-        assert_eq!(
-            config_with_forwarding_policies.config.skip_sanitize,
-            original_config.config.skip_sanitize
         );
         Ok(())
     }
@@ -568,7 +564,7 @@ mod tests {
 
         assert_eq!(rpc_config.config.max_retries, None);
         assert!(!rpc_config.config.skip_preflight);
-        assert!(!rpc_config.config.skip_sanitize);
+        // assert!(!rpc_config.config.skip_sanitize);
         assert_eq!(rpc_config.forwarding_policies.len(), 0);
         Ok(())
     }
@@ -615,7 +611,7 @@ mod tests {
             Some(RpcSendTransactionConfig {
                 encoding: Some(UiTransactionEncoding::Base58),
                 skip_preflight: true,
-                skip_sanitize: true,
+                // skip_sanitize: true,
                 ..Default::default()
             }),
             Some(vec!["11111111111111111111111111111111".to_string()]),
@@ -638,7 +634,7 @@ mod tests {
         if let Some(config) = decoded_config {
             assert_eq!(config.forwarding_policies.len(), 0);
             assert!(config.config.skip_preflight);
-            assert!(config.config.skip_sanitize);
+            // assert!(config.config.skip_sanitize);
         } else {
             panic!("Decoded config is None");
         }
