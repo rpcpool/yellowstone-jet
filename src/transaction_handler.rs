@@ -255,7 +255,6 @@ mod tests {
         solana_hash::Hash,
         solana_keypair::Keypair,
         solana_message::Message,
-        solana_program::system_instruction,
         solana_pubkey::Pubkey,
         solana_signer::Signer,
         solana_transaction::Transaction,
@@ -288,6 +287,7 @@ mod tests {
                     return_data: None,
                     inner_instructions: None,
                     replacement_blockhash: None,
+                    loaded_accounts_data_size: None,
                 },
             })
         }
@@ -379,8 +379,11 @@ mod tests {
 
         let keypair = Keypair::new();
         let recipient = Pubkey::new_unique();
-        let instruction =
-            system_instruction::transfer(&keypair.pubkey(), &recipient, 1_000_000_000_000);
+        let instruction = solana_system_interface::instruction::transfer(
+            &keypair.pubkey(),
+            &recipient,
+            1_000_000_000_000,
+        );
         let message = Message::new(&[instruction], Some(&keypair.pubkey()));
         let tx = Transaction::new(&[&keypair], message, Hash::default());
         let versioned_tx = VersionedTransaction::from(tx);
@@ -402,7 +405,8 @@ mod tests {
 
         let keypair = Keypair::new();
         let recipient = Pubkey::new_unique();
-        let instruction = system_instruction::transfer(&keypair.pubkey(), &recipient, 1_000);
+        let instruction =
+            solana_system_interface::instruction::transfer(&keypair.pubkey(), &recipient, 1_000);
         let message = Message::new(&[instruction], Some(&keypair.pubkey()));
         let tx = Transaction::new(&[&keypair], message, Hash::default());
         let versioned_tx = VersionedTransaction::from(tx);

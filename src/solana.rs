@@ -12,9 +12,7 @@ use {
     },
     solana_nonce::NONCED_TX_MARKER_IX_INDEX,
     solana_packet::PACKET_DATA_SIZE,
-    solana_program::{
-        program_utils::limited_deserialize, system_instruction::SystemInstruction, system_program,
-    },
+    solana_program::{program_utils::limited_deserialize, system_instruction::SystemInstruction},
     solana_pubkey::Pubkey,
     solana_transaction::{Transaction, versioned::VersionedTransaction},
     solana_transaction_status_client_types::TransactionBinaryEncoding,
@@ -106,7 +104,7 @@ pub fn get_durable_nonce(tx: &VersionedTransaction) -> Option<Pubkey> {
             // let account_keys = self.account_keys();
             let account_keys = tx.message.static_account_keys();
             match account_keys.get(ix.program_id_index as usize) {
-                Some(program_id) => system_program::check_id(program_id),
+                Some(program_id) => solana_sdk_ids::system_program::check_id(program_id),
                 _ => false,
             }
         })

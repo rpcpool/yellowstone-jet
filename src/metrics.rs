@@ -424,7 +424,7 @@ pub mod jet {
 
     pub fn incr_quic_gw_worker_tx_process_cnt(remote_peer: Pubkey, status: &str) {
         QUIC_GW_WORKER_TX_PROCESS_CNT
-            .with_label_values(&[&remote_peer.to_string(), status])
+            .with_label_values(&[remote_peer.to_string().as_str(), status])
             .inc_by(1);
     }
 
@@ -592,9 +592,9 @@ pub mod jet {
         SEND_TRANSACTION_SUCCESS.inc();
     }
 
-    pub fn observe_forwarded_txn_latency(duration: f64) {
+    pub fn observe_forwarded_txn_latency(duration: f64, identity: Pubkey) {
         FORWADED_TRANSACTION_LATENCY
-            .with_label_values(&[])
+            .with_label_values(&[identity.to_string()])
             .observe(duration);
     }
 
@@ -754,25 +754,29 @@ pub mod jet {
 
     pub fn quic_send_attempts_inc(leader: Pubkey, address: SocketAddr, status: &str) {
         QUIC_SEND_ATTEMPTS
-            .with_label_values(&[&leader.to_string(), &address.to_string(), status])
+            .with_label_values(&[
+                leader.to_string().as_str(),
+                &address.to_string().as_str(),
+                status,
+            ])
             .inc();
     }
 
     pub fn gateway_set_connected(endpoints: &[String], endpoint: String) {
         for endpoint in endpoints {
             GATEWAY_CONNECTED
-                .with_label_values(&[endpoint.as_ref()])
+                .with_label_values(&[endpoint.as_str()])
                 .set(0);
         }
         GATEWAY_CONNECTED
-            .with_label_values(&[endpoint.as_ref()])
+            .with_label_values(&[endpoint.as_str()])
             .set(1);
     }
 
     pub fn gateway_set_disconnected(endpoints: &[String]) {
         for endpoint in endpoints {
             GATEWAY_CONNECTED
-                .with_label_values(&[endpoint.as_ref()])
+                .with_label_values(&[endpoint.as_str()])
                 .set(0);
         }
     }

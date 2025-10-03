@@ -273,7 +273,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     {
         let policy_store = PolicyStore::build()
             .config(config.upstream.clone().into())
-            .run(&local)
+            .run()
             .await?;
 
         Arc::new(policy_store) as Arc<dyn TransactionPolicyStore + Send + Sync>
