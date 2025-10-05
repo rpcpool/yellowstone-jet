@@ -265,8 +265,6 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
     )
     .await;
 
-    let local = tokio::task::LocalSet::new();
-
     let shield_policy_store = if config
         .features
         .is_feature_enabled(yellowstone_jet::proto::jet::Feature::YellowstoneShield)
@@ -551,65 +549,61 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
 
     tg_name_map.insert(ah.id(), "SIGINT".to_string());
 
-    local
-        .run_until(async {
-            let Some(result) = tg.join_next_with_id().await else {
-                panic!("no task in the task group can ever happen");
-            };
-            macro_rules! get_id {
-                ($joinset_join_result_with_id:expr) => {
-                    match $joinset_join_result_with_id {
-                        Ok((id, _)) => *id,
-                        Err(e) => e.id().clone(),
-                    }
-                };
+    let Some(result) = tg.join_next_with_id().await else {
+        panic!("no task in the task group can ever happen");
+    };
+    macro_rules! get_id {
+        ($joinset_join_result_with_id:expr) => {
+            match $joinset_join_result_with_id {
+                Ok((id, _)) => *id,
+                Err(e) => e.id().clone(),
             }
-            jet_cancellation_token.cancel();
-            let task_id = get_id!(&result);
-            let first = tg_name_map
-                .remove(&task_id)
-                .unwrap_or_else(|| format!("unknown task {task_id:?}"));
-            warn!("shutting down, task {first} finished first with: {result:?}");
-            rpc_admin.shutdown();
-            rpc_solana_like.shutdown();
+        };
+    }
+    jet_cancellation_token.cancel();
+    let task_id = get_id!(&result);
+    let first = tg_name_map
+        .remove(&task_id)
+        .unwrap_or_else(|| format!("unknown task {task_id:?}"));
+    warn!("shutting down, task {first} finished first with: {result:?}");
+    rpc_admin.shutdown();
+    rpc_solana_like.shutdown();
 
-            const SHUTDOWN_DURATION: std::time::Duration = std::time::Duration::from_secs(10);
-            let shutdown_deadline = Instant::now() + SHUTDOWN_DURATION;
-            loop {
-                tokio::select! {
-                    Some(result) = tg.join_next_with_id() => {
-                        let task_id = get_id!(&result);
-                        let remaining_tasks = tg.len();
-                        let name = tg_name_map
-                            .remove(&task_id)
-                            .unwrap_or_else(|| format!("unknown task {task_id:?}"));
-                        if result.is_ok() {
-                            info!("task -- {name} : finished cleanly, {remaining_tasks} remaining");
-                        } else {
-                            warn!("task -- {name} : finished with error: {result:?}, {remaining_tasks} remaining");
-                        }
-                        if remaining_tasks == 0 {
-                            break;
-                        }
-                    }
-                    _ = tokio::time::sleep_until(shutdown_deadline) => {
-                        warn!("some tasks did not shut down in time, aborting them");
-                        break;
-                    }
-                    else => {
-                        break;
-                    }
+    const SHUTDOWN_DURATION: std::time::Duration = std::time::Duration::from_secs(10);
+    let shutdown_deadline = Instant::now() + SHUTDOWN_DURATION;
+    loop {
+        tokio::select! {
+            Some(result) = tg.join_next_with_id() => {
+                let task_id = get_id!(&result);
+                let remaining_tasks = tg.len();
+                let name = tg_name_map
+                    .remove(&task_id)
+                    .unwrap_or_else(|| format!("unknown task {task_id:?}"));
+                if result.is_ok() {
+                    info!("task -- {name} : finished cleanly, {remaining_tasks} remaining");
+                } else {
+                    warn!("task -- {name} : finished with error: {result:?}, {remaining_tasks} remaining");
+                }
+                if remaining_tasks == 0 {
+                    break;
                 }
             }
-            if !tg.is_empty() {
-                for (_id, name) in tg_name_map.iter() {
-                    warn!("task -- {name} : did not finish in time, aborting");
-                }
+            _ = tokio::time::sleep_until(shutdown_deadline) => {
+                warn!("some tasks did not shut down in time, aborting them");
+                break;
             }
-            tg.abort_all();
-            Ok(())
-        })
-        .await
+            else => {
+                break;
+            }
+        }
+    }
+    if !tg.is_empty() {
+        for (_id, name) in tg_name_map.iter() {
+            warn!("task -- {name} : did not finish in time, aborting");
+        }
+    }
+    tg.abort_all();
+    Ok(())
 }
 
 async fn spawn_push_prometheus_metrics(
