@@ -756,7 +756,7 @@ pub mod jet {
         QUIC_SEND_ATTEMPTS
             .with_label_values(&[
                 leader.to_string().as_str(),
-                &address.to_string().as_str(),
+                address.to_string().as_str(),
                 status,
             ])
             .inc();
