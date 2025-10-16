@@ -7579,7 +7579,8 @@ dependencies = [
 [[package]]
 name = "yellowstone-shield-client"
 version = "0.7.0"
-source = "git+https://github.com/rpcpool/yellowstone-shield.git?branch=cas-19#3dbf4966f9adf1b8c72b2b7792542d56e37d6704"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b88bb8ec5835919e058a61c2778bd8d7c438e4cb9ef3847228627471140af37"
 dependencies = [
  "borsh 1.5.7",
  "num-derive",
@@ -7604,7 +7605,8 @@ dependencies = [
 [[package]]
 name = "yellowstone-shield-parser"
 version = "0.7.0"
-source = "git+https://github.com/rpcpool/yellowstone-shield.git?branch=cas-19#3dbf4966f9adf1b8c72b2b7792542d56e37d6704"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "077e99f2720c91e269bfbb7777f4945ffd8102d1daf3e6d6936f0675e0185a7a"
 dependencies = [
  "borsh 1.5.7",
  "solana-program",
@@ -7615,7 +7617,8 @@ dependencies = [
 [[package]]
 name = "yellowstone-shield-store"
 version = "0.7.0"
-source = "git+https://github.com/rpcpool/yellowstone-shield.git?branch=cas-19#3dbf4966f9adf1b8c72b2b7792542d56e37d6704"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d571877f9dfc540d7d24068f4948e35fafdc29fa3ead9a75d7206a362f97b4c"
 dependencies = [
  "anyhow",
  "arc-swap",
