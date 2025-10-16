@@ -14,7 +14,6 @@ use {
     solana_keypair::{Keypair, read_keypair_file},
     solana_message::{VersionedMessage, v0},
     solana_native_token::LAMPORTS_PER_SOL,
-    solana_program::system_instruction,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_signer::Signer,
@@ -348,7 +347,7 @@ async fn main() -> anyhow::Result<()> {
                 instructions.push(ComputeBudgetInstruction::set_compute_unit_price(price));
             }
             let lamports = 5_000 + index;
-            instructions.push(system_instruction::transfer(
+            instructions.push(solana_system_interface::instruction::transfer(
                 &wallet_pubkey,
                 &wallet_pubkey,
                 lamports,

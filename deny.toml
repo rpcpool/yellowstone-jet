@@ -9,18 +9,6 @@ ignore = [
     # web-time not maintained
     "RUSTSEC-2024-0384",
 
-    # derivative unmaintained warning
-    "RUSTSEC-2024-0388",
-
     # ed25519-dalek 1.0.1
     "RUSTSEC-2022-0093",
-
-    # ring vulnerability - coming from Solana dependencies
-    "RUSTSEC-2025-0009",
-
-    # protobuf issue
-    "RUSTSEC-2024-0437",
-
-    # paste
-    "RUSTSEC-2024-0436",
 ]
