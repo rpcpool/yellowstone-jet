@@ -228,7 +228,7 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
                 endpoint,
                 x_token,
                 timeout: 60,
-                commitment_level: Some(yellowstone_vixen::CommitmentLevel::Finalized),
+                commitment_level: Some(yellowstone_vixen::CommitmentLevel::Confirmed),
                 max_decoding_message_size: Some(100_000_000),
                 from_slot: None,
                 accept_compression: None,
