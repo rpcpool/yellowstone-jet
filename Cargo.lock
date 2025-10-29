@@ -7549,7 +7549,6 @@ dependencies = [
  "solana-streamer",
  "solana-system-interface",
  "solana-tls-utils 2.3.13",
- "solana-tpu-client",
  "solana-transaction",
  "solana-transaction-error",
  "solana-transaction-status-client-types",
