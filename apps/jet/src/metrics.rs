@@ -10,7 +10,7 @@ lazy_static::lazy_static! {
 
     static ref VERSION: IntCounterVec = IntCounterVec::new(
         Opts::new("version", "Plugin version info"),
-        &["buildts", "git", "package", "proto", "rustc", "solana", "version"]
+        &["buildts", "git", "package", "proto", "rustc", "version"]
     ).unwrap();
 }
 
@@ -33,7 +33,6 @@ fn init2() {
                 VERSION_INFO.package,
                 VERSION_INFO.proto,
                 VERSION_INFO.rustc,
-                VERSION_INFO.solana,
                 VERSION_INFO.version,
             ])
             .inc();
