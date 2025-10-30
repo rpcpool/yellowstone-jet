@@ -16,7 +16,6 @@ use {
         QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
         QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
     },
-    solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
     std::{
         collections::HashSet,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -28,6 +27,8 @@ use {
     yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
     yellowstone_vixen_yellowstone_grpc_source::YellowstoneGrpcConfig,
 };
+
+pub const DEFAULT_TPU_CONNECTION_POOL_SIZE: usize = 1;
 
 fn deserialize_pubkey<'de, D>(deserializer: D) -> Result<Pubkey, D::Error>
 where
