@@ -23,8 +23,6 @@ upstream:
   cluster_nodes_update_interval: 30s
   # Stake update interval
   stake_update_interval: 30s
-  # Shield Program Id (Optional)
-  # program_id: b1ockYL7X6sGtJzueDbxRVBEEPN4YeqoLW276R3MX8W
 
 # jet-gateway endpoints
 # jet_gateway:
@@ -142,7 +140,6 @@ quic:
 #   leader_forward_count: 3
 #   relay_only_mode: true
 
-
 features:
   enabled_features:
     - transaction_payload_v2
@@ -150,3 +147,6 @@ features:
 
 prometheus:
   url: http://127.0.0.1:8429/api/v1/import/prometheus
+
+# Shield Program Id (Optional)
+# program_id: b1ockYL7X6sGtJzueDbxRVBEEPN4YeqoLW276R3MX8W

@@ -97,6 +97,24 @@ pub struct ConfigJet {
 
     /// Prometheus Push Gateway
     pub prometheus: Option<PrometheusConfig>,
+
+    /// Shield Program ID (Optional, default to yellowstone-shield-store default)
+    #[serde(default, deserialize_with = "ConfigJet::deserialize_maybe_program_id")]
+    pub program_id: Option<Pubkey>,
+}
+
+impl ConfigJet {
+    fn deserialize_maybe_program_id<'de, D>(deserializer: D) -> Result<Option<Pubkey>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<String>::deserialize(deserializer)? {
+            Some(program_id_str) => Pubkey::from_str(&program_id_str)
+                .map(Some)
+                .map_err(de::Error::custom),
+            None => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,28 +195,9 @@ pub struct ConfigUpstream {
         with = "humantime_serde"
     )]
     pub stake_update_interval: Duration,
-
-    /// Shield Program ID (Optional, default to yellowstone-shield-store default)
-    #[serde(
-        default,
-        deserialize_with = "ConfigUpstream::deserialize_maybe_program_id"
-    )]
-    pub program_id: Option<Pubkey>,
 }
 
 impl ConfigUpstream {
-    fn deserialize_maybe_program_id<'de, D>(deserializer: D) -> Result<Option<Pubkey>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match Option::<String>::deserialize(deserializer)? {
-            Some(program_id_str) => Pubkey::from_str(&program_id_str)
-                .map(Some)
-                .map_err(de::Error::custom),
-            None => Ok(None),
-        }
-    }
-
     const fn default_rpc_retry() -> RpcErrorStrategy {
         RpcErrorStrategy::Fixed {
             interval: Duration::from_millis(100),
@@ -236,16 +235,15 @@ impl ConfigUpstreamGrpc {
     }
 }
 
-impl From<ConfigUpstream> for PolicyStoreConfig {
-    fn from(
-        ConfigUpstream {
+impl ConfigUpstream {
+    pub fn to_policy_store_config(self, program_id: Option<Pubkey>) -> PolicyStoreConfig {
+        let ConfigUpstream {
             rpc,
             grpc: ConfigUpstreamGrpc { endpoint, x_token },
-            program_id,
             ..
-        }: ConfigUpstream,
-    ) -> Self {
-        Self {
+        } = self;
+
+        PolicyStoreConfig {
             rpc: PolicyStoreRpcConfig { endpoint: rpc },
             grpc: PolicyStoreGrpcConfig {
                 endpoint,
