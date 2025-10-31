@@ -25,7 +25,9 @@ use {
         str::FromStr,
     },
     tokio::{fs, time::Duration},
-    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreGrpcConfig, PolicyStoreRpcConfig, ShieldStoreCommitmentLevel},
+    yellowstone_shield_store::{
+        PolicyStoreConfig, PolicyStoreGrpcConfig, PolicyStoreRpcConfig, ShieldStoreCommitmentLevel,
+    },
 };
 
 pub const DEFAULT_TPU_CONNECTION_POOL_SIZE: usize = 1;
@@ -177,7 +179,10 @@ pub struct ConfigUpstream {
     pub stake_update_interval: Duration,
 
     /// Shield Program ID (Optional, default to yellowstone-shield-store default)
-    #[serde(default, deserialize_with = "ConfigUpstream::deserialize_maybe_program_id")]
+    #[serde(
+        default,
+        deserialize_with = "ConfigUpstream::deserialize_maybe_program_id"
+    )]
     pub program_id: Option<Pubkey>,
 }
 
@@ -187,11 +192,9 @@ impl ConfigUpstream {
         D: Deserializer<'de>,
     {
         match Option::<String>::deserialize(deserializer)? {
-            Some(program_id_str) => {
-                Pubkey::from_str(&program_id_str)
-                    .map(Some)
-                    .map_err(de::Error::custom)
-            }
+            Some(program_id_str) => Pubkey::from_str(&program_id_str)
+                .map(Some)
+                .map_err(de::Error::custom),
             None => Ok(None),
         }
     }
