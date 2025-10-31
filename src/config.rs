@@ -22,10 +22,10 @@ use {
         num::{NonZeroU64, NonZeroUsize},
         ops::Range,
         path::{Path, PathBuf},
+        str::FromStr,
     },
     tokio::{fs, time::Duration},
-    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreRpcConfig},
-    yellowstone_vixen_yellowstone_grpc_source::YellowstoneGrpcConfig,
+    yellowstone_shield_store::{PolicyStoreConfig, PolicyStoreGrpcConfig, PolicyStoreRpcConfig, ShieldStoreCommitmentLevel},
 };
 
 pub const DEFAULT_TPU_CONNECTION_POOL_SIZE: usize = 1;
@@ -175,9 +175,27 @@ pub struct ConfigUpstream {
         with = "humantime_serde"
     )]
     pub stake_update_interval: Duration,
+
+    /// Shield Program ID (Optional, default to yellowstone-shield-store default)
+    #[serde(default, deserialize_with = "ConfigUpstream::deserialize_maybe_program_id")]
+    pub program_id: Option<Pubkey>,
 }
 
 impl ConfigUpstream {
+    fn deserialize_maybe_program_id<'de, D>(deserializer: D) -> Result<Option<Pubkey>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<String>::deserialize(deserializer)? {
+            Some(program_id_str) => {
+                Pubkey::from_str(&program_id_str)
+                    .map(Some)
+                    .map_err(de::Error::custom)
+            }
+            None => Ok(None),
+        }
+    }
+
     const fn default_rpc_retry() -> RpcErrorStrategy {
         RpcErrorStrategy::Fixed {
             interval: Duration::from_millis(100),
@@ -220,20 +238,29 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
         ConfigUpstream {
             rpc,
             grpc: ConfigUpstreamGrpc { endpoint, x_token },
+            program_id,
             ..
         }: ConfigUpstream,
     ) -> Self {
         Self {
             rpc: PolicyStoreRpcConfig { endpoint: rpc },
-            grpc: YellowstoneGrpcConfig {
+            grpc: PolicyStoreGrpcConfig {
                 endpoint,
                 x_token,
-                timeout: 60,
-                commitment_level: Some(yellowstone_vixen::CommitmentLevel::Confirmed),
                 max_decoding_message_size: Some(100_000_000),
-                from_slot: None,
-                accept_compression: None,
+                commitment: Some(ShieldStoreCommitmentLevel::Confirmed),
+                connect_timeout: Duration::from_secs(60),
+                http2_adaptive_window: true,
+                http2_keep_alive: true,
+                timeout: Duration::from_secs(60),
+                tcp_nodelay: true,
+                http2_keep_alive_interval: None,
+                http2_keep_alive_timeout: None,
+                http2_keep_alive_while_idle: None,
+                initial_connection_window_size: None,
+                initial_stream_window_size: None,
             },
+            program_id,
         }
     }
 }
