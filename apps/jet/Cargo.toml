@@ -85,8 +85,6 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 yellowstone-grpc-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
 yellowstone-shield-store = { workspace = true }
-yellowstone-vixen = { workspace = true }
-yellowstone-vixen-yellowstone-grpc-source = { workspace = true }
 tokio-util = { workspace = true }
 tikv-jemallocator = { workspace = true }
 

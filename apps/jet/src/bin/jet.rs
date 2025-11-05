@@ -269,8 +269,9 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         .features
         .is_feature_enabled(yellowstone_jet::proto::jet::Feature::YellowstoneShield)
     {
+        let policy_store_config = config.upstream.clone().into();
         let policy_store = PolicyStore::build()
-            .config(config.upstream.clone().into())
+            .config(policy_store_config)
             .run()
             .await?;
 

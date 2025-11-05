@@ -58,27 +58,27 @@ listen_solana_like:
   proxy_preflight_check: false
 
 
-# Send retry options 
+# Send retry options
 send_transaction_service:
   # Send transaction to number of leaders (include the current leader)
   # if set to `2` : send to current leader + next leader.
   leader_forward_count: 2
-  
+
   # relay_only_mode : effectively no retry is schedule per transaction, simply fanout to upcoming leaders.
   #
   # ignores `default_max_retries`, `service_max_retries`, `stop_send_on_commitment` and `retry_rate`
   # WE RECOMMEND setting relay_only_mode=true, for staked jet instance for best performance.
   # retry can add a lot of overhead and is better handled by the original transaction sender (the client).
   relay_only_mode: true
-  
+
   # Default max retries of sending transaction
   # only interpreted if `relay_only_mode: false`
   default_max_retries: 0
-  
+
   # Service max retries
   # only interpreted if `relay_only_mode: false`
   service_max_retries: 0
-  
+
   # Try to send transaction every retry_rate duration
   # only interpreted if `relay_only_mode: false`
   retry_rate: 1s
@@ -139,7 +139,6 @@ quic:
 # send_transaction_service:
 #   leader_forward_count: 3
 #   relay_only_mode: true
-
 
 features:
   enabled_features:
