@@ -147,6 +147,3 @@ features:
 
 prometheus:
   url: http://127.0.0.1:8429/api/v1/import/prometheus
-
-# Shield Program Id (Optional)
-# program_id: b1ockYL7X6sGtJzueDbxRVBEEPN4YeqoLW276R3MX8W

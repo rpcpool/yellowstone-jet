@@ -235,13 +235,13 @@ impl ConfigUpstreamGrpc {
     }
 }
 
-impl ConfigUpstream {
-    pub fn to_policy_store_config(self, program_id: Option<Pubkey>) -> PolicyStoreConfig {
+impl From<ConfigUpstream> for PolicyStoreConfig {
+    fn from(config: ConfigUpstream) -> Self {
         let ConfigUpstream {
             rpc,
             grpc: ConfigUpstreamGrpc { endpoint, x_token },
             ..
-        } = self;
+        } = config;
 
         PolicyStoreConfig {
             rpc: PolicyStoreRpcConfig { endpoint: rpc },
@@ -261,7 +261,6 @@ impl ConfigUpstream {
                 initial_connection_window_size: None,
                 initial_stream_window_size: None,
             },
-            program_id,
         }
     }
 }
