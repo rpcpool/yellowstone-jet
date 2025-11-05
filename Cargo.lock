@@ -7327,7 +7327,7 @@ dependencies = [
 [[package]]
 name = "yellowstone-shield-client"
 version = "0.7.0"
-source = "git+https://github.com/rpcpool/yellowstone-shield.git?tag=yellowstone-shield-store-v0.8.0#76ee05190fe07257fcfc527d546ac435faa0b3a4"
+source = "git+https://github.com/rpcpool/yellowstone-shield.git?branch=main#7d0b17ffd0b493a151bc0d3852a3fc7b639485b6"
 dependencies = [
  "borsh 1.5.7",
  "num-derive",
@@ -7352,7 +7352,7 @@ dependencies = [
 [[package]]
 name = "yellowstone-shield-parser"
 version = "0.8.0"
-source = "git+https://github.com/rpcpool/yellowstone-shield.git?tag=yellowstone-shield-store-v0.8.0#76ee05190fe07257fcfc527d546ac435faa0b3a4"
+source = "git+https://github.com/rpcpool/yellowstone-shield.git?branch=main#7d0b17ffd0b493a151bc0d3852a3fc7b639485b6"
 dependencies = [
  "borsh 1.5.7",
  "solana-program",
@@ -7362,7 +7362,7 @@ dependencies = [
 [[package]]
 name = "yellowstone-shield-store"
 version = "0.8.0"
-source = "git+https://github.com/rpcpool/yellowstone-shield.git?tag=yellowstone-shield-store-v0.8.0#76ee05190fe07257fcfc527d546ac435faa0b3a4"
+source = "git+https://github.com/rpcpool/yellowstone-shield.git?branch=main#7d0b17ffd0b493a151bc0d3852a3fc7b639485b6"
 dependencies = [
  "anyhow",
  "arc-swap",

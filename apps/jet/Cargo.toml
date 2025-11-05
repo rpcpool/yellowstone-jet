@@ -1,0 +1,112 @@
+[package]
+name = "yellowstone-jet"
+version = "14.7.0"
+description = "Yellowstone Jet"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bincode = { workspace = true }
+bs58 = { workspace = true }
+borsh = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true, features = ["cargo", "derive", "env"] }
+derive_more = { workspace = true, features = ["display"] }
+futures = { workspace = true }
+hostname = { workspace = true }
+humantime-serde = { workspace = true }
+hyper = { workspace = true }
+jsonrpsee = { workspace = true, features = ["http-client", "macros", "server"] }
+lazy_static = { workspace = true }
+maplit = { workspace = true }
+pin-project = { workspace = true }
+prometheus = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+quinn = { workspace = true }
+quinn-proto = { workspace = true }
+rand = { workspace = true }
+rustls = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+solana-client = { workspace = true }
+solana-net-utils = { workspace = true }
+solana-quic-client = { workspace = true }
+solana-rpc-client-api = { workspace = true }
+solana-streamer = { workspace = true }
+solana-version = { workspace = true }
+solana-rpc-client = { workspace = true }
+solana-transaction-status-client-types = { workspace = true }
+solana-system-interface = { workspace = true }
+solana-bincode = { workspace = true }
+solana-tls-utils = { workspace = true }
+solana-program = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+retry = { workspace = true }
+solana-instruction = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-keypair = { workspace = true }
+solana-account = { workspace = true }
+solana-clock = { workspace = true }
+solana-hash = { workspace = true }
+solana-epoch-schedule = { workspace = true }
+solana-quic-definitions = { workspace = true }
+solana-signature = { workspace = true, features = ["rand"] }
+solana-signer = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-transaction = { workspace = true }
+solana-epoch-info = { workspace = true }
+solana-commitment-config = { workspace = true }
+solana-transaction-error = { workspace = true }
+solana-message = { workspace = true }
+solana-compute-budget-interface = { workspace = true }
+solana-native-token = { workspace = true }
+solana-nonce = { workspace = true }
+solana-packet = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tonic-prost = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true, features = ["tls-native-roots"] }
+tonic-health = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+yellowstone-grpc-client = { workspace = true }
+yellowstone-grpc-proto = { workspace = true }
+yellowstone-shield-store = { workspace = true }
+tokio-util = { workspace = true }
+tikv-jemallocator = { workspace = true }
+
+# # [[bin]]
+# # name = "lewis-dummy-server"
+# # path = "src/bin/lewis_dummy_server.rs"
+
+[build-dependencies]
+anyhow = { workspace = true }
+cargo-lock = { workspace = true }
+git-version = { workspace = true }
+protobuf-src = { workspace = true }
+tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }
+vergen = { workspace = true, features = ["build", "rustc"] }
+
+[lints]
+workspace = true
+
+# [profile.release]
+# codegen-units = 1
+# lto = true
+
+# [workspace.target.'cfg(not(target_env = "msvc"))'.dependencies]
+# tikv-jemallocator = { workspace = true }

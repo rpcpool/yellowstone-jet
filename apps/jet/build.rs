@@ -13,11 +13,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     // Extract packages version
-    let lockfile = Lockfile::load("Cargo.lock")?;
-    println!(
-        "cargo:rustc-env=SOLANA_SDK_VERSION={}",
-        get_pkg_version(&lockfile, "solana-sdk")
-    );
+    let lockfile = Lockfile::load("../../Cargo.lock")?;
     println!(
         "cargo:rustc-env=YELLOWSTONE_GRPC_PROTO_VERSION={}",
         get_pkg_version(&lockfile, "yellowstone-grpc-proto")
