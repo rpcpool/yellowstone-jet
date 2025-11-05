@@ -721,7 +721,6 @@ impl QuicTxSenderWorker {
                 let current_mut = path_stats.current_mtu;
                 set_leader_mtu(self.remote_peer, current_mut);
                 observe_leader_rtt(self.remote_peer, path_stats.rtt);
-                quic_send_attempts_inc(self.remote_peer, remote_addr, "success");
                 None
             }
             Err(e) => {
