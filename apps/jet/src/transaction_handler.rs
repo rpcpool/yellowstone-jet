@@ -257,7 +257,7 @@ mod tests {
         solana_message::Message,
         solana_pubkey::Pubkey,
         solana_signer::Signer,
-        solana_transaction::{InstructionError, Transaction}, solana_transaction_status_client_types::UiTransactionError,
+        solana_transaction::{Transaction, TransactionError},
     };
 
     #[derive(Debug)]
@@ -279,7 +279,11 @@ mod tests {
                     api_version: None,
                 },
                 value: RpcSimulateTransactionResult {
-                    err: Some(UiTransactionError::InstructionError(0, InstructionError::AccountBorrowOutstanding)),
+                    err: Some(
+                        solana_transaction_status_client_types::UiTransactionError::from(
+                            TransactionError::AccountBorrowOutstanding,
+                        ),
+                    ),
                     logs: None,
                     accounts: None,
                     units_consumed: None,
