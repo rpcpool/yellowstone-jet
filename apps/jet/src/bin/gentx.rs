@@ -17,6 +17,7 @@ use {
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_signer::Signer,
+    solana_system_interface::instruction::transfer,
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status_client_types::{TransactionDetails, UiTransactionEncoding},
     std::{
@@ -347,7 +348,7 @@ async fn main() -> anyhow::Result<()> {
                 instructions.push(ComputeBudgetInstruction::set_compute_unit_price(price));
             }
             let lamports = 5_000 + index;
-            instructions.push(solana_system_interface::instruction::transfer(
+            instructions.push(transfer(
                 &wallet_pubkey,
                 &wallet_pubkey,
                 lamports,

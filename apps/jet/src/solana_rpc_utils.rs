@@ -176,7 +176,7 @@ pub mod testkit {
         Box::new(move || {
             Err(solana_rpc_client_api::client_error::Error {
                 request: None,
-                kind: ErrorKind::Io(std::io::Error::from_raw_os_error(1)),
+                kind: Box::new(ErrorKind::Io(std::io::Error::from_raw_os_error(1))),
             })
         })
     }
@@ -185,7 +185,7 @@ pub mod testkit {
         Box::new(move || {
             Err(solana_rpc_client_api::client_error::Error {
                 request: None,
-                kind: ErrorKind::Custom("testkit fatal error".to_string()),
+                kind: Box::new(ErrorKind::Custom("testkit fatal error".to_string())),
             })
         })
     }

@@ -10,6 +10,11 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+## [14.8.0]
+
+## Changes
+- Bump crates to use Agave v3
+
 ## [14.7.1]
 
 ### Fixes

@@ -6,8 +6,11 @@ use {
     futures::{StreamExt, stream},
     solana_client::{nonblocking::rpc_client::RpcClient, rpc_response::RpcVoteAccountStatus},
     solana_pubkey::Pubkey,
-    solana_quic_definitions::QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
-    solana_streamer::nonblocking::quic::{ConnectionPeerType, compute_max_allowed_uni_streams},
+    solana_quic_definitions::{
+        QUIC_MAX_STAKED_CONCURRENT_STREAMS, QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
+        QUIC_MIN_STAKED_CONCURRENT_STREAMS, QUIC_TOTAL_STAKED_CONCURRENT_STREAMS,
+    },
+    solana_streamer::nonblocking::quic::ConnectionPeerType,
     std::{
         collections::HashMap,
         future::Future,
@@ -21,6 +24,38 @@ use {
     tokio_stream::wrappers::ReceiverStream,
     tokio_util::sync::CancellationToken,
 };
+
+/// This function has been imported from https://github.com/anza-xyz/agave/blob/v2.3.13/streamer/src/nonblocking/quic.rs
+/// In Solana crates V3, they no longer compute the max allowed uni streams based on stake.
+/// We need this function to keep compatibility with the current gateway logic.
+/// After running in producer we don't find any issue keeping this function
+pub fn compute_max_allowed_uni_streams(peer_type: ConnectionPeerType, total_stake: u64) -> usize {
+    match peer_type {
+        ConnectionPeerType::Staked(peer_stake) => {
+            // No checked math for f64 type. So let's explicitly check for 0 here
+            if total_stake == 0 || peer_stake > total_stake {
+                tracing::warn!(
+                    "Invalid stake values: peer_stake: {:?}, total_stake: {:?}",
+                    peer_stake,
+                    total_stake,
+                );
+
+                QUIC_MIN_STAKED_CONCURRENT_STREAMS
+            } else {
+                let delta = (QUIC_TOTAL_STAKED_CONCURRENT_STREAMS
+                    - QUIC_MIN_STAKED_CONCURRENT_STREAMS) as f64;
+
+                (((peer_stake as f64 / total_stake as f64) * delta) as usize
+                    + QUIC_MIN_STAKED_CONCURRENT_STREAMS)
+                    .clamp(
+                        QUIC_MIN_STAKED_CONCURRENT_STREAMS,
+                        QUIC_MAX_STAKED_CONCURRENT_STREAMS,
+                    )
+            }
+        }
+        ConnectionPeerType::Unstaked => QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
+    }
+}
 
 pub fn stake_to_per100ms_limit(stake: u64, total_stake: u64) -> u64 {
     if stake == 0 || total_stake == 0 || stake > total_stake {

@@ -2,6 +2,7 @@
 members = [
     "apps/jet",
 ]
+resolver = "2"
 
 [workspace.package]
 authors = ["Triton One"]
@@ -10,25 +11,24 @@ homepage = "https://triton.one"
 repository = "https://github.com/rpcpool/yellowstone-jet"
 license = "Apache-2.0"
 keywords = ["yellowstone", "solana", "rpc", "jet", "tpu", "triton"]
-resolver = "2"
 publish = false
 
 [workspace.dependencies]
-anyhow = "1.0.97"
-async-trait = "0.1.83"
-base64 = "0.22.0"
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+base64 = "0.22.1"
 bincode = "1.3.3"
 bs58 = "0.5.1"
-borsh = "1.5.1"
-bytes = "1.10.0"
-clap = "4.5.2"
+borsh = "1.5.7"
+bytes = "1.10.1"
+clap = "4.5.51"
 derive_more = "2.0.1"
-futures = "0.3.30"
-hostname = "0.4.0"
+futures = "0.3.31"
+hostname = "0.4.1"
 humantime-serde = "1.1.1"
-hyper = "1.5.0"
+hyper = "1.7.0"
 jsonrpsee = "0.26.0"
-lazy_static = "1.4.0"
+lazy_static = "1.5.0"
 maplit = "1.0.2"
 pin-project = "1.1.5"
 prometheus = "0.14.0"
@@ -36,53 +36,53 @@ prost = "0.14.0"
 prost-types = "0.14.0"
 quinn = "0.11.6"
 quinn-proto = "0.11.6"
-rand = "0.9.0"
-rustls = { version = "0.23.15", default-features = false }
+rand = "0.9.2"
+rustls = { version = "0.23.35", default-features = false }
 semver = "1.0.22"
 serde = "1.0.215"
 serde_json = "1.0.116"
 serde_yaml = "0.9.25"
 
 # Agave Crates
-solana-client = "2.0.0"
-# solana-connection-cache = "2.0.0"
-solana-net-utils = "2.0.0"
-solana-quic-client = "2.0.0"
-solana-rpc-client-api = "2.0.0"
-solana-streamer = "2.0.0"
-solana-version = "2.0.0"
-solana-rpc-client = "2.0.0"
-solana-transaction-status-client-types = "2.0.0"
-solana-system-interface = "1.0.0"
-solana-bincode = "2.0.0"
-solana-tls-utils = "2.0.0"
+solana-client = "3.0.0"
+# solana-connection-cache = "3.0.0"
+solana-net-utils = "3.0.0"
+solana-quic-client = "3.0.0"
+solana-rpc-client-api = "3.0.0"
+solana-streamer = "3.0.0"
+solana-version = "3.0.0"
+solana-rpc-client = "3.0.0"
+solana-transaction-status-client-types = "3.0.0"
+solana-system-interface = "3.0.0"
+solana-bincode = "3.0.0"
+solana-tls-utils = "3.0.0"
 # --> Anza - Solana SDK (decoupled from agave)
-solana-program = "2.0.0"
-# TEMPORARY
-reqwest = "0.12.15"
-retry = "2.0.0"
-solana-instruction = "2.0.0"
-solana-pubkey = "2.0.0"
-solana-keypair = "2.0.0"
-solana-account = "2.0.0"
-solana-clock = "2.0.0"
-solana-hash = "2.0.0"
-solana-epoch-schedule = "2.0.0"
-solana-quic-definitions = "2.0.0"
-solana-signature = "2.0.0"
-solana-signer = "2.0.0"
-solana-sdk-ids = "2.0.0"
-solana-transaction = "2.0.0"
-solana-epoch-info = "2.0.0"
-solana-commitment-config = "2.0.0"
-solana-transaction-error = "2.0.0"
-solana-message = "2.0.0"
-solana-compute-budget-interface = "2.0.0"
-solana-native-token = "2.0.0"
-solana-nonce = "2.0.0"
-solana-packet = "2.0.0"
-thiserror = "2.0.0"
-tokio = "1.36.0"
+solana-program = "3.0.0"
+solana-instruction = "3.0.0"
+solana-pubkey = "3.0.0"
+solana-keypair = "3.0.0"
+solana-account = "3.0.0"
+solana-clock = "3.0.0"
+solana-hash = "3.0.0"
+solana-epoch-schedule = "3.0.0"
+solana-quic-definitions = "3.0.0"
+solana-signature = "3.0.0"
+solana-signer = "3.0.0"
+solana-sdk-ids = "3.0.0"
+solana-transaction = "3.0.0"
+solana-epoch-info = "3.0.0"
+solana-commitment-config = "3.0.0"
+solana-transaction-error = "3.0.0"
+solana-message = "3.0.0"
+solana-compute-budget-interface = "3.0.0"
+solana-native-token = "3.0.0"
+solana-nonce = "3.0.0"
+solana-packet = "3.0.0"
+# End
+reqwest = "0.12.24"
+retry = "2.1.0"
+thiserror = "2.0.17"
+tokio = "1.48.0"
 tonic-prost = "0.14.0"
 tokio-stream = "0.1.15"
 tonic = "0.14.0"
@@ -91,9 +91,9 @@ tower = "0.5.0"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.1"
 uuid = "1.11.0"
-yellowstone-grpc-client = "9.0.0"
-yellowstone-grpc-proto = "9.0.0"
-yellowstone-shield-store = "0.8.0"
+yellowstone-grpc-client = "10.1.1"
+yellowstone-grpc-proto = "10.1.1"
+yellowstone-shield-store = "0.9.0"
 tokio-util = "0.7.16"
 cargo-lock = "10.0.1"
 git-version = "0.3.9"
@@ -101,7 +101,7 @@ protobuf-src = "1.1.0"
 tonic-build = "0.14.0"
 tonic-prost-build = "0.14.0"
 vergen = "9.0.1"
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.6.1"
 
 [workspace.lints.clippy]
 clone_on_ref_ptr = "deny"
@@ -113,15 +113,15 @@ codegen-units = 1
 lto = true
 
 [patch.crates-io]
-solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-rpc-client-api = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-account-decoder = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-account-decoder-client-types = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-streamer = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-transaction-context = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-transaction-status = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-transaction-status-client-types = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-net-utils   = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-tpu-client  = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
-solana-quic-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v2.3.8-triton-public" }
+solana-rpc-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-rpc-client-api = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-account-decoder = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-account-decoder-client-types = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-streamer = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-transaction-context = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-transaction-status = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-transaction-status-client-types = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-net-utils   = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-tpu-client  = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
+solana-quic-client = { git = "https://github.com/rpcpool/solana-public.git", tag = "v3.0.6-triton-public" }
