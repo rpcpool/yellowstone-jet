@@ -46,7 +46,7 @@ solana-streamer = { workspace = true }
 solana-version = { workspace = true }
 solana-rpc-client = { workspace = true }
 solana-transaction-status-client-types = { workspace = true }
-solana-system-interface = { workspace = true }
+solana-system-interface = { workspace = true, features = ["bincode"] }
 solana-bincode = { workspace = true }
 solana-tls-utils = { workspace = true }
 solana-program = { workspace = true }

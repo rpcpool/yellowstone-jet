@@ -1,50 +1,29 @@
 use {
-    anyhow::Context,
-    base64::{Engine, prelude::BASE64_STANDARD},
-    clap::Parser,
-    futures::{channel::mpsc, future::TryFutureExt, sink::SinkExt},
-    reqwest::Client,
-    serde::{Deserialize, Deserializer, de},
-    solana_client::{
+    anyhow::Context, base64::{Engine, prelude::BASE64_STANDARD}, clap::Parser, futures::{channel::mpsc, future::TryFutureExt, sink::SinkExt}, reqwest::Client, serde::{Deserialize, Deserializer, de}, solana_client::{
         nonblocking::rpc_client::RpcClient,
         rpc_config::{RpcBlockConfig, RpcSendTransactionConfig},
-    },
-    solana_commitment_config::{CommitmentConfig, CommitmentLevel},
-    solana_compute_budget_interface::ComputeBudgetInstruction,
-    solana_keypair::{Keypair, read_keypair_file},
-    solana_message::{VersionedMessage, v0},
-    solana_native_token::LAMPORTS_PER_SOL,
-    solana_pubkey::Pubkey,
-    solana_signature::Signature,
-    solana_signer::Signer,
-    solana_transaction::versioned::VersionedTransaction,
-    solana_transaction_status_client_types::{TransactionDetails, UiTransactionEncoding},
-    std::{
+    }, solana_commitment_config::{CommitmentConfig, CommitmentLevel}, solana_compute_budget_interface::ComputeBudgetInstruction, solana_keypair::{Keypair, read_keypair_file}, solana_message::{VersionedMessage, v0}, solana_native_token::LAMPORTS_PER_SOL, solana_pubkey::Pubkey, solana_signature::Signature, solana_signer::Signer, solana_system_interface::instruction::transfer, solana_transaction::versioned::VersionedTransaction, solana_transaction_status_client_types::{TransactionDetails, UiTransactionEncoding}, std::{
         path::{Path, PathBuf},
         str::FromStr,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-    },
-    tokio::{
+    }, tokio::{
         fs,
         sync::Mutex,
         time::{Duration, sleep},
-    },
-    tonic::{
+    }, tonic::{
         Response, Streaming,
         transport::{Endpoint, channel::ClientTlsConfig},
-    },
-    tracing::{error, info},
-    yellowstone_jet::{
+    }, tracing::{error, info}, yellowstone_jet::{
         payload::{JetRpcSendTransactionConfig, TransactionPayload},
         proto::jet::{
             PublishRequest, PublishResponse, PublishTransaction,
             jet_gateway_client::JetGatewayClient, publish_request::Message as PublishMessage,
         },
         setup_tracing,
-    },
+    }
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -347,7 +326,7 @@ async fn main() -> anyhow::Result<()> {
                 instructions.push(ComputeBudgetInstruction::set_compute_unit_price(price));
             }
             let lamports = 5_000 + index;
-            instructions.push(solana_system_interface::instruction::transfer(
+            instructions.push(transfer(
                 &wallet_pubkey,
                 &wallet_pubkey,
                 lamports,
