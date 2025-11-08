@@ -205,7 +205,7 @@ impl TransactionHandler {
                 ..
             }) => Err(TransactionHandlerError::SimulationFailed(error.to_string())),
             Ok(_) => Ok(()),
-            Err(error) => match error.kind {
+            Err(error) => match *error.kind {
                 ClientErrorKind::RpcError(RpcError::RpcResponseError {
                     data: RpcResponseErrorData::NodeUnhealthy { num_slots_behind },
                     ..
@@ -257,8 +257,7 @@ mod tests {
         solana_message::Message,
         solana_pubkey::Pubkey,
         solana_signer::Signer,
-        solana_transaction::Transaction,
-        solana_transaction_error::TransactionError,
+        solana_transaction::{Transaction, TransactionError},
     };
 
     #[derive(Debug)]
@@ -280,7 +279,11 @@ mod tests {
                     api_version: None,
                 },
                 value: RpcSimulateTransactionResult {
-                    err: Some(TransactionError::AccountBorrowOutstanding),
+                    err: Some(
+                        solana_transaction_status_client_types::UiTransactionError::from(
+                            TransactionError::AccountBorrowOutstanding,
+                        ),
+                    ),
                     logs: None,
                     accounts: None,
                     units_consumed: None,
@@ -288,6 +291,12 @@ mod tests {
                     inner_instructions: None,
                     replacement_blockhash: None,
                     loaded_accounts_data_size: None,
+                    pre_balances: Some(vec![]),
+                    post_balances: Some(vec![]),
+                    fee: Some(0),
+                    loaded_addresses: None,
+                    pre_token_balances: None,
+                    post_token_balances: None,
                 },
             })
         }

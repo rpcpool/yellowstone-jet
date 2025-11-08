@@ -4,6 +4,7 @@ use {
     bincode::config::Options,
     bytes::Bytes,
     jsonrpsee::core::RpcResult,
+    solana_bincode::limited_deserialize,
     solana_client::{
         client_error::{ClientError, ClientErrorKind},
         nonblocking::rpc_client::RpcClient,
@@ -12,8 +13,8 @@ use {
     },
     solana_nonce::NONCED_TX_MARKER_IX_INDEX,
     solana_packet::PACKET_DATA_SIZE,
-    solana_program::{program_utils::limited_deserialize, system_instruction::SystemInstruction},
     solana_pubkey::Pubkey,
+    solana_system_interface::instruction::SystemInstruction,
     solana_transaction::{Transaction, versioned::VersionedTransaction},
     solana_transaction_status_client_types::TransactionBinaryEncoding,
     std::any::type_name,
@@ -110,7 +111,7 @@ pub fn get_durable_nonce(tx: &VersionedTransaction) -> Option<Pubkey> {
         })
         .filter(|ix| {
             matches!(
-                limited_deserialize(
+                limited_deserialize::<SystemInstruction>(
                     &ix.data, 4 /* serialized size of AdvanceNonceAccount */
                 ),
                 Ok(SystemInstruction::AdvanceNonceAccount)
@@ -132,20 +133,19 @@ pub fn get_durable_nonce(tx: &VersionedTransaction) -> Option<Pubkey> {
 }
 
 pub async fn sanitize_transaction_support_check(rpc: &RpcClient) -> anyhow::Result<bool> {
-    if let Err(ClientError {
-        kind: ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. }),
-        ..
-    }) = rpc
+    if let Err(ClientError { kind, .. }) = rpc
         .sanitize_transaction(
             &Transaction::default(),
             RcpSanitizeTransactionConfig::default(),
         )
         .await
     {
-        match code {
-            -32601 => return Ok(false),
-            -32602 => return Ok(true),
-            _ => {}
+        if let ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. }) = *kind {
+            match code {
+                -32601 => return Ok(false),
+                -32602 => return Ok(true),
+                _ => {}
+            }
         }
     }
 

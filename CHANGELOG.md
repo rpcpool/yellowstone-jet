@@ -10,6 +10,41 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+## [14.8.0]
+
+## Changes
+- Bump crates to use Agave v3
+
+## [14.7.1]
+
+### Fixes
+
+- Fixed `quic_send_attempts` double-reporting on success (#89)
+- Fixed entry cleanup in stake sorted-map (#90)
+
+### Changes
+
+- Removed vixen dependency (#88)
+
+## [14.7.0]
+
+### Features
+
+- Upgraded dependencies (#84)
+  - Updated jsonrpsee: 0.24.7 to 0.26.0
+  - Updated prometheus, prost, prost-types: 0.13.3 to 0.14.0
+  - Updated rand: 0.8.5 to 0.9.0
+  - Updated tonic ecosystem: 0.12.3 to 0.14.0
+  - Updated tower: 0.4.13 to 0.5.0
+  - Updated thiserror: 1.0.58 to 2.0.0
+  - Updated yellowstone-grpc-client/proto: 7 to 9.0.0
+  - Updated yellowstone-shield-store: ~0.5.2 to 0.7.0
+  - Updated Solana public repository patches from v2.2.19-triton-public to v2.3.8-triton-public
+
+### Fixes
+
+- Removed local set from shield store runtime
+
 ## [14.6.3]
 
 - Added more details in log during connection error

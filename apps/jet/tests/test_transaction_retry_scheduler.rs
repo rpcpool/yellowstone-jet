@@ -5,9 +5,9 @@ use {
     solana_hash::Hash,
     solana_keypair::Keypair,
     solana_message::{VersionedMessage, v0},
-    solana_program::system_instruction::transfer,
     solana_pubkey::Pubkey,
     solana_signer::Signer,
+    solana_system_interface::instruction::transfer,
     solana_transaction::versioned::VersionedTransaction,
     std::{
         sync::{Arc, RwLock as StdRwLock},
