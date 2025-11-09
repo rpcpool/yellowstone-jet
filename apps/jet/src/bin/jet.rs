@@ -17,6 +17,8 @@ use {
     std::{
         collections::HashMap,
         fs,
+        fs::OpenOptions,
+        os::unix::fs::OpenOptionsExt,
         path::PathBuf,
         sync::{
             Arc,
@@ -144,10 +146,32 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
             let identity_prev = client.get_identity().await?;
 
             let mut reader: Box<dyn std::io::Read> = if let Some(identity_path) = identity {
-                Box::new(
-                    fs::File::open(&identity_path)
-                        .with_context(|| format!("Unable to open file: {identity_path:?}"))?,
-                )
+                // Canonicalize the path to avoid symlink attacks
+                let canonical_path = fs::canonicalize(&identity_path)
+                    .with_context(|| format!("Unable to canonicalize file: {identity_path:?}"))?;
+
+                // Check if the path is a regular file
+                let metadata = fs::metadata(&canonical_path).with_context(|| {
+                    format!("Unable to get metadata for file: {canonical_path:?}")
+                })?;
+                anyhow::ensure!(
+                    metadata.is_file(),
+                    "Path must be a regular file: {canonical_path:?}"
+                );
+
+                // Open with O_NOFOLLOW on Unix to prevent TOCTOU symlink attacks
+                #[cfg(unix)]
+                let file = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&canonical_path)
+                    .with_context(|| format!("Unable to open file: {canonical_path:?}"))?;
+
+                #[cfg(not(unix))]
+                let file = fs::File::open(&canonical_path)
+                    .with_context(|| format!("Unable to open file: {canonical_path:?}"))?;
+
+                Box::new(file)
             } else {
                 Box::new(std::io::stdin())
             };
