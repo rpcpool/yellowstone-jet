@@ -189,7 +189,7 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
                 identity != identity_prev,
                 format!("Failed to update identity: {identity} (new) != {identity_prev} (old)")
             );
-            println!("Successfully update identity to {identity}");
+            println!("Successfully updated identity to {identity}");
         }
         ArgsCommandAdmin::ResetIdentityKeypair => {
             client.reset_identity().await?;
