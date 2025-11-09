@@ -87,6 +87,7 @@ yellowstone-grpc-proto = { workspace = true }
 yellowstone-shield-store = { workspace = true }
 tokio-util = { workspace = true }
 tikv-jemallocator = { workspace = true }
+libc = "0.2.177"
 
 # # [[bin]]
 # # name = "lewis-dummy-server"

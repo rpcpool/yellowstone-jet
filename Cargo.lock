@@ -7041,6 +7041,7 @@ dependencies = [
  "hyper",
  "jsonrpsee",
  "lazy_static",
+ "libc",
  "maplit",
  "pin-project",
  "prometheus",
