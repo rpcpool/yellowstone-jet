@@ -1,7 +1,8 @@
-use std::net::SocketAddr;
-
-use serde::{Deserialize, Deserializer, de};
-use solana_pubkey::Pubkey;
+use {
+    serde::{Deserialize, Deserializer, de},
+    solana_pubkey::Pubkey,
+    std::net::SocketAddr,
+};
 
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,7 +32,6 @@ pub struct TpuOverrideInfo {
     ///
     pub quic_tpu_forward: SocketAddr,
 }
-
 
 fn deserialize_pubkey<'de, D>(deserializer: D) -> Result<Pubkey, D::Error>
 where
