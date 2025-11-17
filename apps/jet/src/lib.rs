@@ -26,6 +26,7 @@ pub mod rooted_transaction_state;
 // pub mod quic_solana;
 pub mod identity;
 pub mod jet_gateway;
+pub mod quic_client;
 pub mod rpc;
 pub mod solana;
 pub mod solana_rpc_utils;
@@ -34,7 +35,6 @@ pub mod transaction_handler;
 pub mod transactions;
 pub mod util;
 pub mod version;
-pub mod quic_client;
 
 pub fn setup_tracing(json: bool) -> anyhow::Result<()> {
     let env_filter = EnvFilter::builder()

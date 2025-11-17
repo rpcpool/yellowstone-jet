@@ -1,16 +1,10 @@
-
-
 use {
     prometheus::{
-        Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
-        IntGaugeVec, Opts, Registry,
+        Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+        Opts, Registry,
     },
     solana_pubkey::Pubkey,
-    std::{
-        net::SocketAddr,
-        sync::Mutex,
-        time::Duration,
-    },
+    std::{net::SocketAddr, sync::Mutex, time::Duration},
 };
 
 lazy_static::lazy_static! {
@@ -397,22 +391,36 @@ pub fn set_leader_mtu(leader: Pubkey, mtu: u16) {
 }
 
 pub fn regiser_metrics(reg: &Registry) {
-    reg.register(Box::new(QUIC_GW_ACTIVE_CONNECTION_GAUGE.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_CONNECTION_CLOSE_CNT.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_CONNECTION_FAILURE_CNT.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_CONNECTION_SUCCESS_CNT.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_CONNECTING_GAUGE.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_TOTAL_CONNECTION_EVICTIONS_CNT.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_ONGOING_EVICTIONS_GAUGE.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_TX_CONNECTION_CACHE_HIT_CNT.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_TX_CONNECTION_CACHE_MISS_CNT.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_CONNECTION_TIME_HIST.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_LEADER_PREDICTION_HIT.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_LEADER_PREDICTION_MISS.clone())).unwrap();
-    reg.register(Box::new(QUIC_GW_UNREACHABLE_PEER_CNT.clone())).unwrap();
-
+    reg.register(Box::new(QUIC_GW_ACTIVE_CONNECTION_GAUGE.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_CONNECTION_CLOSE_CNT.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_CONNECTION_FAILURE_CNT.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_CONNECTION_SUCCESS_CNT.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_CONNECTING_GAUGE.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_TOTAL_CONNECTION_EVICTIONS_CNT.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_ONGOING_EVICTIONS_GAUGE.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_TX_CONNECTION_CACHE_HIT_CNT.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_TX_CONNECTION_CACHE_MISS_CNT.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_CONNECTION_TIME_HIST.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_LEADER_PREDICTION_HIT.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_LEADER_PREDICTION_MISS.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_UNREACHABLE_PEER_CNT.clone()))
+        .unwrap();
 }
 
 pub fn inc_quic_gw_unreachable_peer_count(leader: Pubkey) {
@@ -420,7 +428,6 @@ pub fn inc_quic_gw_unreachable_peer_count(leader: Pubkey) {
         .with_label_values(&[&leader.to_string()])
         .inc();
 }
-
 
 pub fn shield_policies_not_found_inc() {
     SHIELD_POLICIES_NOT_FOUND_TOTAL.inc();

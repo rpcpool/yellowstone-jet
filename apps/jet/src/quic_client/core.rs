@@ -42,8 +42,9 @@
 //! Note that this module does not implement retry logic beyond attempting to reconnect when appropriate and safe to do so.
 //!
 use {
-    crate::{
-        crypto_provider::crypto_provider, quic_client::{config::{ConfigQuicTpuPort, TpuOverrideInfo}, prom},
+    crate::quic_client::{
+        config::{ConfigQuicTpuPort, TpuOverrideInfo},
+        prom,
     },
     bytes::Bytes,
     derive_more::Display,
@@ -52,6 +53,7 @@ use {
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
         WriteError, crypto::rustls::QuicClientConfig,
     },
+    rustls::{NamedGroup, crypto::CryptoProvider},
     solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
@@ -283,8 +285,6 @@ impl UpcomingLeaderPredictor for IgnorantLeaderPredictor {
 pub trait ValidatorStakeInfoService {
     fn get_stake_info(&self, validator_pubkey: &Pubkey) -> Option<u64>;
 }
-
-
 
 const FOREVER: Duration = Duration::from_secs(31_536_000); // One year is considered "forever" in this context.
 
@@ -538,6 +538,15 @@ struct ConnectingTask {
 /// Code taken from https://github.com/anza-xyz/agave/pull/7260
 pub fn socket_addr_to_quic_server_name(peer: SocketAddr) -> String {
     format!("{}.{}.sol", peer.ip(), peer.port())
+}
+
+pub fn crypto_provider() -> CryptoProvider {
+    let mut provider = rustls::crypto::ring::default_provider();
+    // Disable all key exchange algorithms except X25519
+    provider
+        .kx_groups
+        .retain(|kx| kx.name() == NamedGroup::X25519);
+    provider
 }
 
 impl ConnectingTask {
@@ -2117,7 +2126,11 @@ impl GatewayIdentityUpdater {
         update_identity.await
     }
 
-    pub async fn update_identity_with_confirmation_barrier(&self, identity: Keypair, barrier: Arc<Barrier>) {
+    pub async fn update_identity_with_confirmation_barrier(
+        &self,
+        identity: Keypair,
+        barrier: Arc<Barrier>,
+    ) {
         let cmd = MultiStepIdentitySynchronizationCommand {
             new_identity: identity,
             barrier,
@@ -2127,7 +2140,6 @@ impl GatewayIdentityUpdater {
             .await
             .expect("disconnected");
     }
-
 }
 
 ///
@@ -2365,9 +2377,9 @@ mod stake_based_eviction_strategy_test {
 #[cfg(test)]
 mod leader_tpu_info_service_test {
     use {
-        crate::{
-            config::TpuOverrideInfo,
-            quic_client::core::{LeaderTpuInfoService, OverrideTpuInfoService},
+        crate::quic_client::{
+            config::{ConfigQuicTpuPort, TpuOverrideInfo},
+            core::{LeaderTpuInfoService, OverrideTpuInfoService},
         },
         solana_pubkey::Pubkey,
         std::{
@@ -2448,18 +2460,14 @@ mod leader_tpu_info_service_test {
             }],
         };
 
-        let actual_fwd =
-            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Forwards);
-        let actual_normal =
-            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:9000".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:9001".parse().unwrap()));
 
         // It should not override anything if there is no override spec
-        let actual_fwd =
-            override_svc.get_quic_dest_addr(pk2, crate::config::ConfigQuicTpuPort::Forwards);
-        let actual_normal =
-            override_svc.get_quic_dest_addr(pk2, crate::config::ConfigQuicTpuPort::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(pk2, ConfigQuicTpuPort::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(pk2, ConfigQuicTpuPort::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8002".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8003".parse().unwrap()));
 
@@ -2469,10 +2477,8 @@ mod leader_tpu_info_service_test {
             override_vec: vec![],
         };
 
-        let actual_fwd =
-            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Forwards);
-        let actual_normal =
-            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8000".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8001".parse().unwrap()));
     }

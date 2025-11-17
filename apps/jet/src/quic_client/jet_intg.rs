@@ -1,10 +1,17 @@
-use std::{net::SocketAddr, sync::Arc};
-
-use crate::{cluster_tpu_info::ClusterTpuInfo, identity::JetIdentitySyncMember, quic_client::core::{GatewayIdentityUpdater, UpcomingLeaderPredictor, ValidatorStakeInfoService}, stake::StakeInfoMap};
-use solana_keypair::Keypair;
-use solana_pubkey::Pubkey;
-use crate::quic_client::core::LeaderTpuInfoService;
-
+use {
+    crate::{
+        cluster_tpu_info::ClusterTpuInfo,
+        identity::JetIdentitySyncMember,
+        quic_client::core::{
+            GatewayIdentityUpdater, LeaderTpuInfoService, UpcomingLeaderPredictor,
+            ValidatorStakeInfoService,
+        },
+        stake::StakeInfoMap,
+    },
+    solana_keypair::Keypair,
+    solana_pubkey::Pubkey,
+    std::{net::SocketAddr, sync::Arc},
+};
 
 impl LeaderTpuInfoService for ClusterTpuInfo {
     fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
@@ -28,7 +35,6 @@ impl UpcomingLeaderPredictor for ClusterTpuInfo {
     }
 }
 
-
 impl ValidatorStakeInfoService for StakeInfoMap {
     fn get_stake_info(&self, peer_pubkey: &Pubkey) -> Option<u64> {
         self.get_stake_info(*peer_pubkey)
@@ -42,6 +48,7 @@ impl JetIdentitySyncMember for GatewayIdentityUpdater {
         new_identity: Keypair,
         barrier: Arc<tokio::sync::Barrier>,
     ) {
-        self.update_identity_with_confirmation_barrier(new_identity, barrier).await;
+        self.update_identity_with_confirmation_barrier(new_identity, barrier)
+            .await;
     }
 }

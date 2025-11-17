@@ -43,7 +43,7 @@ use {
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         jet_gateway::spawn_jet_gw_listener,
         metrics::{collect_to_text, inject_job_label, jet as metrics},
-        quic_gateway::{
+        quic_client::core::{
             IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
             QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
             TokioQuicGatewaySpawner, UpcomingLeaderPredictor,
@@ -331,7 +331,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         });
 
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map: stake_info_map.clone(),
+        stake_info_map: Arc::new(stake_info_map.clone()),
         gateway_tx_channel_capacity: 10000,
         leader_tpu_info_service,
     };
