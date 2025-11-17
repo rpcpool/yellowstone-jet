@@ -58,25 +58,39 @@ impl RpcServer {
         };
         let server_handle = match server_type {
             RpcServerType::Admin {
-                jet_identity_updater: quic_identity_man,
+                jet_identity_updater,
                 allowed_identity,
                 cluster_tpu_info,
             } => {
                 use rpc_admin::{RpcServer, RpcServerImpl};
-
+                let health_jet_identity_updater = Arc::clone(&jet_identity_updater);
                 let server_middleware = tower::ServiceBuilder::new()
-                    .layer_fn(|service| UriRequestMiddleware {
-                        service,
-                        uri: "/health",
-                        get_response: || {
-                            // TODO: need to check TPUs for processed?
-                            match crate::metrics::jet::get_health_status() {
-                                Ok(()) => ready((StatusCode::OK, "ok".to_owned())),
-                                Err(error) => {
-                                    ready((StatusCode::SERVICE_UNAVAILABLE, error.to_string()))
+                    .layer_fn(move |service| {
+                        let jet_identity_updater = Arc::clone(&health_jet_identity_updater);
+                        UriRequestMiddleware {
+                            service,
+                            uri: "/health",
+                            get_response: move || {
+                                if let Some(expected) = allowed_identity {
+                                    let current =
+                                        jet_identity_updater.blocking_lock().get_identity();
+                                    if expected != current {
+                                        return ready((
+                                            StatusCode::SERVICE_UNAVAILABLE,
+                                            "identity mismatch".to_owned(),
+                                        ));
+                                    }
                                 }
-                            }
-                        },
+
+                                // TODO: need to check TPUs for processed?
+                                match crate::metrics::jet::get_health_status() {
+                                    Ok(()) => ready((StatusCode::OK, "ok".to_owned())),
+                                    Err(error) => {
+                                        ready((StatusCode::SERVICE_UNAVAILABLE, error.to_string()))
+                                    }
+                                }
+                            },
+                        }
                     })
                     .layer_fn(|service| UriRequestMiddleware {
                         service,
@@ -92,7 +106,7 @@ impl RpcServer {
                         server.start(
                             RpcServerImpl {
                                 allowed_identity,
-                                jet_identity_updater: quic_identity_man,
+                                jet_identity_updater,
                                 cluster_tpu_info,
                             }
                             .into_rpc(),
@@ -180,7 +194,7 @@ pub mod rpc_admin {
     pub trait JetIdentityUpdater {
         async fn update_identity(&mut self, identity: Keypair);
 
-        async fn get_identity(&self) -> Pubkey;
+        fn get_identity(&self) -> Pubkey;
     }
 
     pub struct RpcServerImpl {
@@ -197,7 +211,7 @@ pub mod rpc_admin {
         }
 
         async fn get_identity(&self) -> RpcResult<String> {
-            let identity = self.jet_identity_updater.lock().await.get_identity().await;
+            let identity = self.jet_identity_updater.lock().await.get_identity();
             Ok(identity.to_string())
         }
 
