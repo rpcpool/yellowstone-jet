@@ -7034,7 +7034,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet"
-version = "14.8.0"
+version = "14.8.1"
 dependencies = [
  "anyhow",
  "async-trait",

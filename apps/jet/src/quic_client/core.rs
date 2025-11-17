@@ -2012,10 +2012,10 @@ impl TokioQuicGatewaySpawner {
         let (gateway_resp_tx, gateway_resp_rx) = mpsc::unbounded_channel();
         let (gateway_cnc_tx, gateway_cnc_rx) = mpsc::channel(10);
 
-        let (certificate, privkey) = new_dummy_x509_certificate(&identity);
+        let (certificate, private_key) = new_dummy_x509_certificate(&identity);
         let cert = Arc::new(QuicClientCertificate {
             certificate,
-            key: privkey,
+            key: private_key,
         });
 
         let mut endpoints = vec![];
@@ -2049,7 +2049,7 @@ impl TokioQuicGatewaySpawner {
         );
 
         let gateway_runtime = TokioQuicGatewayRuntime {
-            stake_info_map: self.stake_info_map.clone(),
+            stake_info_map: Arc::clone(&self.stake_info_map),
             tx_worker_handle_map: Default::default(),
             tx_worker_task_meta_map: Default::default(),
             tx_worker_set: Default::default(),
