@@ -22,7 +22,7 @@ pub mod proto;
 pub mod pubkey_challenger;
 pub mod rooted_transaction_state;
 // pub mod quic;
-pub mod quic_gateway;
+// pub mod quic_gateway;
 // pub mod quic_solana;
 pub mod identity;
 pub mod jet_gateway;
@@ -34,6 +34,7 @@ pub mod transaction_handler;
 pub mod transactions;
 pub mod util;
 pub mod version;
+pub mod quic_client;
 
 pub fn setup_tracing(json: bool) -> anyhow::Result<()> {
     let env_filter = EnvFilter::builder()

@@ -1,7 +1,7 @@
 use {
     crate::{
         feature_flags::FeatureSet,
-        quic_gateway::{DEFAULT_LEADER_DURATION, DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT},
+        quic_client::core::{DEFAULT_LEADER_DURATION, DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT},
         util::CommitmentLevel,
     },
     anyhow::Context,

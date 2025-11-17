@@ -5,7 +5,7 @@ use {
         grpc_geyser::GrpcUpdateMessage,
         grpc_lewis::LewisEventHandler,
         metrics::jet as metrics,
-        quic_gateway::{GatewayResponse, GatewayTransaction},
+        quic_client::core::{GatewayResponse, GatewayTransaction},
         rooted_transaction_state::{RootedTxEffect, RootedTxEvent, RootedTxStateMachine},
         util::CommitmentLevel,
     },
