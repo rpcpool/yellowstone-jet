@@ -10,12 +10,6 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
-## [14.8.1]
-
-### Misc
-
-- Isolated quic-client in order to move this into a feature crate.
-
 ## [14.8.0]
 
 ## Changes
