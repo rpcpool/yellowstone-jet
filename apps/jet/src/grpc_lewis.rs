@@ -456,10 +456,8 @@ mod tests {
     }
 }
 
-
 pub mod prom {
     use prometheus::IntCounter;
-
 
     lazy_static::lazy_static! {
         static ref LEWIS_EVENTS_DROPPED: IntCounter = IntCounter::new(
@@ -481,12 +479,9 @@ pub mod prom {
         LEWIS_EVENTS_SENT.inc();
     }
 
-
     pub fn register_metrics(reg: &prometheus::Registry) {
         reg.register(Box::new(LEWIS_EVENTS_DROPPED.clone()))
             .unwrap();
-        reg.register(Box::new(LEWIS_EVENTS_SENT.clone()))
-            .unwrap();
+        reg.register(Box::new(LEWIS_EVENTS_SENT.clone())).unwrap();
     }
-
 }

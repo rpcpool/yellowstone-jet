@@ -75,7 +75,8 @@ pub mod jet {
     use {
         super::{REGISTRY, init2},
         crate::{
-            grpc_lewis, quic_client, util::{CommitmentLevel, SlotStatus}
+            grpc_lewis, quic_client,
+            util::{CommitmentLevel, SlotStatus},
         },
         prometheus::{
             Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
