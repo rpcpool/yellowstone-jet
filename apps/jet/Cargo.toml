@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "14.8.0"
+version = "14.8.1"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
@@ -43,12 +43,12 @@ solana-net-utils = { workspace = true }
 solana-quic-client = { workspace = true }
 solana-rpc-client-api = { workspace = true }
 solana-streamer = { workspace = true }
-solana-version = { workspace = true }
+solana-version = { workspace = true, features = ["agave-unstable-api"] }
 solana-rpc-client = { workspace = true }
 solana-transaction-status-client-types = { workspace = true }
 solana-system-interface = { workspace = true, features = ["bincode"] }
 solana-bincode = { workspace = true }
-solana-tls-utils = { workspace = true }
+solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
 solana-program = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 retry = { workspace = true }
@@ -88,10 +88,6 @@ yellowstone-shield-store = { workspace = true }
 tokio-util = { workspace = true }
 tikv-jemallocator = { workspace = true }
 
-# # [[bin]]
-# # name = "lewis-dummy-server"
-# # path = "src/bin/lewis_dummy_server.rs"
-
 [build-dependencies]
 anyhow = { workspace = true }
 cargo-lock = { workspace = true }
@@ -103,10 +99,3 @@ vergen = { workspace = true, features = ["build", "rustc"] }
 
 [lints]
 workspace = true
-
-# [profile.release]
-# codegen-units = 1
-# lto = true
-
-# [workspace.target.'cfg(not(target_env = "msvc"))'.dependencies]
-# tikv-jemallocator = { workspace = true }
