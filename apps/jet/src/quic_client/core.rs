@@ -42,19 +42,9 @@
 //! Note that this module does not implement retry logic beyond attempting to reconnect when appropriate and safe to do so.
 //!
 use {
-    crate::{
-        cluster_tpu_info::ClusterTpuInfo,
+    crate::quic_client::{
         config::{ConfigQuicTpuPort, TpuOverrideInfo},
-        crypto_provider::crypto_provider,
-        identity::JetIdentitySyncMember,
-        metrics::{
-            self,
-            jet::{
-                incr_quic_gw_worker_tx_process_cnt, observe_leader_rtt,
-                observe_send_transaction_e2e_latency, quic_send_attempts_inc, set_leader_mtu,
-            },
-        },
-        stake::StakeInfoMap,
+        prom,
     },
     bytes::Bytes,
     derive_more::Display,
@@ -63,6 +53,7 @@ use {
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
         WriteError, crypto::rustls::QuicClientConfig,
     },
+    rustls::{NamedGroup, crypto::CryptoProvider},
     solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
@@ -291,13 +282,8 @@ impl UpcomingLeaderPredictor for IgnorantLeaderPredictor {
     }
 }
 
-impl UpcomingLeaderPredictor for ClusterTpuInfo {
-    fn try_predict_next_n_leaders(&self, n: usize) -> Vec<Pubkey> {
-        self.get_leader_tpus(n)
-            .iter()
-            .map(|info| info.leader)
-            .collect()
-    }
+pub trait ValidatorStakeInfoService {
+    fn get_stake_info(&self, validator_pubkey: &Pubkey) -> Option<u64>;
 }
 
 const FOREVER: Duration = Duration::from_secs(31_536_000); // One year is considered "forever" in this context.
@@ -308,7 +294,7 @@ pub(crate) struct TokioQuicGatewayRuntime {
     ///
     /// The stake info map used to compute max stream limit
     ///
-    stake_info_map: StakeInfoMap,
+    stake_info_map: Arc<dyn ValidatorStakeInfoService + Send + Sync + 'static>,
 
     ///
     /// Holds on-going remote peer transaction sender workers.
@@ -434,19 +420,6 @@ pub trait LeaderTpuInfoService {
     }
 }
 
-impl LeaderTpuInfoService for ClusterTpuInfo {
-    fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
-        self.get_cluster_nodes()
-            .get(&leader_pubkey)
-            .and_then(|node| node.tpu_quic)
-    }
-    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
-        self.get_cluster_nodes()
-            .get(&leader_pubkey)
-            .and_then(|node| node.tpu_forwards_quic)
-    }
-}
-
 ///
 /// A service that overrides TPU information for specific peers.
 ///
@@ -565,6 +538,15 @@ struct ConnectingTask {
 /// Code taken from https://github.com/anza-xyz/agave/pull/7260
 pub fn socket_addr_to_quic_server_name(peer: SocketAddr) -> String {
     format!("{}.{}.sol", peer.ip(), peer.port())
+}
+
+pub fn crypto_provider() -> CryptoProvider {
+    let mut provider = rustls::crypto::ring::default_provider();
+    // Disable all key exchange algorithms except X25519
+    provider
+        .kx_groups
+        .retain(|kx| kx.name() == NamedGroup::X25519);
+    provider
 }
 
 impl ConnectingTask {
@@ -703,8 +685,8 @@ impl QuicTxSenderWorker {
         let tx_sig = tx.tx_sig;
         match result {
             Ok(sent_ok) => {
-                quic_send_attempts_inc(self.remote_peer, remote_addr, "success");
-                incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "success");
+                prom::quic_send_attempts_inc(self.remote_peer, remote_addr, "success");
+                prom::incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "success");
                 tracing::debug!(
                     "Tx sent to remote peer: {} in {:?}",
                     self.remote_peer,
@@ -716,17 +698,17 @@ impl QuicTxSenderWorker {
                     tx_sig,
                 };
                 let _ = self.output_tx.send(GatewayResponse::TxSent(resp));
-                observe_send_transaction_e2e_latency(self.remote_peer, sent_ok.e2e_time);
+                prom::observe_send_transaction_e2e_latency(self.remote_peer, sent_ok.e2e_time);
                 let path_stats = self.connection.stats().path;
                 let current_mut = path_stats.current_mtu;
-                set_leader_mtu(self.remote_peer, current_mut);
-                observe_leader_rtt(self.remote_peer, path_stats.rtt);
+                prom::set_leader_mtu(self.remote_peer, current_mut);
+                prom::observe_leader_rtt(self.remote_peer, path_stats.rtt);
                 None
             }
             Err(e) => {
-                quic_send_attempts_inc(self.remote_peer, remote_addr, "error");
+                prom::quic_send_attempts_inc(self.remote_peer, remote_addr, "error");
                 if attempt >= self.max_tx_attempt.get() {
-                    incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "error");
+                    prom::incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "error");
                     let resp = GatewayTxFailed {
                         remote_peer_identity: self.remote_peer,
                         remote_peer_addr: self.connection.remote_address(),
@@ -1124,7 +1106,7 @@ impl TokioQuicGatewayRuntime {
         );
         if let Some(tx_queues) = self.tx_queues.remove(&remote_peer_identity) {
             let total = tx_queues.len();
-            metrics::jet::incr_quic_gw_drop_tx_cnt(remote_peer_identity, total as u64);
+            prom::incr_quic_gw_drop_tx_cnt(remote_peer_identity, total as u64);
             let tx_drop = TxDrop {
                 remote_peer_identity,
                 drop_reason: reason.clone(),
@@ -1135,7 +1117,7 @@ impl TokioQuicGatewayRuntime {
     }
 
     fn unreachable_peer(&mut self, remote_peer_identity: Pubkey) {
-        metrics::jet::inc_quic_gw_unreachable_peer_count(remote_peer_identity);
+        prom::inc_quic_gw_unreachable_peer_count(remote_peer_identity);
         self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::RemotePeerUnreachable);
     }
 
@@ -1175,7 +1157,7 @@ impl TokioQuicGatewayRuntime {
             .flat_map(|peer| self.tx_worker_handle_map.get(&peer))
             .for_each(|handle| {
                 handle.cancel_notify.notify_one();
-                metrics::jet::incr_quic_gw_total_connection_evictions_cnt(1);
+                prom::incr_quic_gw_total_connection_evictions_cnt(1);
                 self.being_evicted_peers.insert(handle.remote_peer_identity);
             });
     }
@@ -1244,7 +1226,7 @@ impl TokioQuicGatewayRuntime {
                     .connecting_meta
                     .remove(&task_id)
                     .expect("connecting_meta");
-                metrics::jet::observe_quic_gw_connection_time(created_at.elapsed());
+                prom::observe_quic_gw_connection_time(created_at.elapsed());
                 self.endpoints_usage[endpoint_idx]
                     .connected_remote_peers
                     .remove(&remote_peer_identity);
@@ -1265,7 +1247,7 @@ impl TokioQuicGatewayRuntime {
                         tracing::debug!("Connected to remote peer: {:?}", remote_peer_identity);
                         let remote_peer_stake = self
                             .stake_info_map
-                            .get_stake_info(remote_peer_identity)
+                            .get_stake_info(&remote_peer_identity)
                             .unwrap_or(0);
                         self.active_staked_sorted_remote_peer
                             .insert(remote_peer_identity, remote_peer_stake);
@@ -1274,10 +1256,10 @@ impl TokioQuicGatewayRuntime {
                             .register_watch(remote_peer_identity, conn.remote_address());
 
                         self.install_worker(remote_peer_identity, conn);
-                        metrics::jet::incr_quic_gw_connection_success_cnt();
+                        prom::incr_quic_gw_connection_success_cnt();
                     }
                     Err(connect_err) => {
-                        metrics::jet::incr_quic_gw_connection_failure_cnt();
+                        prom::incr_quic_gw_connection_failure_cnt();
 
                         match connect_err {
                             ConnectingError::ConnectError(
@@ -1308,7 +1290,7 @@ impl TokioQuicGatewayRuntime {
                 }
             }
             Err(join_err) => {
-                metrics::jet::incr_quic_gw_connection_failure_cnt();
+                prom::incr_quic_gw_connection_failure_cnt();
                 let ConnectingMeta {
                     current_client_identity: _,
                     remote_peer_identity,
@@ -1346,11 +1328,11 @@ impl TokioQuicGatewayRuntime {
         // Do I have a transaction sender worker for this remote peer?
         if let Some(handle) = self.tx_worker_handle_map.get(&remote_peer_identity) {
             // If we have an active transaction sender worker for the remote peer,
-            metrics::jet::incr_quic_gw_tx_connection_cache_hit_cnt();
+            prom::incr_quic_gw_tx_connection_cache_hit_cnt();
             match handle.sender.try_send(tx) {
                 Ok(_) => {
                     tracing::trace!("{tx_id} sent to worker");
-                    metrics::jet::incr_quic_gw_tx_relayed_to_worker(remote_peer_identity);
+                    prom::incr_quic_gw_tx_relayed_to_worker(remote_peer_identity);
                 }
                 Err(e) => match e {
                     mpsc::error::TrySendError::Full(tx) => {
@@ -1364,7 +1346,7 @@ impl TokioQuicGatewayRuntime {
                             drop_reason: TxDropReason::RateLimited,
                             dropped_gateway_tx_vec: VecDeque::from([(tx, 1)]),
                         };
-                        metrics::jet::incr_quic_gw_drop_tx_cnt(remote_peer_identity, 1);
+                        prom::incr_quic_gw_drop_tx_cnt(remote_peer_identity, 1);
                         let _ = self.response_outlet.send(GatewayResponse::TxDrop(txdrop));
                     }
                     mpsc::error::TrySendError::Closed(tx) => {
@@ -1377,7 +1359,7 @@ impl TokioQuicGatewayRuntime {
                 },
             }
         } else {
-            metrics::jet::incr_quic_gw_tx_connection_cache_miss_cnt();
+            prom::incr_quic_gw_tx_connection_cache_miss_cnt();
             // We don't have any active transaction sender worker for the remote peer,
             // we need to queue the transaction and try to spawn a new connection.
             self.tx_queues
@@ -1476,7 +1458,7 @@ impl TokioQuicGatewayRuntime {
                     tracing::trace!("Remote peer: {remote_peer_identity} tx worker was canceled");
                 }
 
-                metrics::jet::incr_quic_gw_connection_close_cnt();
+                prom::incr_quic_gw_connection_close_cnt();
                 if is_peer_unreachable {
                     // If the peer is unreachable, we drop all queued transactions for it.
                     self.unreachable_peer(remote_peer_identity);
@@ -1567,7 +1549,7 @@ impl TokioQuicGatewayRuntime {
 
         self.client_certificate = cert;
         self.identity = new_identity;
-        metrics::jet::quic_set_identity(self.identity.pubkey());
+        prom::quic_set_identity(self.identity.pubkey());
         connecting_meta.values().for_each(|meta| {
             self.spawn_connecting(meta.remote_peer_identity, meta.connection_attempt);
         });
@@ -1611,7 +1593,7 @@ impl TokioQuicGatewayRuntime {
 
         self.client_certificate = cert;
         self.identity = new_identity;
-        metrics::jet::quic_set_identity(self.identity.pubkey());
+        prom::quic_set_identity(self.identity.pubkey());
         // Wait for the barrier to be released
         barrier.wait().await;
         connecting_meta.values().for_each(|meta| {
@@ -1662,10 +1644,10 @@ impl TokioQuicGatewayRuntime {
         let num_active_workers = self.tx_worker_handle_map.len();
         let num_connecting_tasks = self.connecting_tasks.len();
         let num_queued_tx = self.tx_queues.values().map(|q| q.len()).sum::<usize>();
-        metrics::jet::set_quic_gw_active_connection_cnt(num_active_workers);
-        metrics::jet::set_quic_gw_connecting_cnt(num_connecting_tasks);
-        metrics::jet::set_quic_gw_ongoing_evictions_cnt(self.being_evicted_peers.len());
-        metrics::jet::set_quic_gw_tx_blocked_by_connecting_cnt(num_queued_tx);
+        prom::set_quic_gw_active_connection_cnt(num_active_workers);
+        prom::set_quic_gw_connecting_cnt(num_connecting_tasks);
+        prom::set_quic_gw_ongoing_evictions_cnt(self.being_evicted_peers.len());
+        prom::set_quic_gw_tx_blocked_by_connecting_cnt(num_queued_tx);
     }
 
     fn handle_remote_peer_addr_change(&mut self, remote_peers_changed: HashSet<Pubkey>) {
@@ -1686,13 +1668,13 @@ impl TokioQuicGatewayRuntime {
                             );
                             // Update the worker's remote address.
                             handle.cancel_notify.notify_one();
-                            metrics::jet::incr_quic_gw_remote_peer_addr_changes_detected();
+                            prom::incr_quic_gw_remote_peer_addr_changes_detected();
                         }
                     }
                     None => {
                         // If we don't have a new address, we need to drop the worker.
                         handle.cancel_notify.notify_one();
-                        metrics::jet::incr_quic_gw_remote_peer_addr_changes_detected();
+                        prom::incr_quic_gw_remote_peer_addr_changes_detected();
                     }
                 }
             }
@@ -1725,14 +1707,14 @@ impl TokioQuicGatewayRuntime {
                         || self.connecting_remote_peers.contains_key(&upcoming_leader);
 
                 if !is_already_connectish {
-                    metrics::jet::incr_quic_gw_leader_prediction_hit();
+                    prom::incr_quic_gw_leader_prediction_hit();
                     tracing::trace!(
                         "Spawning connection for predicted upcoming leader: {}",
                         upcoming_leader
                     );
                     self.spawn_connecting(upcoming_leader, self.config.max_connection_attempts);
                 } else {
-                    metrics::jet::incr_quic_gw_leader_prediction_miss();
+                    prom::incr_quic_gw_leader_prediction_miss();
                 }
             }
         } else {
@@ -1744,7 +1726,7 @@ impl TokioQuicGatewayRuntime {
     }
 
     pub async fn run(mut self) {
-        metrics::jet::quic_set_identity(self.identity.pubkey());
+        prom::quic_set_identity(self.identity.pubkey());
 
         loop {
             self.do_eviction_if_required();
@@ -1987,7 +1969,7 @@ pub struct TokioQuicGatewaySession {
 /// Factory struct to spawn tokio-based QUIC gateway
 ///
 pub struct TokioQuicGatewaySpawner {
-    pub stake_info_map: StakeInfoMap,
+    pub stake_info_map: Arc<dyn ValidatorStakeInfoService + Send + Sync + 'static>,
     pub leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     pub gateway_tx_channel_capacity: usize,
 }
@@ -2030,10 +2012,10 @@ impl TokioQuicGatewaySpawner {
         let (gateway_resp_tx, gateway_resp_rx) = mpsc::unbounded_channel();
         let (gateway_cnc_tx, gateway_cnc_rx) = mpsc::channel(10);
 
-        let (certificate, privkey) = new_dummy_x509_certificate(&identity);
+        let (certificate, private_key) = new_dummy_x509_certificate(&identity);
         let cert = Arc::new(QuicClientCertificate {
             certificate,
-            key: privkey,
+            key: private_key,
         });
 
         let mut endpoints = vec![];
@@ -2067,7 +2049,7 @@ impl TokioQuicGatewaySpawner {
         );
 
         let gateway_runtime = TokioQuicGatewayRuntime {
-            stake_info_map: self.stake_info_map.clone(),
+            stake_info_map: Arc::clone(&self.stake_info_map),
             tx_worker_handle_map: Default::default(),
             tx_worker_task_meta_map: Default::default(),
             tx_worker_set: Default::default(),
@@ -2143,17 +2125,14 @@ impl GatewayIdentityUpdater {
         };
         update_identity.await
     }
-}
 
-#[async_trait::async_trait]
-impl JetIdentitySyncMember for GatewayIdentityUpdater {
-    async fn pause_for_identity_update(
+    pub async fn update_identity_with_confirmation_barrier(
         &self,
-        new_identity: Keypair,
-        barrier: Arc<tokio::sync::Barrier>,
+        identity: Keypair,
+        barrier: Arc<Barrier>,
     ) {
         let cmd = MultiStepIdentitySynchronizationCommand {
-            new_identity,
+            new_identity: identity,
             barrier,
         };
         self.cnc_tx
@@ -2211,7 +2190,7 @@ pub const fn module_path_for_test() -> &'static str {
 #[cfg(test)]
 mod test {
     use {
-        crate::quic_gateway::{
+        super::{
             GatewayCommand, GatewayIdentityUpdater, StakeSortedPeerSet,
             UpdateGatewayIdentityCommand,
         },
@@ -2278,7 +2257,7 @@ mod test {
 #[cfg(test)]
 mod stake_based_eviction_strategy_test {
     use {
-        crate::quic_gateway::{ConnectionEvictionStrategy, StakeSortedPeerSet},
+        super::{ConnectionEvictionStrategy, StakeSortedPeerSet},
         solana_pubkey::Pubkey,
         std::time::{Duration, Instant},
     };
@@ -2398,9 +2377,9 @@ mod stake_based_eviction_strategy_test {
 #[cfg(test)]
 mod leader_tpu_info_service_test {
     use {
-        crate::{
-            config::TpuOverrideInfo,
-            quic_gateway::{LeaderTpuInfoService, OverrideTpuInfoService},
+        crate::quic_client::{
+            config::{ConfigQuicTpuPort, TpuOverrideInfo},
+            core::{LeaderTpuInfoService, OverrideTpuInfoService},
         },
         solana_pubkey::Pubkey,
         std::{
@@ -2481,18 +2460,14 @@ mod leader_tpu_info_service_test {
             }],
         };
 
-        let actual_fwd =
-            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Forwards);
-        let actual_normal =
-            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:9000".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:9001".parse().unwrap()));
 
         // It should not override anything if there is no override spec
-        let actual_fwd =
-            override_svc.get_quic_dest_addr(pk2, crate::config::ConfigQuicTpuPort::Forwards);
-        let actual_normal =
-            override_svc.get_quic_dest_addr(pk2, crate::config::ConfigQuicTpuPort::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(pk2, ConfigQuicTpuPort::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(pk2, ConfigQuicTpuPort::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8002".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8003".parse().unwrap()));
 
@@ -2502,10 +2477,8 @@ mod leader_tpu_info_service_test {
             override_vec: vec![],
         };
 
-        let actual_fwd =
-            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Forwards);
-        let actual_normal =
-            override_svc.get_quic_dest_addr(pk1, crate::config::ConfigQuicTpuPort::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8000".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8001".parse().unwrap()));
     }

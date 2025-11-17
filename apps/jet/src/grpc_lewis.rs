@@ -5,7 +5,8 @@ use {
         proto::lewis::{
             Event, EventAck, EventJet, event, transaction_tracker_client::TransactionTrackerClient,
         },
-        quic_gateway::GatewayResponse,
+        quic_client::core::GatewayResponse,
+        // quic_gateway::GatewayResponse,
         util::{IncrementalBackoff, create_x_token_interceptor},
     },
     futures::SinkExt,
@@ -394,7 +395,8 @@ async fn send_batch(
 mod tests {
     use {
         super::*,
-        crate::quic_gateway::GatewayTxSent,
+        crate::quic_client::core::GatewayTxSent,
+        // crate::quic_gateway::GatewayTxSent,
         solana_pubkey::Pubkey,
         solana_signature::Signature,
         std::net::{IpAddr, Ipv4Addr},
