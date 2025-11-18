@@ -150,15 +150,6 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
                 let canonical_path = fs::canonicalize(&identity_path)
                     .with_context(|| format!("Unable to canonicalize file: {identity_path:?}"))?;
 
-                // Check if the path is a regular file
-                let metadata = fs::metadata(&canonical_path).with_context(|| {
-                    format!("Unable to get metadata for file: {canonical_path:?}")
-                })?;
-                anyhow::ensure!(
-                    metadata.is_file(),
-                    "Path must be a regular file: {canonical_path:?}"
-                );
-
                 // Open with O_NOFOLLOW on Unix to prevent TOCTOU symlink attacks
                 #[cfg(unix)]
                 let file = OpenOptions::new()
