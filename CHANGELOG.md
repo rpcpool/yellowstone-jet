@@ -10,7 +10,15 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
-## [14.8.1]
+## [14.9.0]
+
+### Features
+
+- Added optional `prometheus` CLI argument to bind a local a prometheus metrics scrap webpage server.
+
+### Fixes
+
+- Fix `grpc_geyser.rs` missed cancellation token signal during grpc reconnect.
 
 ### Misc
 

@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "14.8.1"
+version = "14.9.0"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
@@ -21,8 +21,10 @@ clap = { workspace = true, features = ["cargo", "derive", "env"] }
 derive_more = { workspace = true, features = ["display"] }
 futures = { workspace = true }
 hostname = { workspace = true }
+http-body-util = { workspace = true }
 humantime-serde = { workspace = true }
 hyper = { workspace = true }
+hyper-util = { workspace = true, features = ["full"] }
 jsonrpsee = { workspace = true, features = ["http-client", "macros", "server"] }
 lazy_static = { workspace = true }
 maplit = { workspace = true }

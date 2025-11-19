@@ -7034,7 +7034,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet"
-version = "14.8.1"
+version = "14.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7049,8 +7049,10 @@ dependencies = [
  "futures",
  "git-version",
  "hostname",
+ "http-body-util",
  "humantime-serde",
  "hyper",
+ "hyper-util",
  "jsonrpsee",
  "lazy_static",
  "libc",
