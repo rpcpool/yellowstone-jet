@@ -17,6 +17,8 @@ use {
     std::{
         collections::HashMap,
         fs,
+        fs::OpenOptions,
+        os::unix::fs::OpenOptionsExt,
         path::PathBuf,
         sync::{
             Arc,
@@ -143,28 +145,42 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
         ArgsCommandAdmin::SetIdentity { identity } => {
             let identity_prev = client.get_identity().await?;
 
-            if let Some(identity) = identity {
-                let identity = fs::canonicalize(&identity)
-                    .with_context(|| format!("Unable to access path: {identity:?}"))?;
-                client
-                    .set_identity(identity.display().to_string(), false)
-                    .await?;
+            let mut reader: Box<dyn std::io::Read> = if let Some(identity_path) = identity {
+                // Canonicalize the path to avoid symlink attacks
+                let canonical_path = fs::canonicalize(&identity_path)
+                    .with_context(|| format!("Unable to canonicalize file: {identity_path:?}"))?;
+
+                // Open with O_NOFOLLOW on Unix to prevent TOCTOU symlink attacks
+                #[cfg(unix)]
+                let file = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&canonical_path)
+                    .with_context(|| format!("Unable to open file: {canonical_path:?}"))?;
+
+                #[cfg(not(unix))]
+                let file = fs::File::open(&canonical_path)
+                    .with_context(|| format!("Unable to open file: {canonical_path:?}"))?;
+
+                Box::new(file)
             } else {
-                let mut stdin = std::io::stdin();
-                let identity = read_keypair(&mut stdin)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))
-                    .context("Unable to read JSON keypair from stdin")?;
-                client
-                    .set_identity_from_bytes(Vec::from(identity.to_bytes()), false)
-                    .await?;
-            }
+                Box::new(std::io::stdin())
+            };
+
+            let keypair = read_keypair(&mut reader)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+                .context("Unable to read JSON keypair")?;
+
+            client
+                .set_identity_from_bytes(Vec::from(keypair.to_bytes()), false)
+                .await?;
 
             let identity = client.get_identity().await?;
             anyhow::ensure!(
                 identity != identity_prev,
                 format!("Failed to update identity: {identity} (new) != {identity_prev} (old)")
             );
-            println!("Successfully update identity to {identity}");
+            println!("Successfully updated identity to {identity}");
         }
         ArgsCommandAdmin::ResetIdentityKeypair => {
             client.reset_identity().await?;
