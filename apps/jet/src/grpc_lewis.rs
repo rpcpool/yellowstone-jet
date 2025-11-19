@@ -5,7 +5,6 @@ use {
             Event, EventAck, EventJet, event, transaction_tracker_client::TransactionTrackerClient,
         },
         quic_client::core::GatewayResponse,
-        // quic_gateway::GatewayResponse,
         util::{IncrementalBackoff, create_x_token_interceptor},
     },
     futures::SinkExt,
