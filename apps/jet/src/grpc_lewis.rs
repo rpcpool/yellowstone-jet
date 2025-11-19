@@ -394,7 +394,6 @@ mod tests {
     use {
         super::*,
         crate::quic_client::core::GatewayTxSent,
-        // crate::quic_gateway::GatewayTxSent,
         solana_pubkey::Pubkey,
         solana_signature::Signature,
         std::net::{IpAddr, Ipv4Addr},
