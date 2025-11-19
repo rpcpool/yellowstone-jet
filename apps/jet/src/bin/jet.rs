@@ -16,10 +16,9 @@ use {
     solana_rpc_client::http_sender::HttpSender,
     std::{
         collections::HashMap,
-        fs,
-        fs::OpenOptions,
-        os::unix::fs::OpenOptionsExt,
+        fs::{self, OpenOptions},
         net::SocketAddr,
+        os::unix::fs::OpenOptionsExt,
         path::PathBuf,
         sync::{
             Arc,
