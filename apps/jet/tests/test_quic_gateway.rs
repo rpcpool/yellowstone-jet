@@ -23,7 +23,7 @@ use {
     },
     tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream},
     yellowstone_jet::{
-        quic_gateway::{
+        quic_client::core::{
             GatewayResponse, GatewayTransaction, IgnorantLeaderPredictor, LeaderTpuInfoService,
             QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
             TokioQuicGatewaySpawner, TxDropReason, UpcomingLeaderPredictor,
@@ -201,7 +201,7 @@ async fn send_buffer_should_land_properly() {
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
     let gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map,
+        stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };
@@ -258,7 +258,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
     let gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map,
+        stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };
@@ -329,7 +329,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
     let gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map,
+        stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };
@@ -399,7 +399,7 @@ async fn it_should_update_gatway_identity() {
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
     let gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map,
+        stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };
@@ -474,7 +474,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
     ]);
 
     let gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map,
+        stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };
@@ -575,7 +575,7 @@ async fn it_should_evict_connection() {
     ]);
 
     let gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map,
+        stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };
@@ -703,7 +703,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
     let gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map,
+        stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };
@@ -774,7 +774,7 @@ async fn it_should_detect_remote_peer_address_change() {
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
     let gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map,
+        stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };
@@ -904,7 +904,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
     let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter(kp_to_addr_pairs);
 
     let gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map,
+        stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         gateway_tx_channel_capacity: 100,
     };

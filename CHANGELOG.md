@@ -10,6 +10,21 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+## [14.9.0]
+
+### Features
+
+- [@Rhovian](https://github.com/Rhovian) Load keypair locally in set-admin CLI command [#47](https://github.com/rpcpool/yellowstone-jet/issues/47)
+- Added optional `prometheus` CLI argument to bind a local a prometheus metrics scrap webpage server.
+
+### Fixes
+
+- Fix `grpc_geyser.rs` missed cancellation token signal during grpc reconnect.
+
+### Misc
+
+- Isolated quic-client in order to move this into a feature crate.
+
 ## [14.8.0]
 
 ## Changes

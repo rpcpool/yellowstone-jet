@@ -16,8 +16,8 @@ use {
     solana_rpc_client::http_sender::HttpSender,
     std::{
         collections::HashMap,
-        fs,
-        fs::OpenOptions,
+        fs::{self, OpenOptions},
+        net::SocketAddr,
         os::unix::fs::OpenOptionsExt,
         path::PathBuf,
         sync::{
@@ -42,8 +42,8 @@ use {
         grpc_lewis::create_lewis_pipeline,
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         jet_gateway::spawn_jet_gw_listener,
-        metrics::{collect_to_text, inject_job_label, jet as metrics},
-        quic_gateway::{
+        metrics::{REGISTRY, collect_to_text, jet as metrics},
+        quic_client::core::{
             IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
             QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
             TokioQuicGatewaySpawner, UpcomingLeaderPredictor,
@@ -59,7 +59,7 @@ use {
             TransactionFanout, TransactionNoRetryScheduler, TransactionPolicyStore,
             TransactionRetryScheduler, TransactionRetrySchedulerConfig,
         },
-        util::WaitShutdown,
+        util::{WaitShutdown, prom::inject_job_label},
     },
     yellowstone_shield_store::PolicyStore,
 };
@@ -78,6 +78,10 @@ struct Args {
     /// Only check config and exit
     #[clap(long, default_value_t = false)]
     pub check: bool,
+
+    /// Prometheus bind address for scraping metrics
+    #[clap(long, help = "prometheus bind address for scraping metrics")]
+    pub prometheus: Option<SocketAddr>,
 
     #[command(subcommand)]
     pub command: Option<ArgsCommands>,
@@ -129,7 +133,7 @@ async fn main2() -> anyhow::Result<()> {
 
     match args.command {
         Some(ArgsCommands::Admin { cmd }) => run_cmd_admin(config, cmd).await,
-        None => run_jet(config).await,
+        None => run_jet(config, args.prometheus).await,
     }
 }
 
@@ -231,7 +235,10 @@ async fn keep_stake_metrics_up_to_date_task(
     }
 }
 
-async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
+async fn run_jet(
+    config: ConfigJet,
+    prometheus_bind_addr: Option<SocketAddr>,
+) -> anyhow::Result<()> {
     let mut tg = JoinSet::default();
     let mut tg_name_map = HashMap::<task::Id, String>::new();
     metrics::init();
@@ -331,7 +338,7 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         });
 
     let quic_gateway_spawner = TokioQuicGatewaySpawner {
-        stake_info_map: stake_info_map.clone(),
+        stake_info_map: Arc::new(stake_info_map.clone()),
         gateway_tx_channel_capacity: 10000,
         leader_tpu_info_service,
     };
@@ -559,6 +566,23 @@ async fn run_jet(config: ConfigJet) -> anyhow::Result<()> {
         tg_name_map.insert(ah.id(), "prometheus_push_gw".to_string());
     }
 
+    if let Some(prometheus_bind_addr) = prometheus_bind_addr {
+        let my_ct = jet_cancellation_token.child_token();
+        tracing::info!(
+            "starting prometheus scrap server at {}",
+            prometheus_bind_addr
+        );
+        let ah = tg.spawn(async move {
+            yellowstone_jet::util::prom::serve_prometheus_metric(
+                REGISTRY.clone(),
+                prometheus_bind_addr,
+                my_ct,
+            )
+            .await
+        });
+        tg_name_map.insert(ah.id(), "prometheus_scrape_http_server".to_string());
+    }
+
     let ah = tg.spawn(async move {
         sigint.recv().await;
         info!("SIGINT received...");
@@ -637,11 +661,14 @@ async fn spawn_push_prometheus_metrics(
             tokio::select! {
                 _ = interval.tick() => {
                     let current_identity = *jet_identity.borrow_and_update();
-
+                    let labels_to_inject = [
+                        ("job", "jet"),
+                        ("instance", &current_identity.to_string() as &str),
+                    ];
                     if let Err(error) = client
                         .post(prometheus_url.clone())
                         .header("Content-Type", "text/plain")
-                        .body(inject_job_label(&collect_to_text(), "jet", &current_identity.to_string()))
+                        .body(inject_job_label(&collect_to_text(), labels_to_inject))
                         .send()
                         .await {
                             warn!(?error, "Error pushing metrics");

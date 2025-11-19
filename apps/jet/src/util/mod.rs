@@ -14,6 +14,8 @@ use {
     tonic::{Request, Status, metadata::AsciiMetadataValue},
 };
 
+pub mod prom;
+
 /// Creates an x-token interceptor function for gRPC authentication
 ///
 /// This returns a closure that implements the `Interceptor` trait,

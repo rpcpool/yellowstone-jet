@@ -1,11 +1,10 @@
 use {
     crate::{
         config::ConfigLewisEvents,
-        metrics::jet as metrics,
         proto::lewis::{
             Event, EventAck, EventJet, event, transaction_tracker_client::TransactionTrackerClient,
         },
-        quic_gateway::GatewayResponse,
+        quic_client::core::GatewayResponse,
         util::{IncrementalBackoff, create_x_token_interceptor},
     },
     futures::SinkExt,
@@ -156,7 +155,7 @@ impl LewisEventHandler {
         // Drop on buffer full
         if let Err(e) = self.tx.try_send(event) {
             warn!("Lewis event channel full or closed, dropping event: {}", e);
-            metrics::lewis_events_dropped_inc();
+            prom::lewis_events_dropped_inc();
         }
     }
 }
@@ -219,7 +218,7 @@ async fn run_lewis_client(
                     );
                     // Drain remaining events to prevent blocking
                     while rx.recv().await.is_some() {
-                        metrics::lewis_events_dropped_inc();
+                        prom::lewis_events_dropped_inc();
                     }
                     return Err(LewisClientError::MaxReconnectAttemptsExceeded);
                 }
@@ -383,7 +382,7 @@ async fn send_batch(
         .map_err(|e| LewisClientError::StreamFlushError(e.to_string()))?;
 
     for _ in 0..batch_size {
-        metrics::lewis_events_sent_inc();
+        prom::lewis_events_sent_inc();
     }
 
     debug!("Successfully sent batch of {} events", batch_size);
@@ -394,7 +393,7 @@ async fn send_batch(
 mod tests {
     use {
         super::*,
-        crate::quic_gateway::GatewayTxSent,
+        crate::quic_client::core::GatewayTxSent,
         solana_pubkey::Pubkey,
         solana_signature::Signature,
         std::net::{IpAddr, Ipv4Addr},
@@ -452,5 +451,35 @@ mod tests {
             }
             _ => panic!("Expected Jet event"),
         }
+    }
+}
+
+pub mod prom {
+    use prometheus::IntCounter;
+
+    lazy_static::lazy_static! {
+        static ref LEWIS_EVENTS_DROPPED: IntCounter = IntCounter::new(
+            "lewis_events_dropped_total",
+            "Total number of events dropped due to channel closure"
+        ).unwrap();
+
+        static ref LEWIS_EVENTS_SENT: IntCounter = IntCounter::new(
+            "lewis_events_sent_total",
+            "Total number of events sent to Lewis gRPC stream"
+        ).unwrap();
+    }
+
+    pub fn lewis_events_dropped_inc() {
+        LEWIS_EVENTS_DROPPED.inc();
+    }
+
+    pub fn lewis_events_sent_inc() {
+        LEWIS_EVENTS_SENT.inc();
+    }
+
+    pub fn register_metrics(reg: &prometheus::Registry) {
+        reg.register(Box::new(LEWIS_EVENTS_DROPPED.clone()))
+            .unwrap();
+        reg.register(Box::new(LEWIS_EVENTS_SENT.clone())).unwrap();
     }
 }

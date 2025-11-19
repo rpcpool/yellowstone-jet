@@ -73,7 +73,7 @@ impl JetIdentityUpdater for JetIdentitySyncGroup {
         self.sync_identity(new_identity).await;
     }
 
-    async fn get_identity(&self) -> Pubkey {
+    fn get_identity(&self) -> Pubkey {
         self.identity.pubkey()
     }
 }
@@ -123,7 +123,7 @@ mod test {
         let initial_identity = Keypair::new();
         let mut sync_group = JetIdentitySyncGroup::new(initial_identity.insecure_clone(), members);
         let identity_watcher = sync_group.get_identity_watcher();
-        assert_eq!(sync_group.get_identity().await, initial_identity.pubkey());
+        assert_eq!(sync_group.get_identity(), initial_identity.pubkey());
         assert_eq!(*identity_watcher.borrow(), initial_identity.pubkey());
         assert_eq!(pause_count.load(Ordering::SeqCst), 0);
 
@@ -132,7 +132,7 @@ mod test {
             .update_identity(new_identity.insecure_clone())
             .await;
 
-        assert_eq!(sync_group.get_identity().await, new_identity.pubkey());
+        assert_eq!(sync_group.get_identity(), new_identity.pubkey());
         assert_eq!(pause_count.load(Ordering::SeqCst), member_count);
         assert_eq!(*identity_watcher.borrow(), new_identity.pubkey());
     }

@@ -5,7 +5,7 @@ use {
         util::{BlockHeight, CommitmentLevel, IncrementalBackoff, SlotStatus},
     },
     futures::{
-        FutureExt, TryFutureExt,
+        FutureExt,
         stream::{Stream, StreamExt},
     },
     maplit::hashmap,
@@ -28,7 +28,7 @@ use {
     tokio_util::sync::CancellationToken,
     tonic::transport::channel::ClientTlsConfig,
     tracing::{debug, error, info, warn},
-    yellowstone_grpc_client::{GeyserGrpcClient, Interceptor},
+    yellowstone_grpc_client::{GeyserGrpcBuilder, GeyserGrpcClient, Interceptor},
     yellowstone_grpc_proto::{
         prelude::{
             BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel,
@@ -215,21 +215,26 @@ impl GeyserSubscriber {
                 return Ok(());
             }
 
-            // Try to open connection with timeout
-            let stream = match time::timeout(
-                Duration::from_secs(30),
-                Self::grpc_open(&endpoint, x_token.as_deref(), true, include_transactions),
-            )
-            .await
-            {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(e)) => {
-                    error!("Failed to open gRPC connection ({endpoint}): {e:?}");
-                    time::sleep(Duration::from_secs(1)).await;
+            let stream = tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    info!("gRPC subscriber: cancellation token triggered, shutting down...");
+                    return Ok(());
+                },
+                result = Self::grpc_open(&endpoint, x_token.as_deref(), true, include_transactions) => {
+                    result
+                }
+                _ = time::sleep(Duration::from_secs(30)) => {
+                    warn!("Timeout opening gRPC connection ({endpoint})");
                     continue;
                 }
-                Err(_) => {
-                    warn!("Timeout opening gRPC connection ({endpoint})");
+            };
+
+            let stream = match stream {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!("Failed to open gRPC connection ({endpoint}): {e:?}");
+                    // TODO: we probably need to backoff + maximum retries here
+                    time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
             };
@@ -599,26 +604,26 @@ impl GeyserSubscriber {
         loop {
             backoff.maybe_tick().await;
 
-            let mut client = match async {
-                GeyserGrpcClient::build_from_shared(endpoint.to_string())
-                    .and_then(|builder| builder.x_token(x_token))
-            }
-            .and_then(|builder| async {
-                builder
-                    .max_decoding_message_size(128 * 1024 * 1024) // 128MiB
-                    .connect_timeout(Duration::from_secs(3))
-                    .timeout(Duration::from_secs(3))
-                    .tls_config(ClientTlsConfig::new().with_native_roots())?
-                    .connect()
-                    .await
-            })
-            .await
-            {
+            let builder = GeyserGrpcBuilder::from_shared(endpoint.to_string())
+                .expect("endpoint") // if endpoint is invalid, fail fast
+                .x_token(x_token)
+                .expect("x_token"); // if x_token is invalid, fail fast
+
+            let builder = builder
+                .max_decoding_message_size(128 * 1024 * 1024) // 128MiB
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(3))
+                .tls_config(ClientTlsConfig::new().with_native_roots())
+                .expect("tls_config"); // if tls_config is invalid, fail fast
+
+            let result = builder.connect().await;
+            let mut client = match result {
                 Ok(client) => {
                     backoff.reset();
                     client
                 }
                 Err(error) => {
+                    // TODO: we should probably limit the number of retries here + dig into the error to see if it's retryable
                     warn!("failed to connect ({endpoint}): {error:?}");
                     backoff.init();
                     continue;
