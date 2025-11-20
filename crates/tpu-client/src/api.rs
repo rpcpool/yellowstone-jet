@@ -2,7 +2,9 @@ use {
     crate::{
         config::TpuSenderConfig,
         core::{
-            ConnectionEvictionStrategy, LeaderTpuInfoService, TpuSenderDriverSpawner, TpuSenderIdentityUpdater, TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn, UpcomingLeaderPredictor, ValidatorStakeInfoService
+            ConnectionEvictionStrategy, LeaderTpuInfoService, TpuSenderDriverSpawner,
+            TpuSenderIdentityUpdater, TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn,
+            UpcomingLeaderPredictor, ValidatorStakeInfoService,
         },
     },
     solana_keypair::Keypair,
@@ -53,9 +55,9 @@ impl TpuSender {
 
 ///
 /// Base factory function to create a TPU sender and its response receiver.
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `config` - Configuration for the TPU sender.
 /// * `initial_identity` - The initial identity keypair for the TPU sender.
 /// * `tpu_info_service` - Service to get TPU gossip info of leaders.
@@ -63,12 +65,12 @@ impl TpuSender {
 /// * `eviction_strategy` - Strategy to evict connections when needed.
 /// * `leader_schedule_predictor` - Predictor for upcoming leaders.
 /// * `txn_capacity` - Capacity of the transaction sender channel.
-/// 
+///
 /// # Returns
-/// 
+///
 /// A tuple containing the created `TpuSender` and a receiver for `TpuSenderResponse`.
 /// You can drop the receiver if you don't need to handle responses.
-/// 
+///
 /// Note: This function is `async` because it requires spawning async tasks for the TPU sender driver.
 /// This function is a building block for higher-level TPU client factories.
 ///

@@ -17,7 +17,7 @@ pub enum TpuPortKind {
 ///
 /// Specifies how to rewrite TPU addresses for QUIC connections for a specific remote peer.
 ///
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct TpuOverrideInfo {
     ///
     /// The remote peer's public key to overide the TPU address for.
@@ -50,15 +50,18 @@ where
     Range::deserialize(deserializer).map(|range| (range.start, range.end))
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TpuSenderConfig {
     #[serde(
         deserialize_with = "deserialize_port_range",
         default = "TpuSenderConfig::default_port_range"
     )]
-    pub port_range: PortRange,
+    pub endpoint_port_range: PortRange,
 
-    #[serde(default = "TpuSenderConfig::default_max_idle_timeout")]
+    #[serde(
+        default = "TpuSenderConfig::default_max_idle_timeout",
+        with = "humantime_serde"
+    )]
     pub max_idle_timeout: Duration,
 
     ///
@@ -76,7 +79,11 @@ pub struct TpuSenderConfig {
     ///
     /// Timeout for establishing a connection to a remote peer.
     ///
-    #[serde(default = "TpuSenderConfig::default_connection_timeout")]
+    #[serde(
+        default = "TpuSenderConfig::default_connection_timeout",
+        alias = "connection_handshake_timeout",
+        with = "humantime_serde"
+    )]
     pub connecting_timeout: Duration,
 
     #[serde(default = "TpuSenderConfig::default_tpu_port_kind")]
@@ -102,7 +109,10 @@ pub struct TpuSenderConfig {
     ///
     /// Recommended try 1 endpoint per 8 CPU cores dedicated to jet.
     ///
-    #[serde(default = "TpuSenderConfig::default_num_endpoints")]
+    #[serde(
+        default = "TpuSenderConfig::default_num_endpoints",
+        alias = "endpoint_count"
+    )]
     pub num_endpoints: NonZeroUsize,
 
     ///
@@ -110,26 +120,44 @@ pub struct TpuSenderConfig {
     /// Attempt may fail due to connection losts, stream limit exceeded, etc.
     /// It might be useful to retry sending a transaction at least 2-3 times before giving up.
     ///
-    #[serde(default = "TpuSenderConfig::default_max_send_attempt")]
+    #[serde(
+        default = "TpuSenderConfig::default_max_send_attempt",
+        alias = "send_retry_count"
+    )]
     pub max_send_attempt: NonZeroUsize,
 
     ///
     /// Interval to watch remote peer address changes.
     ///
-    #[serde(default = "TpuSenderConfig::default_remote_peer_addr_watch_interval")]
+    #[serde(
+        default = "TpuSenderConfig::default_remote_peer_addr_watch_interval",
+        with = "humantime_serde"
+    )]
     pub remote_peer_addr_watch_interval: Duration,
 
     ///
     /// Timeout for sending a transaction to a remote peer.
     ///
-    #[serde(default = "TpuSenderConfig::default_send_timeout")]
+    #[serde(
+        default = "TpuSenderConfig::default_send_timeout",
+        with = "humantime_serde"
+    )]
     pub send_timeout: Duration,
 
     ///
     /// Maximum number of leaders to predict
     ///
-    #[serde(default = "TpuSenderConfig::default_leader_prediction_lookahead")]
+    #[serde(
+        default = "TpuSenderConfig::default_leader_prediction_lookahead",
+        alias = "connection_prediction_lookahead"
+    )]
     pub leader_prediction_lookahead: Option<NonZeroUsize>,
+
+    ///
+    /// The TPU address rewrite map for QUIC connections.
+    ///
+    #[serde(default)]
+    pub tpu_info_override: Vec<TpuOverrideInfo>,
 }
 
 impl TpuSenderConfig {
@@ -211,7 +239,7 @@ pub const DEFAULT_LEADER_PREDICTION_LOOKAHEAD: NonZeroUsize = NonZeroUsize::new(
 impl Default for TpuSenderConfig {
     fn default() -> Self {
         Self {
-            port_range: VALIDATOR_PORT_RANGE,
+            endpoint_port_range: VALIDATOR_PORT_RANGE,
             max_idle_timeout: QUIC_MAX_TIMEOUT,
             max_connection_attempts: DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT,
             transaction_sender_worker_channel_capacity: DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE,
@@ -224,6 +252,7 @@ impl Default for TpuSenderConfig {
             remote_peer_addr_watch_interval: DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL,
             send_timeout: DEFAULT_TX_SEND_TIMEOUT,
             leader_prediction_lookahead: Some(DEFAULT_LEADER_PREDICTION_LOOKAHEAD),
+            tpu_info_override: Vec::new(),
         }
     }
 }
@@ -240,9 +269,9 @@ pub mod test {
             end: 9000
         "#;
         let mut expected = TpuSenderConfig::default();
-        expected.port_range = (8000, 9000);
+        expected.endpoint_port_range = (8000, 9000);
 
         let config: super::TpuSenderConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.port_range, expected.port_range);
+        assert_eq!(config.endpoint_port_range, expected.endpoint_port_range);
     }
 }

@@ -1993,7 +1993,7 @@ impl TpuSenderDriverSpawner {
                 .find_map(|_| {
                     let (_, client_socket) = solana_net_utils::bind_in_range(
                         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                        config.port_range,
+                        config.endpoint_port_range,
                     )
                     .ok()?;
                     Endpoint::new(

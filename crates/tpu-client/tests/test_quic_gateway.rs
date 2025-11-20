@@ -587,7 +587,7 @@ async fn it_should_evict_connection() {
     let gateway_config = TpuSenderConfig {
         max_connection_attempts: 1,
         max_concurrent_connections: 1, // LIMIT TO 1 CONCURRENT CONNECTION SHOULD TRIGGER CONNECTION EVICTION ON EACH NEW REMOTE DEST
-        port_range: (really_limited_port_range, really_limited_port_range + 3),
+        endpoint_port_range: (really_limited_port_range, really_limited_port_range + 3),
         num_endpoints: NonZero::new(1).unwrap(),
         max_local_port_binding_attempts: 1,
         ..Default::default()
