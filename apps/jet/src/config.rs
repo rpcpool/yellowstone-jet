@@ -45,6 +45,7 @@ where
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigJet {
     pub tracing: ConfigTracing,
 
@@ -99,11 +100,13 @@ impl ConfigJet {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigTracing {
     pub json: bool,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigIdentity {
     ///
     /// Represents the expected validator identity.
@@ -142,6 +145,7 @@ impl ConfigIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
     /// gRPC service
     /// The `primary_grpc` alias is used to maintain compatibility with previous versions.
@@ -306,6 +310,7 @@ pub struct ConfigListenSolanaLike {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigSendTransactionService {
     /// Default max retries of sending transaction
     pub default_max_retries: Option<usize>,
