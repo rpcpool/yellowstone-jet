@@ -286,6 +286,7 @@ impl ConfigJetGatewayClient {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigListenAdmin {
     /// RPC listen address
     #[serde(deserialize_with = "deserialize_listen")]
@@ -293,6 +294,7 @@ pub struct ConfigListenAdmin {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigListenSolanaLike {
     /// RPC listen addresses
     #[serde(deserialize_with = "deserialize_listen")]
@@ -391,6 +393,7 @@ impl ConfigQuic {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigLewisEvents {
     /// gRPC endpoint for Lewis event service
     pub endpoint: String,
@@ -523,11 +526,7 @@ impl ConfigLewisEvents {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ConfigEtcd {
-    pub endpoints: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigListenGrpc {
     /// gRPC listen address
     #[serde(deserialize_with = "deserialize_listen")]
