@@ -1,12 +1,5 @@
 use {
-    crate::{
-        feature_flags::FeatureSet,
-        quic_client::{
-            config::TpuOverrideInfo,
-            core::{DEFAULT_LEADER_DURATION, DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT},
-        },
-        util::CommitmentLevel,
-    },
+    crate::{feature_flags::FeatureSet, util::CommitmentLevel},
     anyhow::Context,
     serde::{
         Deserialize,
@@ -28,6 +21,10 @@ use {
         str::FromStr,
     },
     tokio::{fs, time::Duration},
+    yellowstone_jet_tpu_client::{
+        config::TpuOverrideInfo,
+        core::{DEFAULT_LEADER_DURATION, DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT},
+    },
     yellowstone_shield_store::{
         PolicyStoreConfig, PolicyStoreGrpcConfig, PolicyStoreRpcConfig, ShieldStoreCommitmentLevel,
     },

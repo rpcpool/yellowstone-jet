@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "14.9.0"
+version = "14.9.1"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
@@ -27,6 +27,7 @@ hyper = { workspace = true }
 hyper-util = { workspace = true, features = ["full"] }
 jsonrpsee = { workspace = true, features = ["http-client", "macros", "server"] }
 lazy_static = { workspace = true }
+libc = { workspace = true }
 maplit = { workspace = true }
 pin-project = { workspace = true }
 prometheus = { workspace = true }
@@ -86,10 +87,10 @@ tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json
 uuid = { workspace = true, features = ["v4", "serde"] }
 yellowstone-grpc-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
+yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus"] }
 yellowstone-shield-store = { workspace = true }
 tokio-util = { workspace = true }
 tikv-jemallocator = { workspace = true }
-libc = "0.2.177"
 
 [build-dependencies]
 anyhow = { workspace = true }

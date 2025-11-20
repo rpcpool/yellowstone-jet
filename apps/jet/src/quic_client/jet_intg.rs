@@ -1,16 +1,14 @@
 use {
     crate::{
-        cluster_tpu_info::ClusterTpuInfo,
-        identity::JetIdentitySyncMember,
-        quic_client::core::{
-            GatewayIdentityUpdater, LeaderTpuInfoService, UpcomingLeaderPredictor,
-            ValidatorStakeInfoService,
-        },
-        stake::StakeInfoMap,
+        cluster_tpu_info::ClusterTpuInfo, identity::JetIdentitySyncMember, stake::StakeInfoMap,
     },
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     std::{net::SocketAddr, sync::Arc},
+    yellowstone_jet_tpu_client::core::{
+        GatewayIdentityUpdater, LeaderTpuInfoService, UpcomingLeaderPredictor,
+        ValidatorStakeInfoService,
+    },
 };
 
 impl LeaderTpuInfoService for ClusterTpuInfo {

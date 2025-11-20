@@ -1,0 +1,59 @@
+[package]
+name = "yellowstone-jet-tpu-client"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+prometheus = ["dep:prometheus"]
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bs58 = { workspace = true }
+borsh = { workspace = true }
+bytes = { workspace = true }
+derive_more = { workspace = true, features = ["display"] }
+futures = { workspace = true }
+hostname = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true, features = ["full"] }
+lazy_static = { workspace = true }
+maplit = { workspace = true }
+pin-project = { workspace = true }
+prometheus = { workspace = true, optional = true }
+quinn = { workspace = true }
+quinn-proto = { workspace = true }
+rand = { workspace = true }
+rustls = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+solana-net-utils = { workspace = true }
+solana-streamer = { workspace = true }
+solana-version = { workspace = true, features = ["agave-unstable-api"] }
+solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
+solana-instruction = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-keypair = { workspace = true }
+solana-account = { workspace = true }
+solana-clock = { workspace = true }
+solana-quic-definitions = { workspace = true }
+solana-signature = { workspace = true, features = ["rand"] }
+solana-signer = { workspace = true }
+solana-epoch-info = { workspace = true }
+solana-commitment-config = { workspace = true }
+solana-transaction-error = { workspace = true }
+solana-message = { workspace = true }
+solana-packet = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }

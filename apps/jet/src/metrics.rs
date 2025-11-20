@@ -52,7 +52,7 @@ pub mod jet {
     use {
         super::{REGISTRY, init2},
         crate::{
-            grpc_lewis, quic_client,
+            grpc_lewis,
             util::{CommitmentLevel, SlotStatus},
         },
         prometheus::{
@@ -292,7 +292,7 @@ pub mod jet {
             register!(GRPC_MESSAGES_PROCESSED_RATE);
             register!(NEW_SLOT_ARRIVAL_INTERVAL);
 
-            quic_client::prom::register_metrics(&REGISTRY);
+            yellowstone_jet_tpu_client::prom::register_metrics(&REGISTRY);
             grpc_lewis::prom::register_metrics(&REGISTRY);
         });
     }
