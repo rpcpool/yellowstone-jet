@@ -81,7 +81,7 @@ pub struct TpuSenderConfig {
     ///
     #[serde(
         default = "TpuSenderConfig::default_connection_timeout",
-        alias = "connection_handshake_timeout",
+        alias = "connection_handshake_timeout", /*LEGACY */
         with = "humantime_serde"
     )]
     pub connecting_timeout: Duration,
@@ -111,7 +111,7 @@ pub struct TpuSenderConfig {
     ///
     #[serde(
         default = "TpuSenderConfig::default_num_endpoints",
-        alias = "endpoint_count"
+        alias = "endpoint_count" /*LEGACY */
     )]
     pub num_endpoints: NonZeroUsize,
 
@@ -122,7 +122,7 @@ pub struct TpuSenderConfig {
     ///
     #[serde(
         default = "TpuSenderConfig::default_max_send_attempt",
-        alias = "send_retry_count"
+        alias = "send_retry_count" /*LEGACY */
     )]
     pub max_send_attempt: NonZeroUsize,
 
@@ -149,7 +149,7 @@ pub struct TpuSenderConfig {
     ///
     #[serde(
         default = "TpuSenderConfig::default_leader_prediction_lookahead",
-        alias = "connection_prediction_lookahead"
+        alias = "connection_prediction_lookahead" /*LEGACY */
     )]
     pub leader_prediction_lookahead: Option<NonZeroUsize>,
 
@@ -166,7 +166,7 @@ impl TpuSenderConfig {
     }
 
     pub const fn default_max_idle_timeout() -> Duration {
-        DEFAULT_QUIC_MAX_IDLE_TIMEOUT
+        QUIC_MAX_TIMEOUT
     }
 
     pub const fn default_max_connection_attempts() -> usize {
@@ -225,7 +225,6 @@ impl TpuSenderConfig {
 pub const DEFAULT_QUIC_DRIVER_ENDPOINT_COUNT: NonZeroUsize =
     NonZeroUsize::new(5).expect("default endpoint count must be non-zero");
 pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
-pub const DEFAULT_QUIC_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
 pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
@@ -259,7 +258,7 @@ impl Default for TpuSenderConfig {
 
 #[cfg(test)]
 pub mod test {
-    use crate::config::TpuSenderConfig;
+    use {crate::config::TpuSenderConfig, std::num::NonZeroUsize};
 
     #[test]
     fn it_should_deser_tpu_sender_config_with_defaults() {
@@ -268,10 +267,30 @@ pub mod test {
             start: 8000
             end: 9000
         "#;
-        let mut expected = TpuSenderConfig::default();
-        expected.endpoint_port_range = (8000, 9000);
+        let expected = TpuSenderConfig {
+            endpoint_port_range: (8000, 9000),
+            ..TpuSenderConfig::default()
+        };
 
         let config: super::TpuSenderConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.endpoint_port_range, expected.endpoint_port_range);
+    }
+
+    #[test]
+    fn it_should_supports_legacy_jet_field_name() {
+        let yaml = r#"
+        endpoint_count: 3
+        send_retry_count: 5
+        connection_prediction_lookahead: 7
+        "#;
+        let expected = TpuSenderConfig {
+            num_endpoints: NonZeroUsize::new(3).unwrap(),
+            max_send_attempt: NonZeroUsize::new(5).unwrap(),
+            leader_prediction_lookahead: NonZeroUsize::new(7),
+            ..TpuSenderConfig::default()
+        };
+
+        let config: super::TpuSenderConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config, expected);
     }
 }
