@@ -691,7 +691,7 @@ impl QuicTxSenderWorker {
                 );
                 let resp = GatewayTxSent {
                     remote_peer_identity: self.remote_peer,
-                    remote_peer_addr: self.connection.remote_address(),
+                    remote_peer_addr: remote_addr,
                     tx_sig,
                 };
                 let _ = self.output_tx.send(GatewayResponse::TxSent(resp));

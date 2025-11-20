@@ -13,7 +13,7 @@ use {
         collections::HashMap,
         net::SocketAddr,
         num::{NonZero, NonZeroUsize},
-        sync::{Arc, Mutex, RwLock as StdRwLock},
+        sync::{Arc, Mutex, RwLock},
         time::Duration,
     },
     testkit::{build_random_endpoint, generate_random_local_addr},
@@ -56,7 +56,7 @@ impl ValidatorStakeInfoService for MockStakeInfoMap {
 
 #[derive(Clone)]
 pub struct FakeLeaderTpuInfoService {
-    shared: Arc<StdRwLock<HashMap<Pubkey, SocketAddr>>>,
+    shared: Arc<RwLock<HashMap<Pubkey, SocketAddr>>>,
 }
 
 impl FakeLeaderTpuInfoService {
@@ -64,7 +64,7 @@ impl FakeLeaderTpuInfoService {
     where
         IT: IntoIterator<Item = (Pubkey, SocketAddr)>,
     {
-        let shared = Arc::new(StdRwLock::new(HashMap::from_iter(it)));
+        let shared = Arc::new(RwLock::new(HashMap::from_iter(it)));
         Self { shared }
     }
 
@@ -941,7 +941,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 
     struct FakeLeaderPredictor {
         validators: Vec<Pubkey>,
-        calls: Arc<StdRwLock<usize>>,
+        calls: Arc<RwLock<usize>>,
     }
 
     impl UpcomingLeaderPredictor for FakeLeaderPredictor {
@@ -968,7 +968,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 
     let fake_predictor = Arc::new(FakeLeaderPredictor {
         validators: validators_kp_vec.iter().map(|kp| kp.pubkey()).collect(),
-        calls: Arc::new(StdRwLock::new(0)),
+        calls: Arc::new(RwLock::new(0)),
     });
 
     let TokioQuicGatewaySession {
