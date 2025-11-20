@@ -56,10 +56,13 @@ use {
         },
         util::{WaitShutdown, prom::inject_job_label},
     },
-    yellowstone_jet_tpu_client::core::{
-        IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService, QuicGatewayConfig,
-        StakeBasedEvictionStrategy, TokioQuicGatewaySession, TokioQuicGatewaySpawner,
-        UpcomingLeaderPredictor,
+    yellowstone_jet_tpu_client::{
+        config::TpuSenderConfig,
+        core::{
+            IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
+            StakeBasedEvictionStrategy, TpuSenderDriverSpawner, TpuSenderSessionContext,
+            UpcomingLeaderPredictor,
+        },
     },
     yellowstone_shield_store::PolicyStore,
 };
@@ -337,9 +340,9 @@ async fn run_jet(
             other: cluster_tpu_info.clone(),
         });
 
-    let quic_gateway_spawner = TokioQuicGatewaySpawner {
+    let quic_gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
-        gateway_tx_channel_capacity: 10000,
+        driver_tx_channel_capacity: 10000,
         leader_tpu_info_service,
     };
 
@@ -349,7 +352,7 @@ async fn run_jet(
         Arc::new(IgnorantLeaderPredictor)
     };
 
-    let quic_gateway_config = QuicGatewayConfig {
+    let quic_gateway_config = TpuSenderConfig {
         port_range: config.quic.endpoint_port_range,
         max_idle_timeout: config.quic.max_idle_timeout.min(QUIC_MAX_TIMEOUT),
         connecting_timeout: config.quic.connection_handshake_timeout,
@@ -359,11 +362,11 @@ async fn run_jet(
         ..Default::default()
     };
 
-    let TokioQuicGatewaySession {
-        gateway_identity_updater,
-        gateway_tx_sink,
-        gateway_response_source,
-        gateway_join_handle,
+    let TpuSenderSessionContext {
+        identity_updater: gateway_identity_updater,
+        driver_tx_sink: gateway_tx_sink,
+        driver_response_source: gateway_response_source,
+        driver_join_handle: gateway_join_handle,
     } = quic_gateway_spawner.spawn(
         initial_identity.insecure_clone(),
         quic_gateway_config,

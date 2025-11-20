@@ -22,10 +22,13 @@ use {
         task::{self, JoinHandle, JoinSet},
     },
     tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream},
-    yellowstone_jet_tpu_client::core::{
-        GatewayResponse, GatewayTransaction, IgnorantLeaderPredictor, LeaderTpuInfoService,
-        QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
-        TokioQuicGatewaySpawner, TxDropReason, UpcomingLeaderPredictor, ValidatorStakeInfoService,
+    yellowstone_jet_tpu_client::{
+        config::TpuSenderConfig,
+        core::{
+            IgnorantLeaderPredictor, LeaderTpuInfoService, StakeBasedEvictionStrategy,
+            TpuSenderDriverSpawner, TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn,
+            TxDropReason, UpcomingLeaderPredictor, ValidatorStakeInfoService,
+        },
     },
 };
 
@@ -222,17 +225,17 @@ async fn send_buffer_should_land_properly() {
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
-    let gateway_spawner = TokioQuicGatewaySpawner {
+    let gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
-        gateway_tx_channel_capacity: 100,
+        driver_tx_channel_capacity: 100,
     };
 
-    let TokioQuicGatewaySession {
-        gateway_identity_updater: _,
-        gateway_tx_sink: transaction_sink,
-        mut gateway_response_source,
-        gateway_join_handle: _,
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        mut driver_response_source,
+        driver_join_handle: _,
     } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
 
     let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
@@ -242,7 +245,7 @@ async fn send_buffer_should_land_properly() {
     );
     let tx_sig = Signature::new_unique();
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig,
             wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
@@ -252,10 +255,10 @@ async fn send_buffer_should_land_properly() {
 
     let spy_req = client_rx.recv().await.expect("recv");
 
-    let GatewayResponse::TxSent(actual_resp) =
-        gateway_response_source.recv().await.expect("recv response")
+    let TpuSenderResponse::TxSent(actual_resp) =
+        driver_response_source.recv().await.expect("recv response")
     else {
-        panic!("Expected GatewayResponse::TxSent, got something else");
+        panic!("Expected TpuSenderResponse::TxSent, got something else");
     };
 
     assert_eq!(actual_resp.tx_sig, tx_sig);
@@ -279,17 +282,17 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
-    let gateway_spawner = TokioQuicGatewaySpawner {
+    let gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
-        gateway_tx_channel_capacity: 100,
+        driver_tx_channel_capacity: 100,
     };
 
-    let TokioQuicGatewaySession {
-        gateway_identity_updater: _,
-        gateway_tx_sink: transaction_sink,
-        mut gateway_response_source,
-        gateway_join_handle: _,
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        mut driver_response_source,
+        driver_join_handle: _,
     } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
     const MAX_TX: u64 = 5;
 
@@ -304,7 +307,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         .collect::<Vec<_>>();
     for (i, tx_sig) in tx_sig_vec.iter().enumerate() {
         transaction_sink
-            .send(GatewayTransaction {
+            .send(TpuSenderTxn {
                 tx_sig: *tx_sig,
                 wire: Bytes::from(format!("helloworld{i}").as_bytes().to_vec()),
                 remote_peer: rx_server_identity.pubkey(),
@@ -316,10 +319,10 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
     let mut connection_id_spy = vec![];
     for i in 0..MAX_TX {
         tracing::trace!("Waiting for tx response {i}");
-        let GatewayResponse::TxSent(actual_resp) =
-            gateway_response_source.recv().await.expect("recv response")
+        let TpuSenderResponse::TxSent(actual_resp) =
+            driver_response_source.recv().await.expect("recv response")
         else {
-            panic!("Expected GatewayResponse::TxSent, got something else");
+            panic!("Expected TpuSenderResponse::TxSent, got something else");
         };
         assert_eq!(actual_resp.tx_sig, tx_sig_vec[i as usize]);
         let spy_request = client_rx.recv().await.expect("recv");
@@ -350,22 +353,22 @@ async fn gateway_should_handle_connection_refused_by_peer() {
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
-    let gateway_spawner = TokioQuicGatewaySpawner {
+    let gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
-        gateway_tx_channel_capacity: 100,
+        driver_tx_channel_capacity: 100,
     };
-    let gateway_config = QuicGatewayConfig {
+    let gateway_config = TpuSenderConfig {
         max_connection_attempts: 1,
         ..Default::default()
     };
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
 
-    let TokioQuicGatewaySession {
-        gateway_identity_updater: _,
-        gateway_tx_sink: transaction_sink,
-        mut gateway_response_source,
-        gateway_join_handle: _,
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        mut driver_response_source,
+        driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
@@ -380,7 +383,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
 
     let tx_sig = Signature::new_unique();
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig,
             wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
@@ -390,12 +393,12 @@ async fn gateway_should_handle_connection_refused_by_peer() {
 
     rx_server_handle.await.expect("h2");
 
-    let resp = gateway_response_source.recv().await.expect("recv response");
+    let resp = driver_response_source.recv().await.expect("recv response");
 
-    let GatewayResponse::TxDrop(mut actual_resp) = resp else {
-        panic!("Expected GatewayResponse::TxSent, got something {resp:?}");
+    let TpuSenderResponse::TxDrop(mut actual_resp) = resp else {
+        panic!("Expected TpuSenderResponse::TxSent, got something {resp:?}");
     };
-    let (actual_tx_sig, _curr_attempt) = actual_resp.dropped_gateway_tx_vec.pop_front().unwrap();
+    let (actual_tx_sig, _curr_attempt) = actual_resp.dropped_tx_vec.pop_front().unwrap();
     assert_eq!(actual_tx_sig.tx_sig, tx_sig);
     assert!(matches!(
         actual_resp.drop_reason,
@@ -411,7 +414,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
 async fn it_should_update_gatway_identity() {
     let rx_server_addr = generate_random_local_addr();
     let rx_server_identity = Keypair::new();
-    let gateway_config = QuicGatewayConfig {
+    let gateway_config = TpuSenderConfig {
         max_connection_attempts: 1,
         ..Default::default()
     };
@@ -420,17 +423,17 @@ async fn it_should_update_gatway_identity() {
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
-    let gateway_spawner = TokioQuicGatewaySpawner {
+    let gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
-        gateway_tx_channel_capacity: 100,
+        driver_tx_channel_capacity: 100,
     };
 
-    let TokioQuicGatewaySession {
-        mut gateway_identity_updater,
-        gateway_tx_sink: transaction_sink,
-        gateway_response_source: _,
-        gateway_join_handle: _,
+    let TpuSenderSessionContext {
+        mut identity_updater,
+        driver_tx_sink: transaction_sink,
+        driver_response_source: _,
+        driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
@@ -445,7 +448,7 @@ async fn it_should_update_gatway_identity() {
     );
 
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig: Signature::new_unique(),
             wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
@@ -459,12 +462,12 @@ async fn it_should_update_gatway_identity() {
 
     let gateway_identity2 = Keypair::new();
 
-    gateway_identity_updater
+    identity_updater
         .update_identity(gateway_identity2.insecure_clone())
         .await;
 
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig: Signature::new_unique(),
             wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
@@ -484,7 +487,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
     let remote_validator_addr2 = generate_random_local_addr();
     let remote_validator_identity1 = Keypair::new();
     let remote_validator_identity2 = Keypair::new();
-    let gateway_config = QuicGatewayConfig {
+    let gateway_config = TpuSenderConfig {
         max_connection_attempts: 1,
         ..Default::default()
     };
@@ -495,17 +498,17 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         (remote_validator_identity2.pubkey(), remote_validator_addr2),
     ]);
 
-    let gateway_spawner = TokioQuicGatewaySpawner {
+    let gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
-        gateway_tx_channel_capacity: 100,
+        driver_tx_channel_capacity: 100,
     };
 
-    let TokioQuicGatewaySession {
-        gateway_identity_updater: _,
-        gateway_tx_sink: transaction_sink,
-        gateway_response_source: _,
-        gateway_join_handle: _,
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        driver_response_source: _,
+        driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
@@ -539,7 +542,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
 
     // Send it to the first remote peer
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig: Signature::new_unique(),
             wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: remote_validator_identity1.pubkey(),
@@ -550,7 +553,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
     // Send it to the second remote peer
 
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig: Signature::new_unique(),
             wire: Bytes::from("helloworld2".as_bytes()),
             remote_peer: remote_validator_identity2.pubkey(),
@@ -581,7 +584,7 @@ async fn it_should_evict_connection() {
     let remote_validator_addr2 = generate_random_local_addr();
     let remote_validator_identity1 = Keypair::new();
     let remote_validator_identity2 = Keypair::new();
-    let gateway_config = QuicGatewayConfig {
+    let gateway_config = TpuSenderConfig {
         max_connection_attempts: 1,
         max_concurrent_connections: 1, // LIMIT TO 1 CONCURRENT CONNECTION SHOULD TRIGGER CONNECTION EVICTION ON EACH NEW REMOTE DEST
         port_range: (really_limited_port_range, really_limited_port_range + 3),
@@ -596,17 +599,17 @@ async fn it_should_evict_connection() {
         (remote_validator_identity2.pubkey(), remote_validator_addr2),
     ]);
 
-    let gateway_spawner = TokioQuicGatewaySpawner {
+    let gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
-        gateway_tx_channel_capacity: 100,
+        driver_tx_channel_capacity: 100,
     };
 
-    let TokioQuicGatewaySession {
-        gateway_identity_updater: _,
-        gateway_tx_sink: transaction_sink,
-        gateway_response_source: _,
-        gateway_join_handle: _,
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        driver_response_source: _,
+        driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
@@ -649,7 +652,7 @@ async fn it_should_evict_connection() {
     );
 
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig: Signature::new_unique(),
             wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: remote_validator_identity1.pubkey(),
@@ -665,7 +668,7 @@ async fn it_should_evict_connection() {
 
     // Now we send a tx to the second remote peer, this should evict the first connection
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig: Signature::new_unique(),
             wire: Bytes::from("helloworld2".as_bytes()),
             remote_peer: remote_validator_identity2.pubkey(),
@@ -686,7 +689,7 @@ async fn it_should_evict_connection() {
 
     // Finally, send it back to the first remote peer, this should evict the second connection
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig: Signature::new_unique(),
             wire: Bytes::from("helloworld3".as_bytes()),
             remote_peer: remote_validator_identity1.pubkey(),
@@ -724,24 +727,24 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
-    let gateway_spawner = TokioQuicGatewaySpawner {
+    let gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
-        gateway_tx_channel_capacity: 100,
+        driver_tx_channel_capacity: 100,
     };
     const MAX_CONN_ATTEMPT: NonZeroUsize = NonZeroUsize::new(1).unwrap();
-    let gateway_config = QuicGatewayConfig {
+    let gateway_config = TpuSenderConfig {
         max_connection_attempts: 1,
         max_send_attempt: MAX_CONN_ATTEMPT,
         ..Default::default()
     };
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
 
-    let TokioQuicGatewaySession {
-        gateway_identity_updater: _,
-        gateway_tx_sink: transaction_sink,
-        mut gateway_response_source,
-        gateway_join_handle: _,
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        mut driver_response_source,
+        driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
@@ -762,7 +765,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
 
     let tx_sig = Signature::new_unique();
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig,
             wire: huge_payload,
             remote_peer: rx_server_identity.pubkey(),
@@ -775,11 +778,11 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     // let _ = rx_server_handle.await;
     tracing::trace!("rx_server_handle finished");
 
-    let resp = gateway_response_source.recv().await.expect("recv response");
+    let resp = driver_response_source.recv().await.expect("recv response");
     tracing::trace!("Received response: {:?}", resp);
 
-    let GatewayResponse::TxFailed(actual_resp) = resp else {
-        panic!("Expected GatewayResponse::TxSent, got something {resp:?}");
+    let TpuSenderResponse::TxFailed(actual_resp) = resp else {
+        panic!("Expected TpuSenderResponse::TxSent, got something {resp:?}");
     };
 
     assert_eq!(actual_resp.tx_sig, tx_sig);
@@ -795,23 +798,23 @@ async fn it_should_detect_remote_peer_address_change() {
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
-    let gateway_spawner = TokioQuicGatewaySpawner {
+    let gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
-        gateway_tx_channel_capacity: 100,
+        driver_tx_channel_capacity: 100,
     };
 
-    let gateway_config = QuicGatewayConfig {
+    let gateway_config = TpuSenderConfig {
         // Keep it small so test runs fast.
         remote_peer_addr_watch_interval: Duration::from_millis(10),
         ..Default::default()
     };
 
-    let TokioQuicGatewaySession {
-        gateway_identity_updater: _,
-        gateway_tx_sink: transaction_sink,
-        mut gateway_response_source,
-        gateway_join_handle: _,
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        mut driver_response_source,
+        driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
@@ -831,7 +834,7 @@ async fn it_should_detect_remote_peer_address_change() {
     );
     let tx_sig = Signature::new_unique();
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig,
             wire: Bytes::from("helloworld".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
@@ -841,10 +844,10 @@ async fn it_should_detect_remote_peer_address_change() {
 
     let _ = client_rx1.recv().await.expect("recv");
 
-    let GatewayResponse::TxSent(actual_resp) =
-        gateway_response_source.recv().await.expect("recv response")
+    let TpuSenderResponse::TxSent(actual_resp) =
+        driver_response_source.recv().await.expect("recv response")
     else {
-        panic!("Expected GatewayResponse::TxSent, got something else");
+        panic!("Expected TpuSenderResponse::TxSent, got something else");
     };
 
     assert_eq!(actual_resp.tx_sig, tx_sig);
@@ -867,7 +870,7 @@ async fn it_should_detect_remote_peer_address_change() {
     // Send a new transaction to the new address
     let tx_sig2 = Signature::new_unique();
     transaction_sink
-        .send(GatewayTransaction {
+        .send(TpuSenderTxn {
             tx_sig: tx_sig2,
             wire: Bytes::from("helloworld2".as_bytes()),
             remote_peer: rx_server_identity.pubkey(),
@@ -876,10 +879,10 @@ async fn it_should_detect_remote_peer_address_change() {
         .expect("send tx");
 
     let _ = client_rx2.recv().await.expect("recv");
-    let GatewayResponse::TxSent(actual_resp) =
-        gateway_response_source.recv().await.expect("recv response")
+    let TpuSenderResponse::TxSent(actual_resp) =
+        driver_response_source.recv().await.expect("recv response")
     else {
-        panic!("Expected GatewayResponse::TxSent, got something else");
+        panic!("Expected TpuSenderResponse::TxSent, got something else");
     };
     assert_eq!(actual_resp.tx_sig, tx_sig2);
 }
@@ -925,13 +928,13 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 
     let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter(kp_to_addr_pairs);
 
-    let gateway_spawner = TokioQuicGatewaySpawner {
+    let driver_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
-        gateway_tx_channel_capacity: 100,
+        driver_tx_channel_capacity: 100,
     };
 
-    let gateway_config = QuicGatewayConfig {
+    let gateway_config = TpuSenderConfig {
         // Keep it small so test runs fast.
         remote_peer_addr_watch_interval: Duration::from_millis(10),
         // Set the lookahead to the number of validators we have
@@ -971,12 +974,12 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
         calls: Arc::new(RwLock::new(0)),
     });
 
-    let TokioQuicGatewaySession {
-        gateway_identity_updater: _,
-        gateway_tx_sink: transaction_sink,
-        gateway_response_source: _,
-        gateway_join_handle: _,
-    } = gateway_spawner.spawn(
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        driver_response_source: _,
+        driver_join_handle: _,
+    } = driver_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
@@ -999,7 +1002,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
     for (i, validator_rx) in validator_rx_vec.iter_mut().enumerate() {
         let tx_sig = Signature::new_unique();
         transaction_sink
-            .send(GatewayTransaction {
+            .send(TpuSenderTxn {
                 tx_sig,
                 wire: Bytes::copy_from_slice(format!("helloworld{i}").as_bytes()),
                 remote_peer: validators_kp_vec[i].pubkey(),

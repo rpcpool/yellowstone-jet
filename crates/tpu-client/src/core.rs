@@ -8,15 +8,15 @@
 //! Rather than maintaining a "pool of connection pools" to remote peers, this module optimizes the use of QUIC connections
 //! by opening multiple streams over a single connection and multiplexing transactions across them.
 //!
-//! The number of streams is limited based on the gateway's stake.
+//! The number of streams is limited based on the driver's stake.
 //!
 //! This design also decouples transaction sending from connection establishment. Since connections can drop during active streams,
 //! embedding reconnection logic directly into the sending path would introduce unnecessary complexity and responsibility creep.
 //!
-//! Connection lifecycle management—including establishment and failure recovery—is handled by `TokioQuicGatewayRuntime`.
+//! Connection lifecycle management—including establishment and failure recovery—is handled by `TpuSenderDriver`.
 //! Meanwhile, transaction sending is delegated to `QuicTxSenderWorker`.
 //!
-//! `TokioQuicGatewayRuntime` spawns a `QuicTxSenderWorker` for each remote peer. If a connection to a peer is lost,
+//! `TpuSenderDriver` spawns a `QuicTxSenderWorker` for each remote peer. If a connection to a peer is lost,
 //! the corresponding worker will terminate and can be restarted by the runtime.
 //!
 //! Whether or not to re-establish a connection depends on the nature of the error encountered.
@@ -27,15 +27,15 @@
 //!  1. Fatal errors like incompatible protocol versions or unsupported ALPN protocols will not trigger a reconnection.
 //!  2. Non-fatal errors like stream limit exceeded or connection closed will trigger a reconnection.
 //!
-//! Unlike the deprecated `ConnectionCache`, the QUIC gateway manage connections eviction which is an important
-//! part of the QUIC gateway design as it allows to evict lesser staked connections in favor of higher staked connections in
+//! Unlike the deprecated `ConnectionCache`, the QUIC driver manage connections eviction which is an important
+//! part of the QUIC driver design as it allows to evict lesser staked connections in favor of higher staked connections in
 //! case of port exhaustion or maximum number of concurrent connections reached.
 //!
 //! The [`ConnectionEvictionStrategy`] trait is used to define the eviction strategy.
 //! The default eviction strategy is [`StakedBaseEvictionStrategy`], which evicts the lowest staked connections first AND least recently used peer.
 //!
 //!
-//! Finally, QUIC-Gateway reuses the same [`quinn::Endpoint`] for multiple remote peers. Unlike `ConnectionCache`, which created a new endpoint for each remote peer,
+//! Finally, QUIC-driver reuses the same [`quinn::Endpoint`] for multiple remote peers. Unlike `ConnectionCache`, which created a new endpoint for each remote peer,
 //! this should considerably reduce overhead as each [`quinn::Endpoint`] has its own event loop.
 //!
 //!
@@ -44,7 +44,7 @@
 #[cfg(feature = "prometheus")]
 use crate::prom;
 use {
-    crate::config::{ConfigQuicTpuPort, TpuOverrideInfo},
+    crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
     bytes::Bytes,
     derive_more::Display,
     futures::task::AtomicWaker,
@@ -55,9 +55,8 @@ use {
     rustls::{NamedGroup, crypto::CryptoProvider},
     solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
-    solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_pubkey::Pubkey,
-    solana_quic_definitions::{QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT, QUIC_SEND_FAIRNESS},
+    solana_quic_definitions::{QUIC_KEEP_ALIVE, QUIC_SEND_FAIRNESS},
     solana_signature::Signature,
     solana_signer::Signer,
     solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
@@ -81,28 +80,7 @@ use {
     },
 };
 
-///
-/// Each [`quinn::Endpoint`] has its own event-loop.
-/// Each endpoint can manage thousands of connections concurrently.
-/// HOWEVER, each [`quinn::Endpoint`] has a state mutex lock.
-/// Quickly looking at quinn's source code, it seems that each lock acquisition is quite short live.
-/// If we have too many connections over a single endpoint, we might end up with a lot of contention on the endpoint mutex.
-/// At the same time, if we have too many endpoints, we might end up with too many event loops running concurrently.
-/// Talking with Anza, we should not open more than 5 endpoints to host QUIC connections.
-pub const DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT: NonZeroUsize =
-    NonZeroUsize::new(5).expect("default endpoint count must be non-zero");
-pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
-pub const DEFAULT_QUIC_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
-pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
-pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
-pub const DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS: usize = 3;
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
-pub const DEFAULT_MAX_SEND_ATTEMPT: NonZeroUsize = NonZeroUsize::new(3).unwrap();
-pub const DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL: Duration = Duration::from_secs(5);
-pub const DEFAULT_TX_SEND_TIMEOUT: Duration = Duration::from_secs(2);
-
-pub const DEFAULT_LEADER_PREDICTION_LOOKAHEAD: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ConnectingError {
@@ -112,94 +90,6 @@ pub(crate) enum ConnectingError {
     ConnectionError(#[from] quinn::ConnectionError),
     #[error("Connection to remote peer not in leader schedule")]
     PeerNotInLeaderSchedule,
-}
-
-pub struct QuicGatewayConfig {
-    pub port_range: PortRange,
-
-    pub max_idle_timeout: Duration,
-
-    // TODO check if we really need keep alive interval.
-    // we could use `max_idle_timeout` to detect dead connections and naturally stopped tx sender workers.
-    // pub keep_alive_interval: Option<Duration>,
-    ///
-    /// Maximum number of consecutive connection attempts
-    ///
-    pub max_connection_attempts: usize,
-
-    ///
-    /// Capacity of the transaction sender worker channel per remote peer.
-    ///
-    pub transaction_sender_worker_channel_capacity: usize,
-
-    ///
-    /// Timeout for establishing a connection to a remote peer.
-    ///
-    pub connecting_timeout: Duration,
-
-    pub tpu_port_kind: ConfigQuicTpuPort,
-
-    pub max_concurrent_connections: usize,
-
-    ///
-    /// Maximum number of attempts to bind a local port to a remote peer.
-    ///
-    pub max_local_port_binding_attempts: usize,
-
-    ///
-    /// How many endpoints to create for the QUIC gateway.
-    /// Each endpoint will be bound to a different port in the port range.
-    /// Each endpoint has its own "event loop" and can handle multiple connections concurrently.
-    ///
-    /// The number of endpoints should not be greater than the numbe of CPU cores dedicated to jet.
-    ///
-    /// The number of endpoints depends on the stake of the gateway as lower stake gateway should require less endpoints.
-    ///
-    /// Recommanded try 1 endpoint per 8 CPU cores dedicated to jet.
-    ///
-    pub num_endpoints: NonZeroUsize,
-
-    ///
-    /// Maximum number of consecutive transaction sending attempts to a remote peer.
-    /// Attempt may fail due to connection losts, stream limit exceeded, etc.
-    /// It might be useful to retry sending a transaction at least 2-3 times before giving up.
-    ///
-    pub max_send_attempt: NonZeroUsize,
-
-    ///
-    /// Interval to watch remote peer address changes.
-    ///
-    pub remote_peer_addr_watch_interval: Duration,
-
-    ///
-    /// Timeout for sending a transaction to a remote peer.
-    ///
-    pub send_timeout: Duration,
-
-    ///
-    /// Maximum number of leaders to predict
-    ///
-    pub leader_prediction_lookahead: Option<NonZeroUsize>,
-}
-
-impl Default for QuicGatewayConfig {
-    fn default() -> Self {
-        Self {
-            port_range: VALIDATOR_PORT_RANGE,
-            max_idle_timeout: QUIC_MAX_TIMEOUT,
-            max_connection_attempts: DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT,
-            transaction_sender_worker_channel_capacity: DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE,
-            connecting_timeout: DEFAULT_CONNECTION_TIMEOUT,
-            max_concurrent_connections: DEFAULT_MAX_CONCURRENT_CONNECTIONS,
-            max_local_port_binding_attempts: DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS,
-            tpu_port_kind: ConfigQuicTpuPort::default(),
-            num_endpoints: DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT,
-            max_send_attempt: DEFAULT_MAX_SEND_ATTEMPT,
-            remote_peer_addr_watch_interval: DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL,
-            send_timeout: DEFAULT_TX_SEND_TIMEOUT,
-            leader_prediction_lookahead: Some(DEFAULT_LEADER_PREDICTION_LOOKAHEAD),
-        }
-    }
 }
 
 pub struct SentOk {
@@ -220,7 +110,7 @@ struct ConnectingMeta {
 ///
 /// Inner part of the update identity command.
 ///
-struct UpdateGatewayIdentityCommand {
+struct UpdateIdentityCommand {
     new_identity: Keypair,
     callback: Arc<UpdateIdentityInner>,
 }
@@ -231,21 +121,21 @@ struct MultiStepIdentitySynchronizationCommand {
 }
 
 ///
-/// Command to control gateway behavior.
+/// Command to control driver behavior.
 ///
-enum GatewayCommand {
-    UpdateIdenttiy(UpdateGatewayIdentityCommand),
+enum DriverCommand {
+    UpdateIdenttiy(UpdateIdentityCommand),
     MultiStepIdentitySynchronization(MultiStepIdentitySynchronizationCommand),
 }
 
-enum TokioGatewayTaskMeta {
+enum DriverTaskMeta {
     DropAllWorkers,
 }
 
 struct TxWorkerSenderHandle {
     remote_peer_identity: Pubkey,
     remote_peer_addr: SocketAddr,
-    sender: mpsc::Sender<GatewayTransaction>,
+    sender: mpsc::Sender<TpuSenderTxn>,
     cancel_notify: Arc<Notify>,
 }
 
@@ -288,8 +178,9 @@ pub trait ValidatorStakeInfoService {
 const FOREVER: Duration = Duration::from_secs(31_536_000); // One year is considered "forever" in this context.
 
 ///
-/// Tokio-based runtime to driver a QUIC gateway.
-pub(crate) struct TokioQuicGatewayRuntime {
+/// Tokio-based driver for tpu sender.
+///
+pub(crate) struct TpuSenderDriver {
     ///
     /// The stake info map used to compute max stream limit
     ///
@@ -318,11 +209,7 @@ pub(crate) struct TokioQuicGatewayRuntime {
     ///
     /// Transaction queues per remote identity waiting for connection to be come available.
     ///
-    tx_queues: HashMap<Pubkey, VecDeque<(GatewayTransaction, usize)>>,
-
-    ///
-    /// The runtime to spawn transation sender worker on.
-    tx_worker_rt: tokio::runtime::Handle,
+    tx_queues: HashMap<Pubkey, VecDeque<(TpuSenderTxn, usize)>>,
 
     endpoints: Vec<Endpoint>,
     endpoints_usage: Vec<EndpointUsage>,
@@ -338,7 +225,7 @@ pub(crate) struct TokioQuicGatewayRuntime {
     connecting_meta: HashMap<tokio::task::Id, ConnectingMeta>,
 
     ///
-    /// Reversed of [`TokioQuicGatewayRuntime::connecting_meta`]
+    /// Reversed of [`TokioQuicDriver::connecting_meta`]
     ///
     connecting_remote_peers: HashMap<Pubkey, tokio::task::Id>,
 
@@ -347,7 +234,7 @@ pub(crate) struct TokioQuicGatewayRuntime {
     ///
     leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
 
-    config: QuicGatewayConfig,
+    config: TpuSenderConfig,
 
     ///
     /// Current certificate set
@@ -355,27 +242,27 @@ pub(crate) struct TokioQuicGatewayRuntime {
     client_certificate: Arc<QuicClientCertificate>,
 
     ///
-    /// Current set gateway identity
+    /// Current set driver identity
     ///
     identity: Keypair,
 
     ///
     /// Transaction inlet channel : where transaction comes from.
     ///
-    tx_inlet: mpsc::Receiver<GatewayTransaction>,
+    tx_inlet: mpsc::Receiver<TpuSenderTxn>,
 
     ///
     /// Outlet to send transaction "sent" status.
     ///
-    response_outlet: mpsc::UnboundedSender<GatewayResponse>,
+    response_outlet: mpsc::UnboundedSender<TpuSenderResponse>,
 
     ///
-    /// Command-and-control channel : low-bandwidth channel to receive gateway configuration mutation.
+    /// Command-and-control channel : low-bandwidth channel to receive driver configuration mutation.
     ///
-    cnc_rx: mpsc::Receiver<GatewayCommand>,
+    cnc_rx: mpsc::Receiver<DriverCommand>,
 
     tasklet: JoinSet<()>,
-    tasklet_meta: HashMap<Id, TokioGatewayTaskMeta>,
+    tasklet_meta: HashMap<Id, DriverTaskMeta>,
 
     last_peer_activity: HashMap<Pubkey, Instant>,
 
@@ -410,11 +297,11 @@ pub trait LeaderTpuInfoService {
     fn get_quic_dest_addr(
         &self,
         leader_pubkey: Pubkey,
-        tpu_port_kind: ConfigQuicTpuPort,
+        tpu_port_kind: TpuPortKind,
     ) -> Option<SocketAddr> {
         match tpu_port_kind {
-            ConfigQuicTpuPort::Normal => self.get_quic_tpu_socket_addr(leader_pubkey),
-            ConfigQuicTpuPort::Forwards => self.get_quic_tpu_fwd_socket_addr(leader_pubkey),
+            TpuPortKind::Normal => self.get_quic_tpu_socket_addr(leader_pubkey),
+            TpuPortKind::Forwards => self.get_quic_tpu_fwd_socket_addr(leader_pubkey),
         }
     }
 }
@@ -451,7 +338,7 @@ where
 /// A transaction with destination details to be sent to a remote peer.
 ///
 #[derive(Debug, Clone)]
-pub struct GatewayTransaction {
+pub struct TpuSenderTxn {
     /// Id set by the sender to identify the transaction. Only meaningful to the sender.
     pub tx_sig: Signature,
     /// The wire format of the transaction.
@@ -473,14 +360,14 @@ pub enum SendTxError {
 }
 
 #[derive(Debug)]
-pub struct GatewayTxSent {
+pub struct TxSent {
     pub remote_peer_identity: Pubkey,
     pub remote_peer_addr: SocketAddr,
     pub tx_sig: Signature,
 }
 
 #[derive(Debug)]
-pub struct GatewayTxFailed {
+pub struct TxFailed {
     pub remote_peer_identity: Pubkey,
     pub remote_peer_addr: SocketAddr,
     pub tx_sig: Signature,
@@ -493,8 +380,8 @@ pub enum TxDropReason {
     RateLimited,
     #[display("remote peer is unreachable")]
     RemotePeerUnreachable,
-    #[display("tx got drop by gateway")]
-    DropByGateway,
+    #[display("tx got drop by driver")]
+    DropByDriver,
     #[display("remote peer is being evicted")]
     RemotePeerBeingEvicted,
 }
@@ -504,13 +391,13 @@ pub struct TxDrop {
     pub remote_peer_identity: Pubkey,
     // pub tx_sig: Signatu
     pub drop_reason: TxDropReason,
-    pub dropped_gateway_tx_vec: VecDeque<(GatewayTransaction, usize)>,
+    pub dropped_tx_vec: VecDeque<(TpuSenderTxn, usize)>,
 }
 
 #[derive(Debug)]
-pub enum GatewayResponse {
-    TxSent(GatewayTxSent),
-    TxFailed(GatewayTxFailed),
+pub enum TpuSenderResponse {
+    TxSent(TxSent),
+    TxFailed(TxFailed),
     TxDrop(TxDrop),
 }
 
@@ -523,7 +410,7 @@ struct ConnectingTask {
     cert: Arc<QuicClientCertificate>,
     max_idle_timeout: Duration,
     connection_timeout: Duration,
-    tpu_port_kind: ConfigQuicTpuPort,
+    tpu_port_kind: TpuPortKind,
     wait_for_eviction: Option<Arc<Notify>>,
     endpoint: Endpoint,
 }
@@ -631,9 +518,9 @@ struct QuicTxSenderWorker {
     connection: Connection,
     /// The current client identity being used for the connection
     current_client_identity: Pubkey,
-    incoming_rx: mpsc::Receiver<GatewayTransaction>,
-    output_tx: mpsc::UnboundedSender<GatewayResponse>,
-    tx_queue: VecDeque<(GatewayTransaction, usize)>,
+    incoming_rx: mpsc::Receiver<TpuSenderTxn>,
+    output_tx: mpsc::UnboundedSender<TpuSenderResponse>,
+    tx_queue: VecDeque<(TpuSenderTxn, usize)>,
     cancel_notify: Arc<Notify>,
     max_tx_attempt: NonZeroUsize,
     // TODO: Check if this is necessary, since there is already flow control in QUIC
@@ -653,8 +540,8 @@ enum TxSenderWorkerError {
 
 struct TxSenderWorkerCompleted {
     err: Option<TxSenderWorkerError>,
-    rx: mpsc::Receiver<GatewayTransaction>,
-    pending_tx: VecDeque<(GatewayTransaction, usize)>,
+    rx: mpsc::Receiver<TpuSenderTxn>,
+    pending_tx: VecDeque<(TpuSenderTxn, usize)>,
     canceled: bool,
 }
 
@@ -676,7 +563,7 @@ impl QuicTxSenderWorker {
     }
     async fn process_tx(
         &mut self,
-        tx: GatewayTransaction,
+        tx: TpuSenderTxn,
         attempt: usize,
     ) -> Option<TxSenderWorkerError> {
         let result = self.send_tx(tx.wire.clone()).await;
@@ -689,12 +576,12 @@ impl QuicTxSenderWorker {
                     self.remote_peer,
                     sent_ok.e2e_time
                 );
-                let resp = GatewayTxSent {
+                let resp = TxSent {
                     remote_peer_identity: self.remote_peer,
                     remote_peer_addr: remote_addr,
                     tx_sig,
                 };
-                let _ = self.output_tx.send(GatewayResponse::TxSent(resp));
+                let _ = self.output_tx.send(TpuSenderResponse::TxSent(resp));
                 #[cfg(feature = "prometheus")]
                 {
                     let path_stats = self.connection.stats().path;
@@ -717,7 +604,7 @@ impl QuicTxSenderWorker {
                     {
                         prom::incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "error");
                     }
-                    let resp = GatewayTxFailed {
+                    let resp = TxFailed {
                         remote_peer_identity: self.remote_peer,
                         remote_peer_addr: self.connection.remote_address(),
                         failure_reason: e.to_string(),
@@ -731,7 +618,7 @@ impl QuicTxSenderWorker {
                         attempt,
                         e
                     );
-                    let _ = self.output_tx.send(GatewayResponse::TxFailed(resp));
+                    let _ = self.output_tx.send(TpuSenderResponse::TxFailed(resp));
                 } else {
                     tracing::trace!(
                         "Retrying to send transaction: {} to remote peer: {} after {} attempts: {:?}",
@@ -839,7 +726,7 @@ impl QuicTxSenderWorker {
 ///
 /// Base trait for connection eviction strategy.
 ///
-/// Connection eviction is called when the QUIC gateway does not have a local port available
+/// Connection eviction is called when the QUIC driver does not have a local port available
 /// to use for new QUIC connections.
 ///
 pub trait ConnectionEvictionStrategy {
@@ -974,11 +861,11 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
     }
 }
 
-/// Here's the simplified flow of a transaction through the QUIC gateway:
+/// Here's the simplified flow of a transaction through the QUIC driver:
 ///
 ///  ┌────────────┐      ┌────────────┐       ┌───────────────┐
 ///  │Transaction │      │  QUIC      │       │ TxSenderWorker│        (Remote Validator)
-///  │ Source     ┼──1──►│ Gateway    ┼──2────►               ┼──3────►
+///  │ Source     ┼──1──►│ Driver     ┼──2────►               ┼──3────►
 ///  └────────────┘      └────▲───────┘       └─────┬─────────┘
 ///                           │                     │
 ///                           │                     │
@@ -1008,7 +895,7 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
 ///   │  to peer "X"      │
 ///   └───────────────────┘
 ///
-impl TokioQuicGatewayRuntime {
+impl TpuSenderDriver {
     ///
     /// Spawns a "connecting" task to a remote peer.
     /// this is called when a transaction is received for a remote peer which does not have a worker installed yet.
@@ -1113,17 +1000,19 @@ impl TokioQuicGatewayRuntime {
             reason
         );
         if let Some(tx_queues) = self.tx_queues.remove(&remote_peer_identity) {
-            let total = tx_queues.len();
             #[cfg(feature = "prometheus")]
             {
+                let total = tx_queues.len();
                 prom::incr_quic_gw_drop_tx_cnt(remote_peer_identity, total as u64);
             }
             let tx_drop = TxDrop {
                 remote_peer_identity,
                 drop_reason: reason.clone(),
-                dropped_gateway_tx_vec: tx_queues,
+                dropped_tx_vec: tx_queues,
             };
-            let _ = self.response_outlet.send(GatewayResponse::TxDrop(tx_drop));
+            let _ = self
+                .response_outlet
+                .send(TpuSenderResponse::TxDrop(tx_drop));
         }
     }
 
@@ -1205,7 +1094,7 @@ impl TokioQuicGatewayRuntime {
         };
 
         let worker_fut = worker.run();
-        let ah = self.tx_worker_set.spawn_on(worker_fut, &self.tx_worker_rt);
+        let ah = self.tx_worker_set.spawn(worker_fut);
         let handle = TxWorkerSenderHandle {
             remote_peer_identity,
             remote_peer_addr,
@@ -1233,6 +1122,7 @@ impl TokioQuicGatewayRuntime {
     ) {
         match result {
             Ok((task_id, result)) => {
+                #[allow(unused_variables)]
                 let ConnectingMeta {
                     current_client_identity,
                     remote_peer_identity,
@@ -1349,7 +1239,7 @@ impl TokioQuicGatewayRuntime {
     /// If a transaction sender worker exists for the remote peer, it is fowarded to it.
     /// If not, the transaction is queued for later processing and a connection attempt is scheduled.
     ///
-    fn accept_tx(&mut self, tx: GatewayTransaction) {
+    fn accept_tx(&mut self, tx: TpuSenderTxn) {
         let remote_peer_identity = tx.remote_peer;
         self.last_peer_activity
             .insert(remote_peer_identity, Instant::now());
@@ -1379,13 +1269,13 @@ impl TokioQuicGatewayRuntime {
                         let txdrop = TxDrop {
                             remote_peer_identity,
                             drop_reason: TxDropReason::RateLimited,
-                            dropped_gateway_tx_vec: VecDeque::from([(tx, 1)]),
+                            dropped_tx_vec: VecDeque::from([(tx, 1)]),
                         };
                         #[cfg(feature = "prometheus")]
                         {
                             prom::incr_quic_gw_drop_tx_cnt(remote_peer_identity, 1);
                         }
-                        let _ = self.response_outlet.send(GatewayResponse::TxDrop(txdrop));
+                        let _ = self.response_outlet.send(TpuSenderResponse::TxDrop(txdrop));
                     }
                     mpsc::error::TrySendError::Closed(tx) => {
                         tracing::debug!("Enqueuing tx: {tx_id:.10}",);
@@ -1517,7 +1407,7 @@ impl TokioQuicGatewayRuntime {
                         "Remote peer: {} tx worker was canceled, will not reconnect",
                         remote_peer_identity
                     );
-                    self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DropByGateway);
+                    self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DropByDriver);
                 } else if !tx_to_rescue.is_empty() {
                     // If the worker didn't have a fatal error and was not evicted and still has queued transactions,
                     // we can safely reattempt to connect to the remote peer.
@@ -1542,7 +1432,7 @@ impl TokioQuicGatewayRuntime {
     /// Schedules a graceful drop of all transaction workers.
     ///
     /// The scheduled task waits for all transaction workers to complete and drop their senders.
-    /// All transaction workers are detached from the gateway runtime and not managed anymore.
+    /// All transaction workers are detached from the driver runtime and not managed anymore.
     ///
     ///
     fn schedule_graceful_drop_all_worker(&mut self) {
@@ -1568,14 +1458,14 @@ impl TokioQuicGatewayRuntime {
 
         let ah = self.tasklet.spawn(fut);
         self.tasklet_meta
-            .insert(ah.id(), TokioGatewayTaskMeta::DropAllWorkers);
+            .insert(ah.id(), DriverTaskMeta::DropAllWorkers);
     }
 
     ///
-    /// Updates the gateway identity and reconnects to all remote peers with the new identity.
+    /// Updates the driver identity and reconnects to all remote peers with the new identity.
     ///
-    fn update_identity(&mut self, update_identity_cmd: UpdateGatewayIdentityCommand) {
-        let UpdateGatewayIdentityCommand {
+    fn update_identity(&mut self, update_identity_cmd: UpdateIdentityCommand) {
+        let UpdateIdentityCommand {
             new_identity,
             callback,
         } = update_identity_cmd;
@@ -1613,12 +1503,15 @@ impl TokioQuicGatewayRuntime {
             .set
             .store(true, std::sync::atomic::Ordering::Relaxed);
         callback.waker.wake();
-        tracing::trace!("Updated gateway identity to: {}", self.identity.pubkey());
+        tracing::trace!(
+            "Updated tpu sender driver identity to: {}",
+            self.identity.pubkey()
+        );
     }
 
     ///
-    /// Similar to [`TokioQuicGatewayRuntime::update_identity`], but await a synchronization barrier
-    /// before resuming gateway operations.
+    /// Similar to [`TpuSenderDriver::update_identity`], but await a synchronization barrier
+    /// before resuming driver operations.
     ///
     async fn update_identity_sync(&mut self, command: MultiStepIdentitySynchronizationCommand) {
         let MultiStepIdentitySynchronizationCommand {
@@ -1658,15 +1551,18 @@ impl TokioQuicGatewayRuntime {
             );
         }
 
-        tracing::trace!("Updated gateway identity to: {}", self.identity.pubkey());
+        tracing::trace!(
+            "Updated tpu sender driver identity to: {}",
+            self.identity.pubkey()
+        );
     }
 
-    async fn handle_cnc(&mut self, command: GatewayCommand) {
+    async fn handle_cnc(&mut self, command: DriverCommand) {
         match command {
-            GatewayCommand::UpdateIdenttiy(update_gateway_identity_command) => {
-                self.update_identity(update_gateway_identity_command);
+            DriverCommand::UpdateIdenttiy(cmd) => {
+                self.update_identity(cmd);
             }
-            GatewayCommand::MultiStepIdentitySynchronization(
+            DriverCommand::MultiStepIdentitySynchronization(
                 multi_step_identity_synchronization_command,
             ) => {
                 self.update_identity_sync(multi_step_identity_synchronization_command)
@@ -1683,7 +1579,7 @@ impl TokioQuicGatewayRuntime {
         let meta = self.tasklet_meta.remove(&id).expect("tasklet meta");
 
         match meta {
-            TokioGatewayTaskMeta::DropAllWorkers => {
+            DriverTaskMeta::DropAllWorkers => {
                 tracing::info!(
                     "finished graceful drop of all transaction workers with : {result:?}"
                 );
@@ -1692,11 +1588,11 @@ impl TokioQuicGatewayRuntime {
     }
 
     fn update_prom_metrics(&self) {
-        let num_active_workers = self.tx_worker_handle_map.len();
-        let num_connecting_tasks = self.connecting_tasks.len();
-        let num_queued_tx = self.tx_queues.values().map(|q| q.len()).sum::<usize>();
         #[cfg(feature = "prometheus")]
         {
+            let num_active_workers = self.tx_worker_handle_map.len();
+            let num_connecting_tasks = self.connecting_tasks.len();
+            let num_queued_tx = self.tx_queues.values().map(|q| q.len()).sum::<usize>();
             prom::set_quic_gw_active_connection_cnt(num_active_workers);
             prom::set_quic_gw_connecting_cnt(num_connecting_tasks);
             prom::set_quic_gw_ongoing_evictions_cnt(self.being_evicted_peers.len());
@@ -1809,7 +1705,7 @@ impl TokioQuicGatewayRuntime {
                             self.accept_tx(tx);
                         }
                         None => {
-                            tracing::debug!("Transaction gateway inlet closed");
+                            tracing::debug!("Transaction driver inlet closed");
                             break;
                         }
                     }
@@ -1852,7 +1748,7 @@ struct RemotePeerAddrWatcher {
 impl RemotePeerAddrWatcher {
     fn new(
         refresh_interval: Duration,
-        tpu_port_kind: ConfigQuicTpuPort,
+        tpu_port_kind: TpuPortKind,
         leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     ) -> Self {
         let shared = Default::default();
@@ -1930,7 +1826,7 @@ struct RemotePeerAddrWatcherEvLoop {
     leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     cnc_rx: mpsc::UnboundedReceiver<RemotePeerAddrWatcherCommand>,
     peers_to_watch_map: HashMap<Pubkey, SocketAddr>,
-    tpu_port_kind: ConfigQuicTpuPort,
+    tpu_port_kind: TpuPortKind,
     interval: Duration,
     notify: Arc<Notify>,
 }
@@ -2010,41 +1906,44 @@ impl RemotePeerAddrWatcherEvLoop {
     }
 }
 
-pub struct TokioQuicGatewaySession {
+pub struct TpuSenderSessionContext {
     ///
-    /// The [`GatewayIdentityUpdater`] use to change the gateway configured [`Keypair`].
+    /// The [`TpuSenderIdentityUpdater`] use to change the driver configured [`Keypair`].
     ///
-    pub gateway_identity_updater: GatewayIdentityUpdater,
+    pub identity_updater: TpuSenderIdentityUpdater,
 
     ///
     /// Sink to send transaction to.
-    /// If all reference to the sink are dropped, the underlying gateway runtime will stop too.
+    /// If all reference to the sink are dropped, the underlying driver runtime will stop too.
     ///
-    pub gateway_tx_sink: mpsc::Sender<GatewayTransaction>,
+    pub driver_tx_sink: mpsc::Sender<TpuSenderTxn>,
 
     ///
-    /// Source emitting gateway response.
+    /// Source emitting driver feedback response.
     ///
-    pub gateway_response_source: mpsc::UnboundedReceiver<GatewayResponse>,
+    pub driver_response_source: mpsc::UnboundedReceiver<TpuSenderResponse>,
 
     ///
-    /// Handle to tokio-based QUIC gateway runtime.
-    /// Dropping this handle does not interrupt the gateway runtime.
+    /// Handle to tokio-based QUIC driver runtime.
+    /// Dropping this handle does not interrupt the driver runtime.
     ///
-    pub gateway_join_handle: JoinHandle<()>,
+    pub driver_join_handle: JoinHandle<()>,
 }
 
 ///
-/// Factory struct to spawn tokio-based QUIC gateway
+/// Factory struct to spawn tokio-based QUIC driver
 ///
-pub struct TokioQuicGatewaySpawner {
+pub struct TpuSenderDriverSpawner {
+    /// Service to get validator stake info.
     pub stake_info_map: Arc<dyn ValidatorStakeInfoService + Send + Sync + 'static>,
+    /// Service to get peers TPU gossip info
     pub leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
-    pub gateway_tx_channel_capacity: usize,
+    /// Capacity of the channel used to send transaction to the driver.
+    pub driver_tx_channel_capacity: usize,
 }
 
-impl TokioQuicGatewaySpawner {
-    pub fn spawn_with_default(&self, identity: Keypair) -> TokioQuicGatewaySession {
+impl TpuSenderDriverSpawner {
+    pub fn spawn_with_default(&self, identity: Keypair) -> TpuSenderSessionContext {
         self.spawn(
             identity,
             Default::default(),
@@ -2056,10 +1955,10 @@ impl TokioQuicGatewaySpawner {
     pub fn spawn(
         &self,
         identity: Keypair,
-        config: QuicGatewayConfig,
+        config: TpuSenderConfig,
         eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
         leader_schedule: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
-    ) -> TokioQuicGatewaySession {
+    ) -> TpuSenderSessionContext {
         self.spawn_on(
             identity,
             config,
@@ -2072,14 +1971,14 @@ impl TokioQuicGatewaySpawner {
     pub fn spawn_on(
         &self,
         identity: Keypair,
-        config: QuicGatewayConfig,
+        config: TpuSenderConfig,
         eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
         leader_predictor: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
-        gateway_rt: Handle,
-    ) -> TokioQuicGatewaySession {
-        let (tx_inlet, tx_outlet) = mpsc::channel(self.gateway_tx_channel_capacity);
-        let (gateway_resp_tx, gateway_resp_rx) = mpsc::unbounded_channel();
-        let (gateway_cnc_tx, gateway_cnc_rx) = mpsc::channel(10);
+        driver_rt: Handle,
+    ) -> TpuSenderSessionContext {
+        let (tx_inlet, tx_outlet) = mpsc::channel(self.driver_tx_channel_capacity);
+        let (driver_resp_tx, driver_resp_rx) = mpsc::unbounded_channel();
+        let (driver_cnc_tx, driver_cnc_rx) = mpsc::channel(10);
 
         let (certificate, private_key) = new_dummy_x509_certificate(&identity);
         let cert = Arc::new(QuicClientCertificate {
@@ -2117,14 +2016,13 @@ impl TokioQuicGatewaySpawner {
             Arc::clone(&self.leader_tpu_info_service),
         );
 
-        let gateway_runtime = TokioQuicGatewayRuntime {
+        let driver = TpuSenderDriver {
             stake_info_map: Arc::clone(&self.stake_info_map),
             tx_worker_handle_map: Default::default(),
             tx_worker_task_meta_map: Default::default(),
             tx_worker_set: Default::default(),
             active_staked_sorted_remote_peer: Default::default(),
             tx_queues: Default::default(),
-            tx_worker_rt: gateway_rt.clone(),
             identity,
             connecting_tasks: JoinSet::new(),
             connecting_meta: Default::default(),
@@ -2133,8 +2031,8 @@ impl TokioQuicGatewaySpawner {
             config,
             client_certificate: cert,
             tx_inlet: tx_outlet,
-            response_outlet: gateway_resp_tx,
-            cnc_rx: gateway_cnc_rx,
+            response_outlet: driver_resp_tx,
+            cnc_rx: driver_cnc_rx,
             tasklet: Default::default(),
             tasklet_meta: Default::default(),
             last_peer_activity: Default::default(),
@@ -2148,31 +2046,32 @@ impl TokioQuicGatewaySpawner {
             next_leader_prediction_deadline: Instant::now(),
         };
 
-        let jh = gateway_rt.spawn(gateway_runtime.run());
+        let jh = driver_rt.spawn(driver.run());
 
-        TokioQuicGatewaySession {
-            gateway_tx_sink: tx_inlet,
-            gateway_identity_updater: GatewayIdentityUpdater {
-                cnc_tx: gateway_cnc_tx,
+        TpuSenderSessionContext {
+            driver_tx_sink: tx_inlet,
+            identity_updater: TpuSenderIdentityUpdater {
+                cnc_tx: driver_cnc_tx,
             },
-            gateway_response_source: gateway_resp_rx,
-            gateway_join_handle: jh,
+            driver_response_source: driver_resp_rx,
+            driver_join_handle: jh,
         }
     }
 }
 
-pub struct GatewayIdentityUpdater {
+pub struct TpuSenderIdentityUpdater {
     ///
-    /// Command-and-control channel to send command to the QUIC gateway
-    cnc_tx: mpsc::Sender<GatewayCommand>,
+    /// Command-and-control channel to send command to the QUIC driver
+    ///  
+    cnc_tx: mpsc::Sender<DriverCommand>,
 }
 
 ///
 /// All the updater API is set a "mut" concurrent identity update.
 ///
-impl GatewayIdentityUpdater {
+impl TpuSenderIdentityUpdater {
     ///
-    /// Changes the configured identity in the QUIC gateway
+    /// Changes the configured identity in the QUIC driver
     ///
     pub async fn update_identity(&mut self, identity: Keypair) {
         let shared = UpdateIdentityInner {
@@ -2180,12 +2079,12 @@ impl GatewayIdentityUpdater {
             waker: AtomicWaker::new(),
         };
         let shared = Arc::new(shared);
-        let cmd = UpdateGatewayIdentityCommand {
+        let cmd = UpdateIdentityCommand {
             new_identity: identity,
             callback: Arc::clone(&shared),
         };
         self.cnc_tx
-            .send(GatewayCommand::UpdateIdenttiy(cmd))
+            .send(DriverCommand::UpdateIdenttiy(cmd))
             .await
             .expect("disconnected");
         let update_identity = UpdateIdentity {
@@ -2205,7 +2104,7 @@ impl GatewayIdentityUpdater {
             barrier,
         };
         self.cnc_tx
-            .send(GatewayCommand::MultiStepIdentitySynchronization(cmd))
+            .send(DriverCommand::MultiStepIdentitySynchronization(cmd))
             .await
             .expect("disconnected");
     }
@@ -2225,7 +2124,7 @@ struct UpdateIdentityInner {
 ///
 pub struct UpdateIdentity<'a> {
     inner: Arc<UpdateIdentityInner>,
-    _this: &'a GatewayIdentityUpdater, /* phantom data to prevent two threads from updating the identity at the same time */
+    _this: &'a TpuSenderIdentityUpdater, /* phantom data to prevent two threads from updating the identity at the same time */
 }
 
 impl Future for UpdateIdentity<'_> {
@@ -2260,8 +2159,7 @@ pub const fn module_path_for_test() -> &'static str {
 mod test {
     use {
         super::{
-            GatewayCommand, GatewayIdentityUpdater, StakeSortedPeerSet,
-            UpdateGatewayIdentityCommand,
+            DriverCommand, StakeSortedPeerSet, TpuSenderIdentityUpdater, UpdateIdentityCommand,
         },
         solana_keypair::Keypair,
         solana_pubkey::Pubkey,
@@ -2272,10 +2170,10 @@ mod test {
     #[tokio::test]
     async fn test_update_identity_fut() {
         let (cnc_tx, mut cnc_rx) = mpsc::channel(10);
-        let mut updater = GatewayIdentityUpdater { cnc_tx };
+        let mut updater = TpuSenderIdentityUpdater { cnc_tx };
 
         let jh = tokio::spawn(async move {
-            let GatewayCommand::UpdateIdenttiy(UpdateGatewayIdentityCommand {
+            let DriverCommand::UpdateIdenttiy(UpdateIdentityCommand {
                 new_identity,
                 callback,
             }) = cnc_rx.recv().await.unwrap()
@@ -2447,7 +2345,7 @@ mod stake_based_eviction_strategy_test {
 mod leader_tpu_info_service_test {
     use {
         crate::{
-            config::{ConfigQuicTpuPort, TpuOverrideInfo},
+            config::{TpuOverrideInfo, TpuPortKind},
             core::{LeaderTpuInfoService, OverrideTpuInfoService},
         },
         solana_pubkey::Pubkey,
@@ -2529,14 +2427,14 @@ mod leader_tpu_info_service_test {
             }],
         };
 
-        let actual_fwd = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Forwards);
-        let actual_normal = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(pk1, TpuPortKind::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(pk1, TpuPortKind::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:9000".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:9001".parse().unwrap()));
 
         // It should not override anything if there is no override spec
-        let actual_fwd = override_svc.get_quic_dest_addr(pk2, ConfigQuicTpuPort::Forwards);
-        let actual_normal = override_svc.get_quic_dest_addr(pk2, ConfigQuicTpuPort::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(pk2, TpuPortKind::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(pk2, TpuPortKind::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8002".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8003".parse().unwrap()));
 
@@ -2546,8 +2444,8 @@ mod leader_tpu_info_service_test {
             override_vec: vec![],
         };
 
-        let actual_fwd = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Forwards);
-        let actual_normal = override_svc.get_quic_dest_addr(pk1, ConfigQuicTpuPort::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(pk1, TpuPortKind::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(pk1, TpuPortKind::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8000".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8001".parse().unwrap()));
     }

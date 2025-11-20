@@ -22,8 +22,8 @@ use {
     },
     tokio::{fs, time::Duration},
     yellowstone_jet_tpu_client::{
-        config::TpuOverrideInfo,
-        core::{DEFAULT_LEADER_DURATION, DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT},
+        config::{DEFAULT_QUIC_DRIVER_ENDPOINT_COUNT, TpuOverrideInfo},
+        core::DEFAULT_LEADER_DURATION,
     },
     yellowstone_shield_store::{
         PolicyStoreConfig, PolicyStoreGrpcConfig, PolicyStoreRpcConfig, ShieldStoreCommitmentLevel,
@@ -63,7 +63,6 @@ where
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigJet {
     pub tracing: ConfigTracing,
 
@@ -118,13 +117,11 @@ impl ConfigJet {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigTracing {
     pub json: bool,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigIdentity {
     ///
     /// Represents the expected validator identity.
@@ -163,8 +160,6 @@ impl ConfigIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-// Commented this in case our users have old configs here
-// #[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
     /// gRPC service
     /// The `primary_grpc` alias is used to maintain compatibility with previous versions.
@@ -219,7 +214,6 @@ impl ConfigUpstream {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigUpstreamGrpc {
     /// gRPC service endpoint
     #[serde(default = "ConfigUpstreamGrpc::default_endpoint")]
@@ -306,7 +300,6 @@ impl ConfigJetGatewayClient {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigListenAdmin {
     /// RPC listen address
     #[serde(deserialize_with = "deserialize_listen")]
@@ -314,7 +307,6 @@ pub struct ConfigListenAdmin {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigListenSolanaLike {
     /// RPC listen addresses
     #[serde(deserialize_with = "deserialize_listen")]
@@ -332,7 +324,6 @@ pub struct ConfigListenSolanaLike {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigSendTransactionService {
     /// Default max retries of sending transaction
     pub default_max_retries: Option<usize>,
@@ -386,26 +377,8 @@ impl ConfigSendTransactionService {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConfigQuic {
-    /// Total number of pools (one pool per remote address, i.e. one per leader).
-    /// Deprecated, use `max_concurrent_connection` instead.
-    /// Solana value is 1024
-    /// https://github.com/solana-labs/solana/blob/v1.17.31/connection-cache/src/connection_cache.rs#L22
-    #[serde(default = "ConfigQuic::default_connection_max_pools")]
-    #[deprecated]
-    pub connection_max_pools: NonZeroUsize,
-
     #[serde(default = "ConfigQuic::default_max_concurrent_connection")]
     pub max_concurrent_connection: NonZeroUsize,
-
-    /// TPU connection pool size per remote address
-    /// Default is `solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE` (1 from 1.17.33 / 1.18.12, previous value is 4)
-    /// DEPRECATED
-    #[serde(
-        default = "ConfigQuic::default_connection_pool_size",
-        deserialize_with = "ConfigQuic::deserialize_connection_pool_size"
-    )]
-    #[deprecated]
-    pub connection_pool_size: usize,
 
     /// Number of immediate retries in case of failed send (not applied to timedout)
     /// Solana do not retry, atlas doing 4 retries, by default we keep same limit as Solana
@@ -565,13 +538,6 @@ impl ConfigQuic {
         QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS
     }
 
-    fn deserialize_connection_pool_size<'de, D>(deserializer: D) -> Result<usize, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        NonZeroUsize::deserialize(deserializer).map(|v| v.get())
-    }
-
     fn deserialize_endpoint_port_range<'de, D>(deserializer: D) -> Result<PortRange, D::Error>
     where
         D: Deserializer<'de>,
@@ -580,7 +546,7 @@ impl ConfigQuic {
     }
 
     pub const fn default_num_endpoints() -> NonZeroUsize {
-        DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT
+        DEFAULT_QUIC_DRIVER_ENDPOINT_COUNT
     }
 
     pub const fn default_connection_eviction_grace() -> Duration {
@@ -597,7 +563,6 @@ pub enum ConfigQuicTpuPort {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigExtraTpuForward {
     #[serde(deserialize_with = "deserialize_pubkey")]
     pub leader: Pubkey,
@@ -610,7 +575,6 @@ pub struct ConfigExtraTpuForward {
 impl ConfigExtraTpuForward {}
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigLewisEvents {
     /// gRPC endpoint for Lewis event service
     pub endpoint: String,
@@ -743,13 +707,11 @@ impl ConfigLewisEvents {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigEtcd {
     pub endpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigListenGrpc {
     /// gRPC listen address
     #[serde(deserialize_with = "deserialize_listen")]
