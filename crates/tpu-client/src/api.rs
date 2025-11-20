@@ -2,9 +2,7 @@ use {
     crate::{
         config::TpuSenderConfig,
         core::{
-            ConnectionEvictionStrategy, LeaderTpuInfoService, TpuSenderDriverSpawner,
-            TpuSenderIdentityUpdater, TpuSenderSessionContext, TpuSenderTxn,
-            UpcomingLeaderPredictor, ValidatorStakeInfoService,
+            ConnectionEvictionStrategy, LeaderTpuInfoService, TpuSenderDriverSpawner, TpuSenderIdentityUpdater, TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn, UpcomingLeaderPredictor, ValidatorStakeInfoService
         },
     },
     solana_keypair::Keypair,
@@ -53,6 +51,27 @@ impl TpuSender {
     }
 }
 
+///
+/// Base factory function to create a TPU sender and its response receiver.
+/// 
+/// # Arguments
+/// 
+/// * `config` - Configuration for the TPU sender.
+/// * `initial_identity` - The initial identity keypair for the TPU sender.
+/// * `tpu_info_service` - Service to get TPU gossip info of leaders.
+/// * `stake_map_service` - Service to get stake info of validators.
+/// * `eviction_strategy` - Strategy to evict connections when needed.
+/// * `leader_schedule_predictor` - Predictor for upcoming leaders.
+/// * `txn_capacity` - Capacity of the transaction sender channel.
+/// 
+/// # Returns
+/// 
+/// A tuple containing the created `TpuSender` and a receiver for `TpuSenderResponse`.
+/// You can drop the receiver if you don't need to handle responses.
+/// 
+/// Note: This function is `async` because it requires spawning async tasks for the TPU sender driver.
+/// This function is a building block for higher-level TPU client factories.
+///
 pub async fn create_tpu_client(
     config: TpuSenderConfig,
     initial_identity: Keypair,
@@ -61,7 +80,7 @@ pub async fn create_tpu_client(
     eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync>,
     leader_schedule_predictor: Arc<dyn UpcomingLeaderPredictor + Send + Sync>,
     txn_capacity: usize,
-) -> TpuSender {
+) -> (TpuSender, mpsc::UnboundedReceiver<TpuSenderResponse>) {
     let spawner = TpuSenderDriverSpawner {
         stake_info_map: stake_map_service,
         leader_tpu_info_service: tpu_info_service,
@@ -78,7 +97,7 @@ pub async fn create_tpu_client(
     let TpuSenderSessionContext {
         identity_updater,
         driver_tx_sink,
-        driver_response_source: _,
+        driver_response_source,
         driver_join_handle: _,
     } = session;
 
@@ -87,5 +106,5 @@ pub async fn create_tpu_client(
         txn_tx: driver_tx_sink,
     };
 
-    tpu_sender
+    (tpu_sender, driver_response_source)
 }
