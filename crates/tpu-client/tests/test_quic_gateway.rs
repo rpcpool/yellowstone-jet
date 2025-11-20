@@ -13,7 +13,7 @@ use {
         collections::HashMap,
         net::SocketAddr,
         num::{NonZero, NonZeroUsize},
-        sync::{Arc, RwLock as StdRwLock},
+        sync::{Arc, Mutex, RwLock},
         time::Duration,
     },
     testkit::{build_random_endpoint, generate_random_local_addr},
@@ -22,19 +22,41 @@ use {
         task::{self, JoinHandle, JoinSet},
     },
     tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream},
-    yellowstone_jet::{
-        quic_client::core::{
-            GatewayResponse, GatewayTransaction, IgnorantLeaderPredictor, LeaderTpuInfoService,
-            QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
-            TokioQuicGatewaySpawner, TxDropReason, UpcomingLeaderPredictor,
-        },
-        stake::StakeInfoMap,
+    yellowstone_jet_tpu_client::core::{
+        GatewayResponse, GatewayTransaction, IgnorantLeaderPredictor, LeaderTpuInfoService,
+        QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
+        TokioQuicGatewaySpawner, TxDropReason, UpcomingLeaderPredictor, ValidatorStakeInfoService,
     },
 };
 
 #[derive(Clone)]
+pub struct MockStakeInfoMap {
+    stake_map: Arc<Mutex<HashMap<Pubkey, u64>>>,
+}
+
+impl MockStakeInfoMap {
+    pub fn constant<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = (Pubkey, u64)>,
+    {
+        let stake_map = Arc::new(Mutex::new(HashMap::from_iter(iter)));
+        Self { stake_map }
+    }
+}
+
+impl ValidatorStakeInfoService for MockStakeInfoMap {
+    fn get_stake_info(&self, validator_pubkey: &Pubkey) -> Option<u64> {
+        self.stake_map
+            .lock()
+            .unwrap()
+            .get(validator_pubkey)
+            .cloned()
+    }
+}
+
+#[derive(Clone)]
 pub struct FakeLeaderTpuInfoService {
-    shared: Arc<StdRwLock<HashMap<Pubkey, SocketAddr>>>,
+    shared: Arc<RwLock<HashMap<Pubkey, SocketAddr>>>,
 }
 
 impl FakeLeaderTpuInfoService {
@@ -42,7 +64,7 @@ impl FakeLeaderTpuInfoService {
     where
         IT: IntoIterator<Item = (Pubkey, SocketAddr)>,
     {
-        let shared = Arc::new(StdRwLock::new(HashMap::from_iter(it)));
+        let shared = Arc::new(RwLock::new(HashMap::from_iter(it)));
         Self { shared }
     }
 
@@ -196,7 +218,7 @@ async fn send_buffer_should_land_properly() {
     let rx_server_identity = Keypair::new();
 
     let gateway_kp = Keypair::new();
-    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
@@ -253,7 +275,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
     let rx_server_identity = Keypair::new();
 
     let gateway_kp = Keypair::new();
-    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
@@ -324,7 +346,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
     let rx_server_identity = Keypair::new();
 
     let gateway_kp = Keypair::new();
-    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
@@ -394,7 +416,7 @@ async fn it_should_update_gatway_identity() {
         ..Default::default()
     };
     let gateway_kp = Keypair::new();
-    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
@@ -467,7 +489,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         ..Default::default()
     };
     let gateway_kp = Keypair::new();
-    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter([
         (remote_validator_identity1.pubkey(), remote_validator_addr1),
         (remote_validator_identity2.pubkey(), remote_validator_addr2),
@@ -568,7 +590,7 @@ async fn it_should_evict_connection() {
         ..Default::default()
     };
     let gateway_kp = Keypair::new();
-    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter([
         (remote_validator_identity1.pubkey(), remote_validator_addr1),
         (remote_validator_identity2.pubkey(), remote_validator_addr2),
@@ -698,7 +720,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     // because quinn will be so fast that it will send the payload before the remote peer closes the stream.
     let huge_payload = Bytes::from(vec![0u8; 1024 * 1024 * 100]); // 100MB payload
     let gateway_kp = Keypair::new();
-    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
@@ -769,7 +791,7 @@ async fn it_should_detect_remote_peer_address_change() {
     let rx_server_identity = Keypair::new();
 
     let gateway_kp = Keypair::new();
-    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =
         FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
 
@@ -865,7 +887,7 @@ async fn it_should_detect_remote_peer_address_change() {
 #[tokio::test]
 async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predictions() {
     let gateway_kp = Keypair::new();
-    let stake_info_map = StakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let mut validator_rx_vec = vec![];
     let mut validator_conn_ending_rx_vec = vec![];
     let mut validator_conn_establ_rx_vec = vec![];
@@ -919,7 +941,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 
     struct FakeLeaderPredictor {
         validators: Vec<Pubkey>,
-        calls: Arc<StdRwLock<usize>>,
+        calls: Arc<RwLock<usize>>,
     }
 
     impl UpcomingLeaderPredictor for FakeLeaderPredictor {
@@ -946,7 +968,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 
     let fake_predictor = Arc::new(FakeLeaderPredictor {
         validators: validators_kp_vec.iter().map(|kp| kp.pubkey()).collect(),
-        calls: Arc::new(StdRwLock::new(0)),
+        calls: Arc::new(RwLock::new(0)),
     });
 
     let TokioQuicGatewaySession {

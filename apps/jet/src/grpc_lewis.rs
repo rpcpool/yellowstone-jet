@@ -4,7 +4,6 @@ use {
         proto::lewis::{
             Event, EventAck, EventJet, event, transaction_tracker_client::TransactionTrackerClient,
         },
-        quic_client::core::GatewayResponse,
         util::{IncrementalBackoff, create_x_token_interceptor},
     },
     futures::SinkExt,
@@ -21,6 +20,7 @@ use {
     tokio_util::sync::CancellationToken,
     tonic::transport::{Channel, Endpoint},
     tracing::{debug, error, info, warn},
+    yellowstone_jet_tpu_client::core::GatewayResponse,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -393,10 +393,10 @@ async fn send_batch(
 mod tests {
     use {
         super::*,
-        crate::quic_client::core::GatewayTxSent,
         solana_pubkey::Pubkey,
         solana_signature::Signature,
         std::net::{IpAddr, Ipv4Addr},
+        yellowstone_jet_tpu_client::core::{GatewayResponse, GatewayTxSent},
     };
 
     #[test]

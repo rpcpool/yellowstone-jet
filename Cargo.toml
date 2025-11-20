@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/jet",
+    "crates/tpu-client",
 ]
 resolver = "2"
 
@@ -104,6 +105,8 @@ tonic-build = "0.14.0"
 tonic-prost-build = "0.14.0"
 vergen = "9.0.1"
 tikv-jemallocator = "0.6.1"
+libc = "0.2.177"
+yellowstone-jet-tpu-client = { path = "crates/tpu-client", version = "0.1.0" }
 
 [workspace.lints.clippy]
 clone_on_ref_ptr = "deny"

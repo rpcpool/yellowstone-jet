@@ -43,11 +43,6 @@ use {
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         jet_gateway::spawn_jet_gw_listener,
         metrics::{REGISTRY, collect_to_text, jet as metrics},
-        quic_client::core::{
-            IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
-            QuicGatewayConfig, StakeBasedEvictionStrategy, TokioQuicGatewaySession,
-            TokioQuicGatewaySpawner, UpcomingLeaderPredictor,
-        },
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
         solana::sanitize_transaction_support_check,
@@ -60,6 +55,11 @@ use {
             TransactionRetryScheduler, TransactionRetrySchedulerConfig,
         },
         util::{WaitShutdown, prom::inject_job_label},
+    },
+    yellowstone_jet_tpu_client::core::{
+        IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService, QuicGatewayConfig,
+        StakeBasedEvictionStrategy, TokioQuicGatewaySession, TokioQuicGatewaySpawner,
+        UpcomingLeaderPredictor,
     },
     yellowstone_shield_store::PolicyStore,
 };

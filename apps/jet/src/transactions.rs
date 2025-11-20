@@ -5,7 +5,6 @@ use {
         grpc_geyser::GrpcUpdateMessage,
         grpc_lewis::LewisEventHandler,
         metrics::jet as metrics,
-        quic_client::core::{GatewayResponse, GatewayTransaction},
         rooted_transaction_state::{RootedTxEffect, RootedTxEvent, RootedTxStateMachine},
         util::CommitmentLevel,
     },
@@ -25,6 +24,7 @@ use {
         time::Instant,
     },
     tracing::error,
+    yellowstone_jet_tpu_client::core::{GatewayResponse, GatewayTransaction},
     yellowstone_shield_store::{CheckError, PolicyStoreTrait},
 };
 
