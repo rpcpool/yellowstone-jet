@@ -1073,7 +1073,7 @@ impl TpuSenderDriver {
             cert,
             max_idle_timeout,
             connection_timeout: self.config.connecting_timeout,
-            tpu_port_kind: self.config.tpu_port_kind,
+            tpu_port_kind: self.config.tpu_port,
             wait_for_eviction: maybe_wait_for_eviction,
             endpoint: self.endpoints[endpoint_idx].clone(),
         }
@@ -1147,7 +1147,7 @@ impl TpuSenderDriver {
     }
 
     const fn max_concurrent_connection(&self) -> usize {
-        self.config.max_concurrent_connections
+        self.config.max_concurrent_connection
     }
 
     ///
@@ -1776,7 +1776,7 @@ impl TpuSenderDriver {
                 // If we have a worker for the remote peer, we need to update its address.
                 let maybe_new_addr = self
                     .leader_tpu_info_service
-                    .get_quic_dest_addr(remote_peer, self.config.tpu_port_kind);
+                    .get_quic_dest_addr(remote_peer, self.config.tpu_port);
                 match maybe_new_addr {
                     Some(new_addr) => {
                         if new_addr != handle.remote_peer_addr {
@@ -2189,7 +2189,7 @@ impl TpuSenderDriverSpawner {
 
         let remote_peer_addr_watcher = RemotePeerAddrWatcher::new(
             config.remote_peer_addr_watch_interval,
-            config.tpu_port_kind,
+            config.tpu_port,
             Arc::clone(&self.leader_tpu_info_service),
         );
 
