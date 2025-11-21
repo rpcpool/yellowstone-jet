@@ -263,13 +263,13 @@ pub mod test {
     #[test]
     fn it_should_deser_tpu_sender_config_with_defaults() {
         let yaml = r#"
-        port_range:
+        endpoint_port_range:
             start: 8000
             end: 9000
         "#;
         let expected = TpuSenderConfig {
             endpoint_port_range: (8000, 9000),
-            ..TpuSenderConfig::default()
+            ..Default::default()
         };
 
         let config: super::TpuSenderConfig = serde_yaml::from_str(yaml).unwrap();

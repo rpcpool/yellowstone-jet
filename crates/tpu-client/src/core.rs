@@ -146,7 +146,15 @@ struct WaitingEviction {
 
 #[derive(Debug, Default)]
 struct EndpointUsage {
+    ///
+    /// Number of active connections using this endpoint
+    ///
     connected_remote_peers: HashSet<Pubkey>,
+
+    ///
+    /// Number of ongoing connection attempts using this endpoint
+    ///
+    connecting_remote_peers: HashSet<Pubkey>,
 }
 
 ///
@@ -177,6 +185,11 @@ pub trait ValidatorStakeInfoService {
 
 const FOREVER: Duration = Duration::from_secs(31_536_000); // One year is considered "forever" in this context.
 
+struct TxWorkerMeta {
+    remote_peer_identity: Pubkey,
+    endpoint_idx: usize,
+}
+
 ///
 /// Tokio-based driver for tpu sender.
 ///
@@ -199,7 +212,7 @@ pub(crate) struct TpuSenderDriver {
     ///
     /// Map from tokio task id to the remote peer it refers too.
     ///
-    tx_worker_task_meta_map: HashMap<Id, Pubkey>,
+    tx_worker_task_meta_map: HashMap<Id, TxWorkerMeta>,
 
     ///
     /// JoinSet of all transaction sender workers.
@@ -970,7 +983,7 @@ impl TpuSenderDriver {
             created_at: Instant::now(),
         };
         self.endpoints_usage[endpoint_idx]
-            .connected_remote_peers
+            .connecting_remote_peers
             .insert(remote_peer_identity);
         let abort_handle = self.connecting_tasks.spawn(fut);
         tracing::trace!(
@@ -985,7 +998,9 @@ impl TpuSenderDriver {
         self.endpoints_usage
             .iter()
             .enumerate()
-            .min_by_key(|(_, usage)| usage.connected_remote_peers.len())
+            .min_by_key(|(_, usage)| {
+                usage.connected_remote_peers.len() + usage.connecting_remote_peers.len()
+            })
             .map(|(idx, _)| idx)
             .expect("At least one endpoint should be available")
     }
@@ -1071,7 +1086,12 @@ impl TpuSenderDriver {
     ///
     /// Installs a transaction sender worker for a remote peer with the given connection.
     ///
-    fn install_worker(&mut self, remote_peer_identity: Pubkey, connection: Connection) {
+    fn install_worker(
+        &mut self,
+        remote_peer_identity: Pubkey,
+        endpoint_idx: usize,
+        connection: Connection,
+    ) {
         let (tx, rx) = mpsc::channel(self.config.transaction_sender_worker_channel_capacity);
 
         let remote_peer_addr = connection.remote_address();
@@ -1106,8 +1126,13 @@ impl TpuSenderDriver {
                 .insert(remote_peer_identity, handle)
                 .is_none()
         );
-        self.tx_worker_task_meta_map
-            .insert(ah.id(), remote_peer_identity);
+        self.tx_worker_task_meta_map.insert(
+            ah.id(),
+            TxWorkerMeta {
+                remote_peer_identity,
+                endpoint_idx,
+            },
+        );
         tracing::debug!("Installed tx worker for remote peer: {remote_peer_identity}");
     }
 
@@ -1137,9 +1162,11 @@ impl TpuSenderDriver {
                 {
                     prom::observe_quic_gw_connection_time(created_at.elapsed());
                 }
+
                 self.endpoints_usage[endpoint_idx]
-                    .connected_remote_peers
+                    .connecting_remote_peers
                     .remove(&remote_peer_identity);
+
                 let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
 
                 if self.identity.pubkey() != current_client_identity {
@@ -1165,7 +1192,12 @@ impl TpuSenderDriver {
                         self.remote_peer_addr_watcher
                             .register_watch(remote_peer_identity, conn.remote_address());
 
-                        self.install_worker(remote_peer_identity, conn);
+                        self.install_worker(remote_peer_identity, endpoint_idx, conn);
+
+                        self.endpoints_usage[endpoint_idx]
+                            .connected_remote_peers
+                            .insert(remote_peer_identity);
+
                         #[cfg(feature = "prometheus")]
                         {
                             prom::incr_quic_gw_connection_success_cnt();
@@ -1222,7 +1254,7 @@ impl TpuSenderDriver {
                     .expect("connecting_meta");
 
                 self.endpoints_usage[endpoint_idx]
-                    .connected_remote_peers
+                    .connecting_remote_peers
                     .remove(&remote_peer_identity);
                 let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
                 tracing::error!(
@@ -1339,10 +1371,18 @@ impl TpuSenderDriver {
     fn handle_worker_result(&mut self, result: Result<(Id, TxSenderWorkerCompleted), JoinError>) {
         match result {
             Ok((id, mut worker_completed)) => {
-                let remote_peer_identity = self
+                let TxWorkerMeta {
+                    remote_peer_identity,
+                    endpoint_idx,
+                } = self
                     .tx_worker_task_meta_map
                     .remove(&id)
                     .expect("tx worker meta");
+
+                self.endpoints_usage[endpoint_idx]
+                    .connected_remote_peers
+                    .remove(&remote_peer_identity);
+
                 self.active_staked_sorted_remote_peer
                     .remove(&remote_peer_identity);
                 self.remote_peer_addr_watcher.forget(remote_peer_identity);
@@ -1423,7 +1463,16 @@ impl TpuSenderDriver {
                 }
             }
             Err(join_err) => {
-                panic!("Join error during tx sender worker ended: {:?}", join_err);
+                let id = join_err.id();
+                if let Some(meta) = self.tx_worker_task_meta_map.remove(&id) {
+                    self.endpoints_usage[meta.endpoint_idx]
+                        .connected_remote_peers
+                        .remove(&meta.remote_peer_identity);
+                    panic!(
+                        "Join error during tx sender worker {} ended: {:?}",
+                        meta.remote_peer_identity, join_err
+                    );
+                }
             }
         }
     }
@@ -1438,6 +1487,10 @@ impl TpuSenderDriver {
     fn schedule_graceful_drop_all_worker(&mut self) {
         tracing::trace!("Scheduling graceful drop of all transaction workers");
         let mut tx_worker_meta = std::mem::take(&mut self.tx_worker_task_meta_map);
+        // Make sure to update the endpoint usage
+        self.endpoints_usage
+            .iter_mut()
+            .for_each(|usage| usage.connected_remote_peers.clear());
         let tx_worker_sender_map = std::mem::take(&mut self.tx_worker_handle_map);
         let mut tx_worker_set = std::mem::take(&mut self.tx_worker_set);
 
@@ -1448,10 +1501,16 @@ impl TpuSenderDriver {
                     Ok((id, _)) => *id,
                     Err(e) => e.id(),
                 };
-                let remote_peer = tx_worker_meta.remove(&id).unwrap();
-                tracing::trace!("graceful drop worker for remote peer: {}", remote_peer);
+                let TxWorkerMeta {
+                    remote_peer_identity,
+                    endpoint_idx: _,
+                } = tx_worker_meta.remove(&id).unwrap();
+                tracing::trace!(
+                    "graceful drop worker for remote peer: {}",
+                    remote_peer_identity
+                );
                 if let Err(e) = result {
-                    tracing::debug!("remote peer {remote_peer} join failed with {e:?}");
+                    tracing::debug!("remote peer {remote_peer_identity} join failed with {e:?}");
                 }
             }
         };
@@ -1474,6 +1533,11 @@ impl TpuSenderDriver {
         self.connecting_tasks.detach_all();
         self.connecting_remote_peers.clear();
         let connecting_meta = std::mem::take(&mut self.connecting_meta);
+
+        // Make sure to properly update the endpoint usage
+        self.endpoints_usage
+            .iter_mut()
+            .for_each(|usage| usage.connecting_remote_peers.clear());
 
         // Update identity
         let (certificate, privkey) = new_dummy_x509_certificate(&new_identity);
@@ -1524,6 +1588,11 @@ impl TpuSenderDriver {
         self.connecting_tasks.detach_all();
         self.connecting_remote_peers.clear();
         let connecting_meta = std::mem::take(&mut self.connecting_meta);
+
+        // Make sure to properly update the endpoint usage
+        self.endpoints_usage
+            .iter_mut()
+            .for_each(|usage| usage.connecting_remote_peers.clear());
 
         // Update identity
         let (certificate, privkey) = new_dummy_x509_certificate(&new_identity);
@@ -2181,6 +2250,7 @@ mod test {
                 panic!("Expected UpdateIdenttiy command");
             };
             tokio::time::sleep(Duration::from_secs(2)).await;
+            // This can be relaxed because `wake` hides `Released` memory barrier.
             callback
                 .set
                 .store(true, std::sync::atomic::Ordering::Relaxed);

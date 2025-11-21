@@ -7139,8 +7139,6 @@ dependencies = [
  "hostname",
  "http-body-util",
  "humantime-serde",
- "hyper",
- "hyper-util",
  "lazy_static",
  "maplit",
  "pin-project",

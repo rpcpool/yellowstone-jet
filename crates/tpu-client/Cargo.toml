@@ -23,8 +23,6 @@ futures = { workspace = true }
 hostname = { workspace = true }
 http-body-util = { workspace = true }
 humantime-serde = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { workspace = true, features = ["full"] }
 lazy_static = { workspace = true }
 maplit = { workspace = true }
 pin-project = { workspace = true }
