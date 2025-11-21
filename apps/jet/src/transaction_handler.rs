@@ -4,7 +4,6 @@ use {
         transactions::SendTransactionRequest,
     },
     anyhow::Result,
-    bytes::Bytes,
     jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE},
     solana_client::{
         client_error::ClientErrorKind,
@@ -110,7 +109,7 @@ impl TransactionHandler {
         }
 
         let signature = transaction.signatures[0];
-        let wire_transaction = Bytes::from(bincode::serialize(&transaction)?);
+        let wire_transaction = bincode::serialize(&transaction)?;
 
         self.transaction_sink
             .send(Arc::new(SendTransactionRequest {
@@ -153,7 +152,7 @@ impl TransactionHandler {
         &self,
         data: String,
         config: RpcSendTransactionConfig,
-    ) -> Result<(Bytes, VersionedTransaction), TransactionHandlerError> {
+    ) -> Result<(Vec<u8>, VersionedTransaction), TransactionHandlerError> {
         let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
 
         let (wire_transaction, transaction) = decode_and_deserialize(

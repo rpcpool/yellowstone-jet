@@ -184,7 +184,7 @@ impl GrpcRootedTxReceiver {
 pub struct SendTransactionRequest {
     pub signature: Signature,
     pub transaction: VersionedTransaction,
-    pub wire_transaction: Bytes,
+    pub wire_transaction: Vec<u8>,
     pub max_retries: Option<usize>,
     pub policies: Vec<Pubkey>,
 }
@@ -547,7 +547,7 @@ impl TransactionRetryScheduler {
 pub struct TransactionFanout {
     leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
     policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
-    tx_gateway_sender: mpsc::Sender<TpuSenderTxn>,
+    tpu_sender: mpsc::Sender<TpuSenderTxn>,
     gateway_response_rx: mpsc::UnboundedReceiver<TpuSenderResponse>,
     incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
     leader_fwd_count: usize,
@@ -634,7 +634,7 @@ impl TransactionFanout {
         Self {
             leader_schedule_service,
             policy_store_service,
-            tx_gateway_sender: quic_gateway_bidi.sink,
+            tpu_sender: quic_gateway_bidi.sink,
             gateway_response_rx: quic_gateway_bidi.source,
             incoming_transaction_rx,
             leader_fwd_count,
@@ -734,6 +734,7 @@ impl TransactionFanout {
     }
 
     fn fwd_tx(&mut self, tx: Arc<SendTransactionRequest>) {
+        let tx = Arc::unwrap_or_clone(tx);
         if self.inflight_transactions.contains(&tx.signature) {
             tracing::trace!(
                 "transaction {} is already in flight, skipping",
@@ -745,13 +746,26 @@ impl TransactionFanout {
         let leader_schedule_service = Arc::clone(&self.leader_schedule_service);
         let policy_store_service = Arc::clone(&self.policy_store_service);
         let leader_fwd = self.leader_fwd_count;
-        let gateway_sink = self.tx_gateway_sender.clone();
+        let tpu_sink = self.tpu_sender.clone();
         let signature = tx.signature;
         let lewis_handler = self.lewis_handler.clone();
         let extra_fwd = Arc::clone(&self.extra_fwd);
+
+        enum WireContainer {
+            Bytes(Bytes),
+            SharedVec(Arc<Vec<u8>>),
+        }
+
         let send_fut = async move {
             let next_leaders = leader_schedule_service.leader_lookahead(leader_fwd);
             let current_slot = leader_schedule_service.get_current_slot();
+
+            let txn_wire = if tx.wire_transaction.len() == tx.wire_transaction.capacity() {
+                WireContainer::Bytes(Bytes::from(tx.wire_transaction))
+            } else {
+                WireContainer::SharedVec(Arc::new(tx.wire_transaction))
+            };
+
             for dest in next_leaders.iter() {
                 if !policy_store_service.is_allowed(&tx.policies, dest)? {
                     // Report skip to Lewis
@@ -762,13 +776,16 @@ impl TransactionFanout {
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
                     continue;
                 }
-                let gateway_tx = TpuSenderTxn {
-                    tx_sig: tx.signature,
-                    wire: tx.wire_transaction.clone(),
-                    remote_peer: *dest,
+                let tpu_txn = match &txn_wire {
+                    WireContainer::Bytes(b) => {
+                        TpuSenderTxn::from_bytes(tx.signature, *dest, b.clone())
+                    }
+                    WireContainer::SharedVec(v) => {
+                        TpuSenderTxn::from_shared_vec(tx.signature, *dest, Arc::clone(v))
+                    }
                 };
-                gateway_sink
-                    .send(gateway_tx)
+                tpu_sink
+                    .send(tpu_txn)
                     .await
                     .map_err(|_| SendTransactionError::GatewayClosed)?;
             }
@@ -779,13 +796,17 @@ impl TransactionFanout {
                     continue;
                 }
                 // We don't apply policy here.
-                let gateway_tx = TpuSenderTxn {
-                    tx_sig: tx.signature,
-                    wire: tx.wire_transaction.clone(),
-                    remote_peer: *extra,
+                let tpu_txn = match &txn_wire {
+                    WireContainer::Bytes(b) => {
+                        TpuSenderTxn::from_bytes(tx.signature, *extra, b.clone())
+                    }
+                    WireContainer::SharedVec(v) => {
+                        TpuSenderTxn::from_shared_vec(tx.signature, *extra, Arc::clone(v))
+                    }
                 };
-                gateway_sink
-                    .send(gateway_tx)
+
+                tpu_sink
+                    .send(tpu_txn)
                     .await
                     .map_err(|_| SendTransactionError::GatewayClosed)?;
             }

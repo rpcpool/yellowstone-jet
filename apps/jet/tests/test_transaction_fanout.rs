@@ -1,7 +1,6 @@
 mod testkit;
 
 use {
-    bytes::Bytes,
     solana_hash::Hash,
     solana_keypair::Keypair,
     solana_message::{VersionedMessage, v0},
@@ -44,7 +43,7 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
     SendTransactionRequest {
         max_retries: Some(max_resent),
         signature: tx.signatures[0],
-        wire_transaction: Bytes::from(wire_transaction),
+        wire_transaction,
         transaction: tx,
         policies: vec![],
     }
