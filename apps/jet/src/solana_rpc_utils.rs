@@ -21,7 +21,7 @@ pub trait SolanaRpcErrorKindExt {
                 if let Some(status) = error.status() {
                     status.is_server_error()
                 } else {
-                    false
+                    true
                 }
             }
             ErrorKind::Middleware(_) => false,

@@ -430,7 +430,7 @@ impl GrpcServer {
                                                 Ok(_) => {
                                                     if let Some(gateway_timestamp) = timestamp {
                                                         let latency = ms_since_epoch().saturating_sub(gateway_timestamp);
-                                                        metrics::jet::observe_forwarded_txn_latency(latency as f64, my_identity);
+                                                        metrics::jet::observe_forwarded_txn_latency(latency as f64);
                                                     }
                                                     increment_send_transaction_success();
                                                 }
