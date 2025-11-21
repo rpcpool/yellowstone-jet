@@ -355,7 +355,7 @@ where
 /// The wire format of a transaction to be sent over the network.
 /// Covers must of the common cases to avoid unnecessary copies.
 ///
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum WireTxnFlavor {
     Vec(Vec<u8>),
     #[cfg(feature = "bytes")]
@@ -379,7 +379,7 @@ impl AsRef<[u8]> for WireTxnFlavor {
 ///
 /// A transaction with destination details to be sent to a remote peer.
 ///
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TpuSenderTxn {
     /// Id set by the sender to identify the transaction. Only meaningful to the sender.
     pub tx_sig: Signature,
@@ -664,7 +664,7 @@ impl QuicTxSenderWorker {
     async fn send_tx(&mut self, tx: &[u8]) -> Result<SentOk, SendTxError> {
         let t = Instant::now();
         let mut uni = self.connection.open_uni().await?;
-        uni.write_all(&tx).await.map_err(|e| match e {
+        uni.write_all(tx).await.map_err(|e| match e {
             WriteError::Stopped(var_int) => SendTxError::StreamStopped(var_int),
             WriteError::ConnectionLost(connection_error) => {
                 SendTxError::ConnectionError(connection_error)
@@ -719,12 +719,7 @@ impl QuicTxSenderWorker {
                     {
                         prom::incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "error");
                     }
-                    let resp = TxFailed {
-                        remote_peer_identity: self.remote_peer,
-                        remote_peer_addr: self.connection.remote_address(),
-                        failure_reason: e.to_string(),
-                        tx_sig,
-                    };
+
                     tracing::warn!(
                         "Giving up sending transaction: {} to remote peer: {}, client identity: {}, after {} attempts: {:?}",
                         tx_sig,
@@ -733,6 +728,12 @@ impl QuicTxSenderWorker {
                         attempt,
                         e
                     );
+                    let resp = TxFailed {
+                        remote_peer_identity: self.remote_peer,
+                        remote_peer_addr: self.connection.remote_address(),
+                        failure_reason: e.to_string(),
+                        tx_sig,
+                    };
                     let _ = self.output_tx.send(TpuSenderResponse::TxFailed(resp));
                 } else {
                     tracing::trace!(

@@ -184,7 +184,7 @@ impl GrpcRootedTxReceiver {
 pub struct SendTransactionRequest {
     pub signature: Signature,
     pub transaction: VersionedTransaction,
-    pub wire_transaction: Bytes,
+    pub wire_transaction: Vec<u8>,
     pub max_retries: Option<usize>,
     pub policies: Vec<Pubkey>,
 }
@@ -734,6 +734,7 @@ impl TransactionFanout {
     }
 
     fn fwd_tx(&mut self, tx: Arc<SendTransactionRequest>) {
+        let tx = Arc::unwrap_or_clone(tx);
         if self.inflight_transactions.contains(&tx.signature) {
             tracing::trace!(
                 "transaction {} is already in flight, skipping",
@@ -749,9 +750,22 @@ impl TransactionFanout {
         let signature = tx.signature;
         let lewis_handler = self.lewis_handler.clone();
         let extra_fwd = Arc::clone(&self.extra_fwd);
+
+        enum WireContainer {
+            Bytes(Bytes),
+            SharedVec(Arc<Vec<u8>>),
+        }
+
         let send_fut = async move {
             let next_leaders = leader_schedule_service.leader_lookahead(leader_fwd);
             let current_slot = leader_schedule_service.get_current_slot();
+
+            let txn_wire = if tx.wire_transaction.len() == tx.wire_transaction.capacity() {
+                WireContainer::Bytes(Bytes::from(tx.wire_transaction))
+            } else {
+                WireContainer::SharedVec(Arc::new(tx.wire_transaction))
+            };
+
             for dest in next_leaders.iter() {
                 if !policy_store_service.is_allowed(&tx.policies, dest)? {
                     // Report skip to Lewis
@@ -762,8 +776,14 @@ impl TransactionFanout {
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
                     continue;
                 }
-                let tpu_txn =
-                    TpuSenderTxn::from_bytes(tx.signature, *dest, tx.wire_transaction.clone());
+                let tpu_txn = match &txn_wire {
+                    WireContainer::Bytes(b) => {
+                        TpuSenderTxn::from_bytes(tx.signature, *dest, b.clone())
+                    }
+                    WireContainer::SharedVec(v) => {
+                        TpuSenderTxn::from_shared_vec(tx.signature, *dest, Arc::clone(v))
+                    }
+                };
                 tpu_sink
                     .send(tpu_txn)
                     .await
@@ -776,8 +796,14 @@ impl TransactionFanout {
                     continue;
                 }
                 // We don't apply policy here.
-                let tpu_txn =
-                    TpuSenderTxn::from_bytes(tx.signature, *extra, tx.wire_transaction.clone());
+                let tpu_txn = match &txn_wire {
+                    WireContainer::Bytes(b) => {
+                        TpuSenderTxn::from_bytes(tx.signature, *extra, b.clone())
+                    }
+                    WireContainer::SharedVec(v) => {
+                        TpuSenderTxn::from_shared_vec(tx.signature, *extra, Arc::clone(v))
+                    }
+                };
 
                 tpu_sink
                     .send(tpu_txn)
