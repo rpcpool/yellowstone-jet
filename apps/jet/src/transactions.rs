@@ -547,7 +547,7 @@ impl TransactionRetryScheduler {
 pub struct TransactionFanout {
     leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
     policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
-    tx_gateway_sender: mpsc::Sender<TpuSenderTxn>,
+    tpu_sender: mpsc::Sender<TpuSenderTxn>,
     gateway_response_rx: mpsc::UnboundedReceiver<TpuSenderResponse>,
     incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
     leader_fwd_count: usize,
@@ -634,7 +634,7 @@ impl TransactionFanout {
         Self {
             leader_schedule_service,
             policy_store_service,
-            tx_gateway_sender: quic_gateway_bidi.sink,
+            tpu_sender: quic_gateway_bidi.sink,
             gateway_response_rx: quic_gateway_bidi.source,
             incoming_transaction_rx,
             leader_fwd_count,
@@ -745,7 +745,7 @@ impl TransactionFanout {
         let leader_schedule_service = Arc::clone(&self.leader_schedule_service);
         let policy_store_service = Arc::clone(&self.policy_store_service);
         let leader_fwd = self.leader_fwd_count;
-        let gateway_sink = self.tx_gateway_sender.clone();
+        let tpu_sink = self.tpu_sender.clone();
         let signature = tx.signature;
         let lewis_handler = self.lewis_handler.clone();
         let extra_fwd = Arc::clone(&self.extra_fwd);
@@ -762,13 +762,10 @@ impl TransactionFanout {
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
                     continue;
                 }
-                let gateway_tx = TpuSenderTxn {
-                    tx_sig: tx.signature,
-                    wire: tx.wire_transaction.clone(),
-                    remote_peer: *dest,
-                };
-                gateway_sink
-                    .send(gateway_tx)
+                let tpu_txn =
+                    TpuSenderTxn::from_bytes(tx.signature, *dest, tx.wire_transaction.clone());
+                tpu_sink
+                    .send(tpu_txn)
                     .await
                     .map_err(|_| SendTransactionError::GatewayClosed)?;
             }
@@ -779,13 +776,11 @@ impl TransactionFanout {
                     continue;
                 }
                 // We don't apply policy here.
-                let gateway_tx = TpuSenderTxn {
-                    tx_sig: tx.signature,
-                    wire: tx.wire_transaction.clone(),
-                    remote_peer: *extra,
-                };
-                gateway_sink
-                    .send(gateway_tx)
+                let tpu_txn =
+                    TpuSenderTxn::from_bytes(tx.signature, *extra, tx.wire_transaction.clone());
+
+                tpu_sink
+                    .send(tpu_txn)
                     .await
                     .map_err(|_| SendTransactionError::GatewayClosed)?;
             }

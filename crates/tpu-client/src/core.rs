@@ -43,9 +43,10 @@
 //!
 #[cfg(feature = "prometheus")]
 use crate::prom;
+#[cfg(feature = "bytes")]
+use bytes::Bytes;
 use {
     crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
-    bytes::Bytes,
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
@@ -351,6 +352,31 @@ where
 }
 
 ///
+/// The wire format of a transaction to be sent over the network.
+/// Covers must of the common cases to avoid unnecessary copies.
+///
+#[derive(Debug, Clone)]
+enum WireTxnFlavor {
+    Vec(Vec<u8>),
+    #[cfg(feature = "bytes")]
+    Bytes(Bytes),
+    Shared(Arc<[u8]>),
+    SharedVec(Arc<Vec<u8>>),
+}
+
+impl AsRef<[u8]> for WireTxnFlavor {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            WireTxnFlavor::Vec(v) => v.as_ref(),
+            #[cfg(feature = "bytes")]
+            WireTxnFlavor::Bytes(b) => b.as_ref(),
+            WireTxnFlavor::Shared(s) => s.as_ref(),
+            WireTxnFlavor::SharedVec(sv) => sv.as_ref(),
+        }
+    }
+}
+
+///
 /// A transaction with destination details to be sent to a remote peer.
 ///
 #[derive(Debug, Clone)]
@@ -358,9 +384,82 @@ pub struct TpuSenderTxn {
     /// Id set by the sender to identify the transaction. Only meaningful to the sender.
     pub tx_sig: Signature,
     /// The wire format of the transaction.
-    pub wire: Bytes,
+    wire: WireTxnFlavor,
     /// The pubkey of the remote peer to send the transaction to.
     pub remote_peer: Pubkey,
+}
+
+impl TpuSenderTxn {
+    ///
+    /// Creates a new [`TpuSenderTxn`] from an owned Vec<u8> wire data.
+    ///
+    pub fn from_vec(tx_sig: Signature, remote_peer: Pubkey, wire: Vec<u8>) -> Self {
+        Self {
+            tx_sig,
+            wire: WireTxnFlavor::Vec(wire),
+            remote_peer,
+        }
+    }
+
+    ///
+    /// Creates a new [`TpuSenderTxn`] from a slice wire data (copy).
+    ///
+    pub fn from_slice<S: AsRef<[u8]>>(tx_sig: Signature, remote_peer: Pubkey, wire: S) -> Self {
+        Self {
+            tx_sig,
+            wire: WireTxnFlavor::Vec(wire.as_ref().to_vec()),
+            remote_peer,
+        }
+    }
+
+    ///
+    /// Creates a new [`TpuSenderTxn`] from an owned slice wire data.
+    ///
+    pub fn from_owned_slice(tx_sig: Signature, remote_peer: Pubkey, wire: Box<[u8]>) -> Self {
+        Self {
+            tx_sig,
+            wire: WireTxnFlavor::Vec(Vec::from(wire)), // Convert Box<[u8]> to Vec<u8> (this is zero-copy)
+            remote_peer,
+        }
+    }
+
+    ///
+    /// Creates a new [`TpuSenderTxn`] from a Bytes wire data.
+    ///
+    #[cfg(feature = "bytes")]
+    pub fn from_bytes(tx_sig: Signature, remote_peer: Pubkey, wire: Bytes) -> Self {
+        Self {
+            tx_sig,
+            wire: WireTxnFlavor::Bytes(wire),
+            remote_peer,
+        }
+    }
+
+    ///
+    /// Creates a new [`TpuSenderTxn`] from a shared wire data.
+    ///
+    pub fn from_shared(tx_sig: Signature, remote_peer: Pubkey, wire: Arc<[u8]>) -> Self {
+        Self {
+            tx_sig,
+            wire: WireTxnFlavor::Shared(wire),
+            remote_peer,
+        }
+    }
+
+    ///
+    /// Creates a new [`TpuSenderTxn`] from a shared Vec<u8> wire data.
+    ///
+    pub fn from_shared_vec(tx_sig: Signature, remote_peer: Pubkey, wire: Arc<Vec<u8>>) -> Self {
+        Self {
+            tx_sig,
+            wire: WireTxnFlavor::SharedVec(wire),
+            remote_peer,
+        }
+    }
+
+    pub fn wire(&self) -> &[u8] {
+        self.wire.as_ref()
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -562,7 +661,7 @@ struct TxSenderWorkerCompleted {
 }
 
 impl QuicTxSenderWorker {
-    async fn send_tx(&mut self, tx: Bytes) -> Result<SentOk, SendTxError> {
+    async fn send_tx(&mut self, tx: &[u8]) -> Result<SentOk, SendTxError> {
         let t = Instant::now();
         let mut uni = self.connection.open_uni().await?;
         uni.write_all(&tx).await.map_err(|e| match e {
@@ -582,7 +681,7 @@ impl QuicTxSenderWorker {
         tx: TpuSenderTxn,
         attempt: usize,
     ) -> Option<TxSenderWorkerError> {
-        let result = self.send_tx(tx.wire.clone()).await;
+        let result = self.send_tx(tx.wire()).await;
         let remote_addr = self.connection.remote_address();
         let tx_sig = tx.tx_sig;
         match result {

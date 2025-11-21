@@ -244,14 +244,9 @@ async fn send_buffer_should_land_properly() {
         Default::default(),
     );
     let tx_sig = Signature::new_unique();
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig,
-            wire: Bytes::from("helloworld".as_bytes()),
-            remote_peer: rx_server_identity.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn =
+        TpuSenderTxn::from_slice(tx_sig, rx_server_identity.pubkey(), "helloworld".as_bytes());
+    transaction_sink.send(txn).await.expect("send tx");
 
     let spy_req = client_rx.recv().await.expect("recv");
 
@@ -306,14 +301,12 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         .map(|_| Signature::new_unique())
         .collect::<Vec<_>>();
     for (i, tx_sig) in tx_sig_vec.iter().enumerate() {
-        transaction_sink
-            .send(TpuSenderTxn {
-                tx_sig: *tx_sig,
-                wire: Bytes::from(format!("helloworld{i}").as_bytes().to_vec()),
-                remote_peer: rx_server_identity.pubkey(),
-            })
-            .await
-            .expect("send tx");
+        let txn = TpuSenderTxn::from_slice(
+            *tx_sig,
+            rx_server_identity.pubkey(),
+            format!("helloworld{i}").as_bytes(),
+        );
+        transaction_sink.send(txn).await.expect("send tx");
     }
 
     let mut connection_id_spy = vec![];
@@ -382,14 +375,9 @@ async fn gateway_should_handle_connection_refused_by_peer() {
     });
 
     let tx_sig = Signature::new_unique();
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig,
-            wire: Bytes::from("helloworld".as_bytes()),
-            remote_peer: rx_server_identity.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn =
+        TpuSenderTxn::from_slice(tx_sig, rx_server_identity.pubkey(), "helloworld".as_bytes());
+    transaction_sink.send(txn).await.expect("send tx");
 
     rx_server_handle.await.expect("h2");
 
@@ -447,14 +435,12 @@ async fn it_should_update_gatway_identity() {
         Default::default(),
     );
 
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig: Signature::new_unique(),
-            wire: Bytes::from("helloworld".as_bytes()),
-            remote_peer: rx_server_identity.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn = TpuSenderTxn::from_slice(
+        Signature::new_unique(),
+        rx_server_identity.pubkey(),
+        "helloworld".as_bytes(),
+    );
+    transaction_sink.send(txn).await.expect("send tx");
 
     let spy_request1 = client_rx.recv().await.expect("recv");
     let actual_remote_key1 = spy_request1.from;
@@ -466,14 +452,12 @@ async fn it_should_update_gatway_identity() {
         .update_identity(gateway_identity2.insecure_clone())
         .await;
 
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig: Signature::new_unique(),
-            wire: Bytes::from("helloworld".as_bytes()),
-            remote_peer: rx_server_identity.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn = TpuSenderTxn::from_slice(
+        Signature::new_unique(),
+        rx_server_identity.pubkey(),
+        "helloworld".as_bytes(),
+    );
+    transaction_sink.send(txn).await.expect("send tx");
 
     let spy_request2 = client_rx.recv().await.expect("recv");
     let actual_remote_key2 = spy_request2.from;
@@ -540,26 +524,21 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         ReceiverStream::new(validator_rx2),
     );
 
+    let txn = TpuSenderTxn::from_slice(
+        Signature::new_unique(),
+        remote_validator_identity1.pubkey(),
+        "helloworld".as_bytes(),
+    );
     // Send it to the first remote peer
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig: Signature::new_unique(),
-            wire: Bytes::from("helloworld".as_bytes()),
-            remote_peer: remote_validator_identity1.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    transaction_sink.send(txn).await.expect("send tx");
 
     // Send it to the second remote peer
-
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig: Signature::new_unique(),
-            wire: Bytes::from("helloworld2".as_bytes()),
-            remote_peer: remote_validator_identity2.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn2 = TpuSenderTxn::from_slice(
+        Signature::new_unique(),
+        remote_validator_identity2.pubkey(),
+        "helloworld2".as_bytes(),
+    );
+    transaction_sink.send(txn2).await.expect("send tx");
 
     let mut expected_remote_validators = vec![
         remote_validator_identity1.pubkey(),
@@ -650,15 +629,12 @@ async fn it_should_evict_connection() {
         remote_validator_identity2.pubkey(),
         ReceiverStream::new(validator_rx2),
     );
-
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig: Signature::new_unique(),
-            wire: Bytes::from("helloworld".as_bytes()),
-            remote_peer: remote_validator_identity1.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn = TpuSenderTxn::from_slice(
+        Signature::new_unique(),
+        remote_validator_identity1.pubkey(),
+        "helloworld".as_bytes(),
+    );
+    transaction_sink.send(txn).await.expect("send tx");
 
     let actual_remote_validator1 = stream_map.next().await.expect("next").0;
     assert_eq!(
@@ -667,14 +643,12 @@ async fn it_should_evict_connection() {
     );
 
     // Now we send a tx to the second remote peer, this should evict the first connection
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig: Signature::new_unique(),
-            wire: Bytes::from("helloworld2".as_bytes()),
-            remote_peer: remote_validator_identity2.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn2 = TpuSenderTxn::from_slice(
+        Signature::new_unique(),
+        remote_validator_identity2.pubkey(),
+        "helloworld2".as_bytes(),
+    );
+    transaction_sink.send(txn2).await.expect("send tx");
 
     let conn_end = validator_conn_spy1.recv().await.expect("recv");
 
@@ -688,14 +662,12 @@ async fn it_should_evict_connection() {
     );
 
     // Finally, send it back to the first remote peer, this should evict the second connection
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig: Signature::new_unique(),
-            wire: Bytes::from("helloworld3".as_bytes()),
-            remote_peer: remote_validator_identity1.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn3 = TpuSenderTxn::from_slice(
+        Signature::new_unique(),
+        remote_validator_identity1.pubkey(),
+        "helloworld3".as_bytes(),
+    );
+    transaction_sink.send(txn3).await.expect("send tx");
     let actual_remote_validator3 = stream_map.next().await.expect("next").0;
     assert_eq!(
         actual_remote_validator3,
@@ -764,14 +736,8 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     });
 
     let tx_sig = Signature::new_unique();
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig,
-            wire: huge_payload,
-            remote_peer: rx_server_identity.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn = TpuSenderTxn::from_bytes(tx_sig, rx_server_identity.pubkey(), huge_payload.clone());
+    transaction_sink.send(txn).await.expect("send tx");
 
     // This handle should return after MAX_CONN_ATTEMPT attempts
     tracing::trace!("Waiting for rx_server_handle to finish");
@@ -833,14 +799,9 @@ async fn it_should_detect_remote_peer_address_change() {
         notifier,
     );
     let tx_sig = Signature::new_unique();
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig,
-            wire: Bytes::from("helloworld".as_bytes()),
-            remote_peer: rx_server_identity.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn =
+        TpuSenderTxn::from_slice(tx_sig, rx_server_identity.pubkey(), "helloworld".as_bytes());
+    transaction_sink.send(txn).await.expect("send tx");
 
     let _ = client_rx1.recv().await.expect("recv");
 
@@ -869,14 +830,12 @@ async fn it_should_detect_remote_peer_address_change() {
     assert!(conn_ended.result.is_err(), "connection should be evicted");
     // Send a new transaction to the new address
     let tx_sig2 = Signature::new_unique();
-    transaction_sink
-        .send(TpuSenderTxn {
-            tx_sig: tx_sig2,
-            wire: Bytes::from("helloworld2".as_bytes()),
-            remote_peer: rx_server_identity.pubkey(),
-        })
-        .await
-        .expect("send tx");
+    let txn2 = TpuSenderTxn::from_slice(
+        tx_sig2,
+        rx_server_identity.pubkey(),
+        "helloworld2".as_bytes(),
+    );
+    transaction_sink.send(txn2).await.expect("send tx");
 
     let _ = client_rx2.recv().await.expect("recv");
     let TpuSenderResponse::TxSent(actual_resp) =
@@ -1001,14 +960,12 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 
     for (i, validator_rx) in validator_rx_vec.iter_mut().enumerate() {
         let tx_sig = Signature::new_unique();
-        transaction_sink
-            .send(TpuSenderTxn {
-                tx_sig,
-                wire: Bytes::copy_from_slice(format!("helloworld{i}").as_bytes()),
-                remote_peer: validators_kp_vec[i].pubkey(),
-            })
-            .await
-            .expect("send tx");
+        let txn = TpuSenderTxn::from_slice(
+            tx_sig,
+            validators_kp_vec[i].pubkey(),
+            format!("helloworld{i}").as_bytes(),
+        );
+        transaction_sink.send(txn).await.expect("send tx");
 
         let spy_request = validator_rx.recv().await.expect("recv");
         assert_eq!(spy_request.from, gateway_kp.pubkey());
