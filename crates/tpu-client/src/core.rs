@@ -643,6 +643,7 @@ struct QuicTxSenderWorker {
     // and if a connection is idle for 2s it will be closed anyway, moreover remote validator could technically decide to kick us off
     #[allow(dead_code)]
     tx_send_timeout: Duration,
+    txn_sent: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -672,6 +673,7 @@ impl QuicTxSenderWorker {
             WriteError::ClosedStream => SendTxError::StreamClosed,
             WriteError::ZeroRttRejected => SendTxError::ZeroRttRejected,
         })?;
+        self.txn_sent = self.txn_sent.saturating_add(1);
         let e2e_time = t.elapsed();
         let ok = SentOk { e2e_time };
         Ok(ok)
@@ -721,11 +723,11 @@ impl QuicTxSenderWorker {
                     }
 
                     tracing::warn!(
-                        "Giving up sending transaction: {} to remote peer: {}, client identity: {}, after {} attempts: {:?}",
-                        tx_sig,
+                        "Giving up sending transaction to remote peer: {}, client identity: {}, after {} attempts, {} txn sent so far: {:?}",
                         self.remote_peer,
                         self.current_client_identity,
                         attempt,
+                        self.txn_sent,
                         e
                     );
                     let resp = TxFailed {
@@ -1214,6 +1216,7 @@ impl TpuSenderDriver {
             cancel_notify: Arc::clone(&cancel_notify),
             max_tx_attempt: self.config.max_send_attempt,
             tx_send_timeout: self.config.send_timeout,
+            txn_sent: 0,
         };
 
         let worker_fut = worker.run();
