@@ -6,40 +6,22 @@ use {
         de::{self, Deserializer},
     },
     solana_keypair::{Keypair, read_keypair_file},
-    solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_pubkey::Pubkey,
-    solana_quic_definitions::{
-        QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
-        QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
-    },
     std::{
         collections::HashSet,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
         num::{NonZeroU64, NonZeroUsize},
-        ops::Range,
         path::{Path, PathBuf},
         str::FromStr,
     },
     tokio::{fs, time::Duration},
-    yellowstone_jet_tpu_client::{
-        config::TpuOverrideInfo,
-        core::{DEFAULT_LEADER_DURATION, DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT},
-    },
+    yellowstone_jet_tpu_client::{config::TpuSenderConfig, core::DEFAULT_LEADER_DURATION},
     yellowstone_shield_store::{
         PolicyStoreConfig, PolicyStoreGrpcConfig, PolicyStoreRpcConfig, ShieldStoreCommitmentLevel,
     },
 };
 
 pub const DEFAULT_TPU_CONNECTION_POOL_SIZE: usize = 1;
-
-fn deserialize_pubkey<'de, D>(deserializer: D) -> Result<Pubkey, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    String::deserialize(deserializer)?
-        .parse()
-        .map_err(de::Error::custom)
-}
 
 fn deser_pubkey_vec<'de, D>(deserializer: D) -> Result<Vec<Pubkey>, D::Error>
 where
@@ -163,8 +145,7 @@ impl ConfigIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-// Commented this in case our users have old configs here
-// #[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
     /// gRPC service
     /// The `primary_grpc` alias is used to maintain compatibility with previous versions.
@@ -219,7 +200,6 @@ impl ConfigUpstream {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigUpstreamGrpc {
     /// gRPC service endpoint
     #[serde(default = "ConfigUpstreamGrpc::default_endpoint")]
@@ -386,106 +366,8 @@ impl ConfigSendTransactionService {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConfigQuic {
-    /// Total number of pools (one pool per remote address, i.e. one per leader).
-    /// Deprecated, use `max_concurrent_connection` instead.
-    /// Solana value is 1024
-    /// https://github.com/solana-labs/solana/blob/v1.17.31/connection-cache/src/connection_cache.rs#L22
-    #[serde(default = "ConfigQuic::default_connection_max_pools")]
-    #[deprecated]
-    pub connection_max_pools: NonZeroUsize,
-
-    #[serde(default = "ConfigQuic::default_max_concurrent_connection")]
-    pub max_concurrent_connection: NonZeroUsize,
-
-    /// TPU connection pool size per remote address
-    /// Default is `solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE` (1 from 1.17.33 / 1.18.12, previous value is 4)
-    /// DEPRECATED
-    #[serde(
-        default = "ConfigQuic::default_connection_pool_size",
-        deserialize_with = "ConfigQuic::deserialize_connection_pool_size"
-    )]
-    #[deprecated]
-    pub connection_pool_size: usize,
-
-    /// Number of immediate retries in case of failed send (not applied to timedout)
-    /// Solana do not retry, atlas doing 4 retries, by default we keep same limit as Solana
-    #[serde(default = "ConfigQuic::default_send_retry_count")]
-    pub send_retry_count: NonZeroUsize,
-
-    /// Kind of Quic port: `normal` or `forwards`
-    pub tpu_port: ConfigQuicTpuPort,
-
-    /// Quic handshake timeout.
-    /// Default is `solana_sdk::quic::QUIC_CONNECTION_HANDSHAKE_TIMEOUT` -- 60s
-    #[serde(
-        default = "ConfigQuic::default_connection_handshake_timeout",
-        with = "humantime_serde"
-    )]
-    pub connection_handshake_timeout: Duration,
-
-    /// Maximum duration of inactivity to accept before timing out the connection.
-    /// https://docs.rs/quinn/0.10.2/quinn/struct.TransportConfig.html#method.max_idle_timeout
-    /// Default is `solana_sdk::quic::QUIC_KEEP_ALIVE` -- 2s
-    #[serde(
-        default = "ConfigQuic::default_max_idle_timeout",
-        with = "humantime_serde"
-    )]
-    pub max_idle_timeout: Duration,
-
-    /// Period of inactivity before sending a keep-alive packet
-    /// https://docs.rs/quinn/0.10.2/quinn/struct.TransportConfig.html#method.keep_alive_interval
-    /// Default is `solana_sdk::quic::QUIC_KEEP_ALIVE` -- 1s
-    /// DEPRECATED, this is a constant that should not be changed, always 1s
-    #[serde(
-        default = "ConfigQuic::default_keep_alive_interval",
-        with = "humantime_serde"
-    )]
-    #[deprecated]
-    pub keep_alive_interval: Duration,
-
-    /// Send tx timeout, for batches value multipled by number of transactions in the batch
-    /// Solana default value is 10 seconds
-    /// DEPRECATED
-    #[serde(default = "ConfigQuic::default_send_timeout", with = "humantime_serde")]
-    #[deprecated]
-    pub send_timeout: Duration,
-
-    /// Ports used by QUIC endpoints
-    /// https://docs.rs/solana-net-utils/1.18.11/solana_net_utils/constant.VALIDATOR_PORT_RANGE.html
-    /// Default is `solana_net_utils::VALIDATOR_PORT_RANGE` -- `8000..10000`
-    #[serde(
-        default = "ConfigQuic::default_endpoint_port_range",
-        deserialize_with = "ConfigQuic::deserialize_endpoint_port_range"
-    )]
-    pub endpoint_port_range: PortRange,
-
-    /// See `solana_streamer::nonblocking::quic::compute_max_allowed_uni_streams`
-    /// https://github.com/anza-xyz/agave/blob/v1.17.31/streamer/src/nonblocking/quic.rs#L244-L279
-    /// Minumum value is `QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS` -- for unstaked nodes, 128
-    /// Value for staked calculated from total stake, but maximum is `QUIC_MAX_STAKED_CONCURRENT_STREAMS`
-    /// DEPRECATED, this is based of stake
-    #[serde(default = "ConfigQuic::default_send_max_concurrent_streams")]
-    #[deprecated]
-    pub send_max_concurrent_streams: usize,
-
-    ///
-    /// How many endpoints to create for the QUIC gateway.
-    ///
-    /// Each [`quinn::Endpoint`] has its own event-loop.
-    /// Each endpoint can manage thousands of connections concurrently.
-    /// HOWEVER, each [`quinn::Endpoint`] has a state mutex lock.
-    ///
-    /// Quickly looking at quinn's source code, it seems that each lock acquisition is quite short live.
-    ///
-    /// If we have too many connections over a single endpoint, we might end up with a lot of contention on the endpoint mutex.
-    ///
-    /// At the same time, if we have too many endpoints, we might end up with too many event loops running concurrently.
-    ///
-    /// Talking with Anza, we should not open more than 5 endpoints to host QUIC connections.
-    /// Still, Anza told us that using multiple Endpoints yield marginal performance improvements.
-    /// Perhaps, multi-endpoints are more useful for the validator sides, where the number of connections is much higher.
-    #[serde(default = "ConfigQuic::default_num_endpoints")]
-    pub endpoint_count: NonZeroUsize,
+    #[serde(flatten)]
+    pub tpu_sender: TpuSenderConfig,
 
     ///
     /// Connection eviction is trigger when the total number of connections in the QUIC gateway exceeds configured
@@ -502,112 +384,13 @@ pub struct ConfigQuic {
         with = "humantime_serde"
     )]
     pub connection_idle_eviction_grace: Duration,
-
-    ///
-    /// Connection prediction lookahead.
-    /// This is used to pre-emptively predict the next leader and establish a connection to it before transactions request to be forwarded to it.
-    ///
-    /// Prior to the leader prediction, we notice 8-10% of transactions could stalled due to the connection establishment time.
-    /// Default is `None`, which means that no connection prediction is done.
-    ///
-    #[serde(default = "ConfigQuic::default_connection_prediction_lookahead")]
-    pub connection_prediction_lookahead: Option<NonZeroUsize>,
-
-    ///
-    /// The TPU address rewrite map for QUIC connections.
-    ///
-    #[serde(default)]
-    pub tpu_info_override: Vec<TpuOverrideInfo>,
 }
 
 impl ConfigQuic {
-    pub const fn default_connection_prediction_lookahead() -> Option<NonZeroUsize> {
-        None
-    }
-
-    pub const fn default_connection_max_pools() -> NonZeroUsize {
-        NonZeroUsize::new(1024).unwrap()
-    }
-
-    pub const fn default_max_concurrent_connection() -> NonZeroUsize {
-        NonZeroUsize::new(2048).unwrap()
-    }
-
-    pub const fn default_connection_pool_size() -> usize {
-        DEFAULT_TPU_CONNECTION_POOL_SIZE
-    }
-
-    pub const fn default_send_retry_count() -> NonZeroUsize {
-        NonZeroUsize::new(1).unwrap()
-    }
-
-    pub const fn default_connection_handshake_timeout() -> Duration {
-        QUIC_CONNECTION_HANDSHAKE_TIMEOUT
-    }
-
-    pub const fn default_max_idle_timeout() -> Duration {
-        QUIC_MAX_TIMEOUT
-    }
-
-    pub const fn default_keep_alive_interval() -> Duration {
-        QUIC_KEEP_ALIVE
-    }
-
-    pub const fn default_send_timeout() -> Duration {
-        Duration::from_secs(10)
-    }
-
-    pub const fn default_endpoint_port_range() -> PortRange {
-        VALIDATOR_PORT_RANGE
-    }
-
-    pub const fn default_send_max_concurrent_streams() -> usize {
-        QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS
-    }
-
-    fn deserialize_connection_pool_size<'de, D>(deserializer: D) -> Result<usize, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        NonZeroUsize::deserialize(deserializer).map(|v| v.get())
-    }
-
-    fn deserialize_endpoint_port_range<'de, D>(deserializer: D) -> Result<PortRange, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Range::deserialize(deserializer).map(|range| (range.start, range.end))
-    }
-
-    pub const fn default_num_endpoints() -> NonZeroUsize {
-        DEFAULT_QUIC_GATEWAY_ENDPOINT_COUNT
-    }
-
-    pub const fn default_connection_eviction_grace() -> Duration {
+    const fn default_connection_eviction_grace() -> Duration {
         DEFAULT_LEADER_DURATION
     }
 }
-
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ConfigQuicTpuPort {
-    #[default]
-    Normal,
-    Forwards,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigExtraTpuForward {
-    #[serde(deserialize_with = "deserialize_pubkey")]
-    pub leader: Pubkey,
-    #[serde(default)]
-    pub quic: Option<SocketAddr>,
-    #[serde(default)]
-    pub quic_forwards: Option<SocketAddr>,
-}
-
-impl ConfigExtraTpuForward {}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -740,12 +523,6 @@ impl ConfigLewisEvents {
     const fn default_stream_timeout() -> Duration {
         Duration::from_secs(300) // 0 means no timeout
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigEtcd {
-    pub endpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

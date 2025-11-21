@@ -6,7 +6,7 @@ use {
     solana_pubkey::Pubkey,
     std::{net::SocketAddr, sync::Arc},
     yellowstone_jet_tpu_client::core::{
-        GatewayIdentityUpdater, LeaderTpuInfoService, UpcomingLeaderPredictor,
+        LeaderTpuInfoService, TpuSenderIdentityUpdater, UpcomingLeaderPredictor,
         ValidatorStakeInfoService,
     },
 };
@@ -40,7 +40,7 @@ impl ValidatorStakeInfoService for StakeInfoMap {
 }
 
 #[async_trait::async_trait]
-impl JetIdentitySyncMember for GatewayIdentityUpdater {
+impl JetIdentitySyncMember for TpuSenderIdentityUpdater {
     async fn pause_for_identity_update(
         &self,
         new_identity: Keypair,

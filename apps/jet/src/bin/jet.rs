@@ -12,7 +12,6 @@ use {
     solana_commitment_config::CommitmentConfig,
     solana_keypair::{Keypair, read_keypair},
     solana_pubkey::Pubkey,
-    solana_quic_definitions::QUIC_MAX_TIMEOUT,
     solana_rpc_client::http_sender::HttpSender,
     std::{
         collections::HashMap,
@@ -57,8 +56,8 @@ use {
         util::{WaitShutdown, prom::inject_job_label},
     },
     yellowstone_jet_tpu_client::core::{
-        IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService, QuicGatewayConfig,
-        StakeBasedEvictionStrategy, TokioQuicGatewaySession, TokioQuicGatewaySpawner,
+        IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
+        StakeBasedEvictionStrategy, TpuSenderDriverSpawner, TpuSenderSessionContext,
         UpcomingLeaderPredictor,
     },
     yellowstone_shield_store::PolicyStore,
@@ -333,40 +332,30 @@ async fn run_jet(
 
     let leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static> =
         Arc::new(OverrideTpuInfoService {
-            override_vec: config.quic.tpu_info_override.clone(),
+            override_vec: config.quic.tpu_sender.tpu_info_override.clone(),
             other: cluster_tpu_info.clone(),
         });
 
-    let quic_gateway_spawner = TokioQuicGatewaySpawner {
+    let quic_gateway_spawner = TpuSenderDriverSpawner {
         stake_info_map: Arc::new(stake_info_map.clone()),
-        gateway_tx_channel_capacity: 10000,
+        driver_tx_channel_capacity: 10000,
         leader_tpu_info_service,
     };
 
-    let connection_predictor = if config.quic.connection_prediction_lookahead.is_some() {
+    let connection_predictor = if config.quic.tpu_sender.leader_prediction_lookahead.is_some() {
         Arc::new(cluster_tpu_info.clone()) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>
     } else {
         Arc::new(IgnorantLeaderPredictor)
     };
 
-    let quic_gateway_config = QuicGatewayConfig {
-        port_range: config.quic.endpoint_port_range,
-        max_idle_timeout: config.quic.max_idle_timeout.min(QUIC_MAX_TIMEOUT),
-        connecting_timeout: config.quic.connection_handshake_timeout,
-        num_endpoints: config.quic.endpoint_count,
-        max_send_attempt: config.quic.send_retry_count,
-        leader_prediction_lookahead: config.quic.connection_prediction_lookahead,
-        ..Default::default()
-    };
-
-    let TokioQuicGatewaySession {
-        gateway_identity_updater,
-        gateway_tx_sink,
-        gateway_response_source,
-        gateway_join_handle,
+    let TpuSenderSessionContext {
+        identity_updater: gateway_identity_updater,
+        driver_tx_sink: gateway_tx_sink,
+        driver_response_source: gateway_response_source,
+        driver_join_handle: gateway_join_handle,
     } = quic_gateway_spawner.spawn(
         initial_identity.insecure_clone(),
-        quic_gateway_config,
+        config.quic.tpu_sender.clone(),
         Arc::new(StakeBasedEvictionStrategy {
             peer_idle_eviction_grace_period: config.quic.connection_idle_eviction_grace,
         }),

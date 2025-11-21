@@ -20,7 +20,7 @@ use {
     tokio_util::sync::CancellationToken,
     tonic::transport::{Channel, Endpoint},
     tracing::{debug, error, info, warn},
-    yellowstone_jet_tpu_client::core::GatewayResponse,
+    yellowstone_jet_tpu_client::core::TpuSenderResponse,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -73,9 +73,9 @@ impl LewisEventHandler {
         self.emit(event);
     }
 
-    pub fn handle_gateway_response(&self, response: &GatewayResponse, slot: Slot) {
+    pub fn handle_gateway_response(&self, response: &TpuSenderResponse, slot: Slot) {
         match response {
-            GatewayResponse::TxSent(sent) => {
+            TpuSenderResponse::TxSent(sent) => {
                 let event = self.build_event(
                     sent.tx_sig,
                     sent.remote_peer_identity,
@@ -87,7 +87,7 @@ impl LewisEventHandler {
                 );
                 self.emit(event);
             }
-            GatewayResponse::TxFailed(failed) => {
+            TpuSenderResponse::TxFailed(failed) => {
                 let event = self.build_event(
                     failed.tx_sig,
                     failed.remote_peer_identity,
@@ -99,9 +99,9 @@ impl LewisEventHandler {
                 );
                 self.emit(event);
             }
-            GatewayResponse::TxDrop(dropped) => {
+            TpuSenderResponse::TxDrop(dropped) => {
                 let drop_reason_str = dropped.drop_reason.to_string();
-                for (gateway_tx, _attempt_count) in &dropped.dropped_gateway_tx_vec {
+                for (gateway_tx, _attempt_count) in &dropped.dropped_tx_vec {
                     let event = self.build_event(
                         gateway_tx.tx_sig,
                         dropped.remote_peer_identity,
@@ -396,7 +396,7 @@ mod tests {
         solana_pubkey::Pubkey,
         solana_signature::Signature,
         std::net::{IpAddr, Ipv4Addr},
-        yellowstone_jet_tpu_client::core::{GatewayResponse, GatewayTxSent},
+        yellowstone_jet_tpu_client::core::{TpuSenderResponse, TxSent},
     };
 
     #[test]
@@ -434,7 +434,7 @@ mod tests {
             jet_id: "test-jet".to_string(),
         };
 
-        let response = GatewayResponse::TxSent(GatewayTxSent {
+        let response = TpuSenderResponse::TxSent(TxSent {
             remote_peer_identity: Pubkey::new_unique(),
             tx_sig: Signature::new_unique(),
             remote_peer_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000),

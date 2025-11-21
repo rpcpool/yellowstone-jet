@@ -15,6 +15,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Misc
 
+- Renamed many tpu-client related objects for more suitable named (replaced "gateway" with tpu-sender).
 - Moved out `yellowstone-jet-tpu-client` into its own crate.
 
 ## [14.9.0]
