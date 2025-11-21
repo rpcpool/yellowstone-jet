@@ -979,6 +979,15 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
     }
 }
 
+#[derive(Debug)]
+enum SpawnSource {
+    NewTransaction,
+    UpdateIdentity,
+    Prediction,
+    Reattempt,
+    Rescue,
+}
+
 /// Here's the simplified flow of a transaction through the QUIC driver:
 ///
 ///  ┌────────────┐      ┌────────────┐       ┌───────────────┐
@@ -1018,7 +1027,12 @@ impl TpuSenderDriver {
     /// Spawns a "connecting" task to a remote peer.
     /// this is called when a transaction is received for a remote peer which does not have a worker installed yet.
     ///
-    fn spawn_connecting(&mut self, remote_peer_identity: Pubkey, attempt: usize) {
+    fn spawn_connecting(
+        &mut self,
+        remote_peer_identity: Pubkey,
+        attempt: usize,
+        source: SpawnSource,
+    ) {
         if self
             .connecting_remote_peers
             .contains_key(&remote_peer_identity)
@@ -1091,11 +1105,16 @@ impl TpuSenderDriver {
             .connecting_remote_peers
             .insert(remote_peer_identity);
         let abort_handle = self.connecting_tasks.spawn(fut);
-        tracing::trace!(
-            "Spawning connection for remote peer: {remote_peer_identity}, attempt: {attempt}"
+        tracing::info!(
+            "Spawning connection for remote peer: {remote_peer_identity}, attempt: {attempt}, source: {source:?}",
         );
-        self.connecting_remote_peers
+        let old = self
+            .connecting_remote_peers
             .insert(remote_peer_identity, abort_handle.id());
+        assert!(
+            old.is_none(),
+            "Remote peer should not be already connecting"
+        );
         self.connecting_meta.insert(abort_handle.id(), meta);
     }
 
@@ -1174,7 +1193,9 @@ impl TpuSenderDriver {
             &self.being_evicted_peers,
             eviction_count_required,
         );
-        tracing::trace!("Planned {} evictions", eviction_plan.len());
+        if !eviction_plan.is_empty() {
+            tracing::info!("Planned {} evictions", eviction_plan.len());
+        }
         eviction_plan
             .into_iter()
             .flat_map(|peer| self.tx_worker_handle_map.get(&peer))
@@ -1281,7 +1302,11 @@ impl TpuSenderDriver {
                     tracing::warn!(
                         "Abandoning connection attempt to remote peer: {remote_peer_identity} since the client identity has changed"
                     );
-                    self.spawn_connecting(remote_peer_identity, connection_attempt);
+                    self.spawn_connecting(
+                        remote_peer_identity,
+                        connection_attempt,
+                        SpawnSource::UpdateIdentity,
+                    );
                     return;
                 }
 
@@ -1328,9 +1353,14 @@ impl TpuSenderDriver {
                             ConnectingError::ConnectionError(_)
                                 if connection_attempt < self.config.max_connection_attempts =>
                             {
+                                tracing::warn!(
+                                    "Connection attempt {} to remote peer: {remote_peer_identity} failed, retrying...",
+                                    connection_attempt
+                                );
                                 self.spawn_connecting(
                                     remote_peer_identity,
                                     connection_attempt.saturating_add(1),
+                                    SpawnSource::Reattempt,
                                 );
                             }
                             whatever => {
@@ -1443,7 +1473,7 @@ impl TpuSenderDriver {
                 .contains_key(&remote_peer_identity)
             {
                 // If the remote peer is already being connected, just queue the tx.
-                self.spawn_connecting(remote_peer_identity, 1);
+                self.spawn_connecting(remote_peer_identity, 1, SpawnSource::NewTransaction);
             }
         }
     }
@@ -1502,7 +1532,7 @@ impl TpuSenderDriver {
                 self.last_peer_activity.remove(&remote_peer_identity);
                 drop(worker_tx);
 
-                tracing::trace!(
+                tracing::warn!(
                     "Tx worker for remote peer: {:?} completed, err: {:?}, canceled: {}, evicted: {}",
                     remote_peer_identity,
                     worker_completed.err,
@@ -1565,7 +1595,7 @@ impl TpuSenderDriver {
                     );
                     self.last_peer_activity
                         .insert(remote_peer_identity, Instant::now());
-                    self.spawn_connecting(remote_peer_identity, 1);
+                    self.spawn_connecting(remote_peer_identity, 1, SpawnSource::Rescue);
                 }
             }
             Err(join_err) => {
@@ -1659,7 +1689,11 @@ impl TpuSenderDriver {
             prom::quic_set_identity(self.identity.pubkey());
         }
         connecting_meta.values().for_each(|meta| {
-            self.spawn_connecting(meta.remote_peer_identity, meta.connection_attempt);
+            self.spawn_connecting(
+                meta.remote_peer_identity,
+                meta.connection_attempt,
+                SpawnSource::UpdateIdentity,
+            );
         });
 
         if !connecting_meta.is_empty() {
@@ -1716,7 +1750,11 @@ impl TpuSenderDriver {
         // Wait for the barrier to be released
         barrier.wait().await;
         connecting_meta.values().for_each(|meta| {
-            self.spawn_connecting(meta.remote_peer_identity, meta.connection_attempt);
+            self.spawn_connecting(
+                meta.remote_peer_identity,
+                meta.connection_attempt,
+                SpawnSource::UpdateIdentity,
+            );
         });
 
         if !connecting_meta.is_empty() {
@@ -1830,10 +1868,16 @@ impl TpuSenderDriver {
             let upcoming_leaders = self
                 .leader_predictor
                 .try_predict_next_n_leaders(lh as usize);
+            let mut visited = HashSet::<Pubkey>::with_capacity(upcoming_leaders.len());
             for upcoming_leader in upcoming_leaders {
                 let is_already_connectish =
                     self.tx_worker_handle_map.contains_key(&upcoming_leader)
                         || self.connecting_remote_peers.contains_key(&upcoming_leader);
+
+                if !visited.insert(upcoming_leader) {
+                    // We have already processed this upcoming leader in this iteration.
+                    continue;
+                }
 
                 if !is_already_connectish {
                     #[cfg(feature = "prometheus")]
@@ -1844,7 +1888,7 @@ impl TpuSenderDriver {
                         "Spawning connection for predicted upcoming leader: {}",
                         upcoming_leader
                     );
-                    self.spawn_connecting(upcoming_leader, self.config.max_connection_attempts);
+                    self.spawn_connecting(upcoming_leader, 1, SpawnSource::Prediction);
                 } else {
                     #[cfg(feature = "prometheus")]
                     {
