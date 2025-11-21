@@ -82,6 +82,9 @@ use {
 
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
 
+// TODO see if its worth making this configurable
+pub(crate) const METRIC_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ConnectingError {
     #[error(transparent)]
@@ -1656,17 +1659,15 @@ impl TpuSenderDriver {
         }
     }
 
+    #[cfg(feature = "prometheus")]
     fn update_prom_metrics(&self) {
-        #[cfg(feature = "prometheus")]
-        {
-            let num_active_workers = self.tx_worker_handle_map.len();
-            let num_connecting_tasks = self.connecting_tasks.len();
-            let num_queued_tx = self.tx_queues.values().map(|q| q.len()).sum::<usize>();
-            prom::set_quic_gw_active_connection_cnt(num_active_workers);
-            prom::set_quic_gw_connecting_cnt(num_connecting_tasks);
-            prom::set_quic_gw_ongoing_evictions_cnt(self.being_evicted_peers.len());
-            prom::set_quic_gw_tx_blocked_by_connecting_cnt(num_queued_tx);
-        }
+        let num_active_workers = self.tx_worker_handle_map.len();
+        let num_connecting_tasks = self.connecting_tasks.len();
+        let num_queued_tx = self.tx_queues.values().map(|q| q.len()).sum::<usize>();
+        prom::set_quic_gw_active_connection_cnt(num_active_workers);
+        prom::set_quic_gw_connecting_cnt(num_connecting_tasks);
+        prom::set_quic_gw_ongoing_evictions_cnt(self.being_evicted_peers.len());
+        prom::set_quic_gw_tx_blocked_by_connecting_cnt(num_queued_tx);
     }
 
     fn handle_remote_peer_addr_change(&mut self, remote_peers_changed: HashSet<Pubkey>) {
@@ -1762,9 +1763,16 @@ impl TpuSenderDriver {
             prom::quic_set_identity(self.identity.pubkey());
         }
 
+        let mut last_metric_update = Instant::now();
         loop {
             self.do_eviction_if_required();
-            self.update_prom_metrics();
+            #[cfg(feature = "prometheus")]
+            {
+                if last_metric_update.elapsed() >= METRIC_UPDATE_INTERVAL {
+                    self.update_prom_metrics();
+                    last_metric_update = Instant::now();
+                }
+            }
             self.try_predict_upcoming_leaders_if_necessary();
 
             tokio::select! {

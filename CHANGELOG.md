@@ -13,6 +13,10 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [14.9.1]
 
+### Fixes
+
+- Fix connection-endpoint allocation [#91](https://github.com/rpcpool/yellowstone-jet/issues/91)
+
 ### Misc
 
 - Renamed many tpu-client related objects for more suitable named (replaced "gateway" with tpu-sender).
