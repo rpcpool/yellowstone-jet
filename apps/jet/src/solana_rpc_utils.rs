@@ -2,10 +2,13 @@
 /// THIS FILE HAS BEEN COPIED FROM JET-GATEWAY
 /// TODO: CREATE A COMMON LIBRARY
 use {
-    hyper::StatusCode, solana_client::{
+    hyper::StatusCode,
+    solana_client::{
         rpc_request::RpcRequest,
         rpc_sender::{RpcSender, RpcTransportStats},
-    }, solana_rpc_client_api::client_error::{Error, ErrorKind}, std::time::Duration
+    },
+    solana_rpc_client_api::client_error::{Error, ErrorKind},
+    std::time::Duration,
 };
 
 pub trait SolanaRpcErrorKindExt {
