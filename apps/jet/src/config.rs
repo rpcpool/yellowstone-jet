@@ -145,7 +145,6 @@ impl ConfigIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigUpstream {
     /// gRPC service
     /// The `primary_grpc` alias is used to maintain compatibility with previous versions.
