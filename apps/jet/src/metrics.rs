@@ -311,9 +311,9 @@ pub mod jet {
         SEND_TRANSACTION_SUCCESS.inc();
     }
 
-    pub fn observe_forwarded_txn_latency(duration: f64, identity: Pubkey) {
+    pub fn observe_forwarded_txn_latency(duration: f64) {
         FORWADED_TRANSACTION_LATENCY
-            .with_label_values(&[identity.to_string()])
+            .with_label_values::<&str>(&[])
             .observe(duration);
     }
 

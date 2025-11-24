@@ -87,10 +87,10 @@ pub struct TpuSenderConfig {
     pub connecting_timeout: Duration,
 
     #[serde(default = "TpuSenderConfig::default_tpu_port_kind")]
-    pub tpu_port_kind: TpuPortKind,
+    pub tpu_port: TpuPortKind,
 
     #[serde(default = "TpuSenderConfig::default_max_concurrent_connections")]
-    pub max_concurrent_connections: usize,
+    pub max_concurrent_connection: usize,
 
     ///
     /// Maximum number of attempts to bind a local port to a remote peer.
@@ -243,9 +243,9 @@ impl Default for TpuSenderConfig {
             max_connection_attempts: DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT,
             transaction_sender_worker_channel_capacity: DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE,
             connecting_timeout: DEFAULT_CONNECTION_TIMEOUT,
-            max_concurrent_connections: DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+            max_concurrent_connection: DEFAULT_MAX_CONCURRENT_CONNECTIONS,
             max_local_port_binding_attempts: DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS,
-            tpu_port_kind: TpuPortKind::default(),
+            tpu_port: TpuPortKind::default(),
             num_endpoints: DEFAULT_QUIC_DRIVER_ENDPOINT_COUNT,
             max_send_attempt: DEFAULT_MAX_SEND_ATTEMPT,
             remote_peer_addr_watch_interval: DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL,
@@ -258,7 +258,10 @@ impl Default for TpuSenderConfig {
 
 #[cfg(test)]
 pub mod test {
-    use {crate::config::TpuSenderConfig, std::num::NonZeroUsize};
+    use {
+        crate::config::{TpuPortKind, TpuSenderConfig},
+        std::num::NonZeroUsize,
+    };
 
     #[test]
     fn it_should_deser_tpu_sender_config_with_defaults() {
@@ -282,11 +285,13 @@ pub mod test {
         endpoint_count: 3
         send_retry_count: 5
         connection_prediction_lookahead: 7
+        tpu_port: normal
         "#;
         let expected = TpuSenderConfig {
             num_endpoints: NonZeroUsize::new(3).unwrap(),
             max_send_attempt: NonZeroUsize::new(5).unwrap(),
             leader_prediction_lookahead: NonZeroUsize::new(7),
+            tpu_port: TpuPortKind::Normal,
             ..TpuSenderConfig::default()
         };
 

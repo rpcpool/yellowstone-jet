@@ -2,6 +2,7 @@
 /// THIS FILE HAS BEEN COPIED FROM JET-GATEWAY
 /// TODO: CREATE A COMMON LIBRARY
 use {
+    hyper::StatusCode,
     solana_client::{
         rpc_request::RpcRequest,
         rpc_sender::{RpcSender, RpcTransportStats},
@@ -19,9 +20,10 @@ pub trait SolanaRpcErrorKindExt {
             ErrorKind::Io(_) => true,
             ErrorKind::Reqwest(error) => {
                 if let Some(status) = error.status() {
-                    status.is_server_error()
+                    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
                 } else {
-                    false
+                    tracing::warn!("Reqwest error without status: {:?}", error);
+                    true
                 }
             }
             ErrorKind::Middleware(_) => false,
