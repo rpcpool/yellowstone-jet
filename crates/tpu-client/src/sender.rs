@@ -74,7 +74,7 @@ impl TpuSender {
 /// Note: This function is `async` because it requires spawning async tasks for the TPU sender driver.
 /// This function is a building block for higher-level TPU client factories.
 ///
-pub async fn create_tpu_client(
+pub async fn create_base_tpu_client(
     config: TpuSenderConfig,
     initial_identity: Keypair,
     tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync>,

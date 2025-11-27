@@ -184,6 +184,9 @@ impl UpcomingLeaderPredictor for IgnorantLeaderPredictor {
 }
 
 pub trait ValidatorStakeInfoService {
+    ///
+    /// Gets the stake info for a given validator pubkey.
+    ///
     fn get_stake_info(&self, validator_pubkey: &Pubkey) -> Option<u64>;
 }
 
