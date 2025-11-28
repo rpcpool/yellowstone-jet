@@ -78,14 +78,14 @@ impl FakeLeaderTpuInfoService {
 }
 
 impl LeaderTpuInfoService for FakeLeaderTpuInfoService {
-    fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+    fn get_quic_tpu_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr> {
         let shared = self.shared.read().expect("read lock");
-        shared.get(&leader_pubkey).cloned()
+        shared.get(leader_pubkey).cloned()
     }
 
-    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr> {
         let shared = self.shared.read().expect("read lock");
-        shared.get(&leader_pubkey).cloned()
+        shared.get(leader_pubkey).cloned()
     }
 }
 

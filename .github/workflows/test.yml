@@ -76,8 +76,8 @@ jobs:
           sudo apt install protobuf-compiler
 
       - name: Run clippy
-        run: cargo clippy --all-targets --tests -- -Dwarnings
+        run: cargo clippy --all-targets --tests --features examples -- -Dwarnings
 
       - name: Test build
         run: |
-          cargo build
+          cargo build --features "examples"

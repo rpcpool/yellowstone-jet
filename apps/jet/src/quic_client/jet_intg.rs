@@ -12,14 +12,14 @@ use {
 };
 
 impl LeaderTpuInfoService for ClusterTpuInfo {
-    fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+    fn get_quic_tpu_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr> {
         self.get_cluster_nodes()
-            .get(&leader_pubkey)
+            .get(leader_pubkey)
             .and_then(|node| node.tpu_quic)
     }
-    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr> {
         self.get_cluster_nodes()
-            .get(&leader_pubkey)
+            .get(leader_pubkey)
             .and_then(|node| node.tpu_forwards_quic)
     }
 }
