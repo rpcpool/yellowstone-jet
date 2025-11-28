@@ -28,7 +28,7 @@ pub fn setup_tracing() {
 #[derive(clap::Parser, Debug)]
 struct Args {
     /// Path to .env file to load
-    env: Option<PathBuf>,
+    dotenv: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -36,7 +36,7 @@ async fn main() {
     setup_tracing();
 
     let args = Args::parse();
-    if let Ok(env_path) = args.env.unwrap_or("./.env".into()).canonicalize() {
+    if let Ok(env_path) = args.dotenv.unwrap_or("./.env".into()).canonicalize() {
         if dotenvy::from_path(env_path).is_err() {
             tracing::warn!("Failed to load .env file");
         }

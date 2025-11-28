@@ -42,8 +42,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 solana-client = { workspace = true }
-solana-net-utils = { workspace = true }
-solana-quic-client = { workspace = true }
 solana-rpc-client-api = { workspace = true }
 solana-streamer = { workspace = true }
 solana-version = { workspace = true, features = ["agave-unstable-api"] }

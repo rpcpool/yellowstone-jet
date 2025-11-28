@@ -76,8 +76,8 @@ jobs:
           sudo apt install protobuf-compiler
 
       - name: Run clippy
-        run: cargo clippy --all-targets --tests --features examples -- -Dwarnings
+        run: cargo clippy --all-targets --tests --features "examples yellowstone-grpc" -- -Dwarnings
 
       - name: Test build
         run: |
-          cargo build --features "examples"
+          cargo build --features "examples yellowstone-grpc"

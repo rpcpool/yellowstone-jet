@@ -41,6 +41,7 @@
 //!
 //! Note that this module does not implement retry logic beyond attempting to reconnect when appropriate and safe to do so.
 //!
+
 #[cfg(feature = "prometheus")]
 use crate::prom;
 #[cfg(feature = "bytes")]
@@ -84,6 +85,7 @@ use {
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
 
 // TODO see if its worth making this configurable
+#[cfg(feature = "prometheus")]
 pub(crate) const METRIC_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(thiserror::Error, Debug)]
@@ -1912,7 +1914,7 @@ impl TpuSenderDriver {
         {
             prom::quic_set_identity(self.identity.pubkey());
         }
-
+        #[allow(unused_mut, dead_code)]
         let mut last_metric_update = Instant::now();
         loop {
             self.do_eviction_if_required();
