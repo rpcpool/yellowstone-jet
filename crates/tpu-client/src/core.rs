@@ -312,11 +312,11 @@ pub(crate) struct TpuSenderDriver {
 }
 
 pub trait LeaderTpuInfoService {
-    fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
-    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr>;
+    fn get_quic_tpu_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr>;
+    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr>;
     fn get_quic_dest_addr(
         &self,
-        leader_pubkey: Pubkey,
+        leader_pubkey: &Pubkey,
         tpu_port_kind: TpuPortKind,
     ) -> Option<SocketAddr> {
         match tpu_port_kind {
@@ -338,17 +338,17 @@ impl<I> LeaderTpuInfoService for OverrideTpuInfoService<I>
 where
     I: LeaderTpuInfoService,
 {
-    fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+    fn get_quic_tpu_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr> {
         self.override_vec
             .iter()
-            .find(|info| info.remote_peer == leader_pubkey)
+            .find(|info| &info.remote_peer == leader_pubkey)
             .map(|info| info.quic_tpu)
             .or_else(|| self.other.get_quic_tpu_socket_addr(leader_pubkey))
     }
-    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+    fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr> {
         self.override_vec
             .iter()
-            .find(|info| info.remote_peer == leader_pubkey)
+            .find(|info| &info.remote_peer == leader_pubkey)
             .map(|info| info.quic_tpu_forward)
             .or_else(|| self.other.get_quic_tpu_fwd_socket_addr(leader_pubkey))
     }
@@ -565,7 +565,7 @@ impl ConnectingTask {
 
         let remote_peer_addr = self
             .service
-            .get_quic_dest_addr(self.remote_peer_identity, self.tpu_port_kind);
+            .get_quic_dest_addr(&self.remote_peer_identity, self.tpu_port_kind);
         let remote_peer_addr = remote_peer_addr.ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
         let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
             .with_safe_default_protocol_versions()
@@ -1820,7 +1820,7 @@ impl TpuSenderDriver {
                 // If we have a worker for the remote peer, we need to update its address.
                 let maybe_new_addr = self
                     .leader_tpu_info_service
-                    .get_quic_dest_addr(remote_peer, self.config.tpu_port);
+                    .get_quic_dest_addr(&remote_peer, self.config.tpu_port);
                 match maybe_new_addr {
                     Some(new_addr) => {
                         if new_addr != handle.remote_peer_addr {
@@ -2079,7 +2079,7 @@ impl RemotePeerAddrWatcherEvLoop {
             .filter_map(|(pubkey, last_known_addr)| {
                 let new_addr = self
                     .leader_tpu_info_service
-                    .get_quic_dest_addr(*pubkey, self.tpu_port_kind);
+                    .get_quic_dest_addr(pubkey, self.tpu_port_kind);
                 match new_addr {
                     Some(new_addr) => {
                         if new_addr != *last_known_addr {
@@ -2597,19 +2597,19 @@ mod leader_tpu_info_service_test {
     }
 
     impl LeaderTpuInfoService for FakeTpuInfoService {
-        fn get_quic_tpu_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+        fn get_quic_tpu_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr> {
             self.inner
                 .read()
                 .unwrap()
-                .get(&leader_pubkey)
+                .get(leader_pubkey)
                 .map(|info| info.normal)
         }
 
-        fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: Pubkey) -> Option<SocketAddr> {
+        fn get_quic_tpu_fwd_socket_addr(&self, leader_pubkey: &Pubkey) -> Option<SocketAddr> {
             self.inner
                 .read()
                 .unwrap()
-                .get(&leader_pubkey)
+                .get(leader_pubkey)
                 .map(|info| info.fwd)
         }
     }
@@ -2655,14 +2655,14 @@ mod leader_tpu_info_service_test {
             }],
         };
 
-        let actual_fwd = override_svc.get_quic_dest_addr(pk1, TpuPortKind::Forwards);
-        let actual_normal = override_svc.get_quic_dest_addr(pk1, TpuPortKind::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(&pk1, TpuPortKind::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(&pk1, TpuPortKind::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:9000".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:9001".parse().unwrap()));
 
         // It should not override anything if there is no override spec
-        let actual_fwd = override_svc.get_quic_dest_addr(pk2, TpuPortKind::Forwards);
-        let actual_normal = override_svc.get_quic_dest_addr(pk2, TpuPortKind::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(&pk2, TpuPortKind::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(&pk2, TpuPortKind::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8002".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8003".parse().unwrap()));
 
@@ -2672,8 +2672,8 @@ mod leader_tpu_info_service_test {
             override_vec: vec![],
         };
 
-        let actual_fwd = override_svc.get_quic_dest_addr(pk1, TpuPortKind::Forwards);
-        let actual_normal = override_svc.get_quic_dest_addr(pk1, TpuPortKind::Normal);
+        let actual_fwd = override_svc.get_quic_dest_addr(&pk1, TpuPortKind::Forwards);
+        let actual_normal = override_svc.get_quic_dest_addr(&pk1, TpuPortKind::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8000".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8001".parse().unwrap()));
     }

@@ -279,10 +279,8 @@ pub(crate) async fn build_validator_stake_info_service_inner(
 pub async fn rpc_validator_stake_info_service(
     rpc: RpcClient,
     config: RpcValidatorStakeInfoServiceConfig,
-) -> RpcValidatorStakeInfoService {
-    build_validator_stake_info_service_inner(rpc, config, None)
-        .await
-        .0
+) -> (RpcValidatorStakeInfoService, JoinHandle<()>) {
+    build_validator_stake_info_service_inner(rpc, config, None).await
 }
 
 #[cfg(test)]
@@ -347,7 +345,7 @@ pub mod tests {
             refresh_interval: std::time::Duration::from_secs(1),
         };
         let mock = RpcClient::new_sender(mock_rpc_sender.clone(), RpcClientConfig::default());
-        let stake_info_map = stake::rpc_validator_stake_info_service(mock, config).await;
+        let (stake_info_map, _handle) = stake::rpc_validator_stake_info_service(mock, config).await;
 
         let actual = stake_info_map
             .get_stake_info(&node_kp1.pubkey())

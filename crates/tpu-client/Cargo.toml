@@ -12,6 +12,11 @@ publish = false
 default = []
 prometheus = ["dep:prometheus"]
 bytes = ["dep:bytes"]
+examples = [
+    "dep:dotenvy",
+    "dep:tracing-subscriber",
+    "dep:clap",
+]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -19,7 +24,10 @@ base64 = { workspace = true }
 bs58 = { workspace = true }
 borsh = { workspace = true }
 bytes = { workspace = true, optional = true }
+clap = { workspace = true, features = ["cargo", "derive", "env"], optional = true }
+
 derive_more = { workspace = true, features = ["display"] }
+dotenvy = { workspace = true, optional = true }
 futures = { workspace = true }
 hostname = { workspace = true }
 http-body-util = { workspace = true }
@@ -60,4 +68,6 @@ solana-rpc-client-api = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"], optional = true }
