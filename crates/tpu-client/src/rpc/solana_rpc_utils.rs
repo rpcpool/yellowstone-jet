@@ -1,15 +1,161 @@
-///
-/// THIS FILE HAS BEEN COPIED FROM JET-GATEWAY
-/// TODO: CREATE A COMMON LIBRARY
+//! Utilities for Solana RPC interactions.
+//!
+//! This module provides utilities for interacting with Solana RPC services, including
+//! a retrying RPC sender that can handle transient errors.
+//!
+//! # Examples
+//!
+//! The following example demonstrates how to create a `RpcClient` with a `RetryRpcSender`:
+//!
+//! This make sure to retry transient errors when making RPC calls, avoiding spreading retry-logic everywhere in business logic.
+//!
+//! ```rust
+//! let http_sender = HttpSender::new(rpc);
+//! let rpc_sender = RetryRpcSender::new(http_sender, Default::default());
+//!
+//! let rpc_client = Arc::new(rpc_client::RpcClient::new_sender(
+//!     rpc_sender,
+//!     RpcClientConfig {
+//!         commitment_config: CommitmentConfig::confirmed(),
+//!         ..Default::default()
+//!     },
+//! ));
+//! ```
 use {
     hyper::StatusCode,
+    solana_client::{
+        rpc_request::RpcRequest,
+        rpc_sender::{RpcSender, RpcTransportStats},
+    },
     solana_rpc_client_api::client_error::{Error, ErrorKind},
+    std::time::Duration,
 };
+
+///
+/// Strategy for retrying RPC requests in [`RetryRpcSender`] when encountering transient errors.
+///
+/// See [`SolanaRpcErrorKindExt::is_transient`] for definition of transient errors.
+///
+#[derive(Clone, Debug, Copy, PartialEq)]
+pub enum RetryRpcSenderStrategy {
+    /// Fixed delay between retries
+    #[allow(dead_code)]
+    FixedDelay { delay: Duration, max_retries: usize },
+    /// Exponential backoff with a base delay and a factor
+    ExponentialBackoff {
+        base: Duration,
+        exp: f64,
+        max_retries: usize,
+    },
+}
+
+impl Default for RetryRpcSenderStrategy {
+    fn default() -> Self {
+        Self::ExponentialBackoff {
+            base: Duration::from_millis(10),
+            exp: 2.0,
+            max_retries: 3,
+        }
+    }
+}
+
+impl IntoIterator for RetryRpcSenderStrategy {
+    type Item = Duration;
+
+    type IntoIter = Box<dyn Iterator<Item = Duration> + Send>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            RetryRpcSenderStrategy::FixedDelay { delay, max_retries } => Box::new(
+                retry::delay::Fixed::from_millis(delay.as_millis() as u64).take(max_retries),
+            ),
+            RetryRpcSenderStrategy::ExponentialBackoff {
+                base,
+                exp,
+                max_retries,
+            } => Box::new(
+                retry::delay::Exponential::from_millis_with_factor(base.as_millis() as u64, exp)
+                    .take(max_retries),
+            ),
+        }
+    }
+}
+
+///
+/// [`RetryRpcSender`] is a wrapper around [`RpcSender`] that retries requests on transient errors
+/// according to the provided strategy.
+///
+pub struct RetryRpcSender<Rpc> {
+    /// The RpcSender to wrap
+    rpc_sender: Rpc,
+    /// The strategy to use for retries
+    retry_strategy: RetryRpcSenderStrategy,
+}
+
+impl<Rpc> RetryRpcSender<Rpc>
+where
+    Rpc: RpcSender + Send + Sync + 'static,
+{
+    ///
+    /// Create a new RetryRpcSender with the provided RpcSender and retry strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `rpc_sender` - The [`RpcSender`] to wrap
+    /// * `retry_strategy` - The [`RetryRpcSenderStrategy`] strategy to use for retries
+    pub const fn new(rpc_sender: Rpc, retry_strategy: RetryRpcSenderStrategy) -> Self {
+        Self {
+            rpc_sender,
+            retry_strategy,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<Rpc> RpcSender for RetryRpcSender<Rpc>
+where
+    Rpc: RpcSender + Send + Sync + 'static,
+{
+    async fn send(
+        &self,
+        request: RpcRequest,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, solana_rpc_client_api::client_error::Error> {
+        let mut retry_intervals = self.retry_strategy.into_iter();
+        loop {
+            match self.rpc_sender.send(request, params.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    if !error.is_transient() {
+                        return Err(error);
+                    }
+                    match retry_intervals.next() {
+                        Some(interval) => {
+                            tokio::time::sleep(interval).await;
+                        }
+                        _ => {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_transport_stats(&self) -> RpcTransportStats {
+        self.rpc_sender.get_transport_stats()
+    }
+    fn url(&self) -> String {
+        self.rpc_sender.url()
+    }
+}
 
 pub trait SolanaRpcErrorKindExt {
     fn my_error_kind(&self) -> &ErrorKind;
 
+    ///
     /// Returns true if the error is transient and the operation can be retried.
+    ///
     fn is_transient(&self) -> bool {
         match self.my_error_kind() {
             ErrorKind::Io(_) => true,

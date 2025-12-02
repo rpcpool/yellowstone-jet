@@ -102,12 +102,13 @@ async fn main() {
 
     let geyser_client = build_geyser_client(grpc_endpoint, grpc_x_token).await;
 
-    let rpc_client1 =
-        RpcClient::new_with_commitment(rpc_endpoint.clone(), CommitmentConfig::confirmed());
-    let rpc_client2 = RpcClient::new_with_commitment(rpc_endpoint, CommitmentConfig::confirmed());
+    let rpc_client1 = Arc::new(RpcClient::new_with_commitment(
+        rpc_endpoint.clone(),
+        CommitmentConfig::confirmed(),
+    ));
 
     let (managed_leader_schedule, mut managed_leader_schedule_jh) =
-        spawn_managed_leader_schedule(rpc_client1, Default::default())
+        spawn_managed_leader_schedule(Arc::clone(&rpc_client1), Default::default())
             .await
             .expect("spawn_managed_leader_schedule");
 
@@ -142,7 +143,7 @@ async fn main() {
             }
         }
 
-        let current_slot = rpc_client2.get_slot().await.expect("get_slot");
+        let current_slot = rpc_client1.get_slot().await.expect("get_slot");
 
         let leader = managed_leader_schedule
             .get_leader(current_slot)

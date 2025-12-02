@@ -11,6 +11,7 @@
 //!
 use {
     crate::{core::LeaderTpuInfoService, rpc::solana_rpc_utils::SolanaRpcErrorKindExt},
+    serde::Deserialize,
     solana_client::{nonblocking::rpc_client::RpcClient, rpc_response::RpcContactInfo},
     solana_pubkey::Pubkey,
     std::{
@@ -89,19 +90,34 @@ impl Drop for OnDrop {
 ///
 /// Configuration for the [`RpcClusterTpuQuicInfoService`].
 ///
-#[derive(Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RpcClusterTpuQuicInfoServiceConfig {
     /// Interval between cluster info refreshes.
+    #[serde(
+        with = "humantime_serde",
+        default = "RpcClusterTpuQuicInfoServiceConfig::default_refresh_interval"
+    )]
     pub refresh_interval: std::time::Duration,
     /// Maximum number of retry attempts for fetching cluster info.
+    #[serde(default = "RpcClusterTpuQuicInfoServiceConfig::default_max_retry_attempts")]
     pub max_retry_attempts: usize,
+}
+
+impl RpcClusterTpuQuicInfoServiceConfig {
+    pub fn default_refresh_interval() -> std::time::Duration {
+        DEFAULT_REFRESH_INTERVAL
+    }
+
+    pub fn default_max_retry_attempts() -> usize {
+        DEFAULT_MAX_RETRY_ATTEMPTS
+    }
 }
 
 impl Default for RpcClusterTpuQuicInfoServiceConfig {
     fn default() -> Self {
         Self {
-            refresh_interval: DEFAULT_REFRESH_INTERVAL,
-            max_retry_attempts: 3,
+            refresh_interval: Self::default_refresh_interval(),
+            max_retry_attempts: Self::default_max_retry_attempts(),
         }
     }
 }
@@ -162,7 +178,7 @@ fn apply_diff_patch(
 }
 
 async fn cluster_info_refresh_loop(
-    rpc_client: RpcClient,
+    rpc_client: Arc<RpcClient>,
     shared: Arc<RwLock<HashMap<Pubkey, RpcTpuQuicContactInfo>>>,
     config: RpcClusterTpuQuicInfoServiceConfig,
     cancellation_token: CancellationToken,
@@ -229,7 +245,7 @@ async fn cluster_info_refresh_loop(
 /// Dropping the `JoinHandle` will not stop the background task; to stop it, drop the all [`RpcClusterTpuQuicInfoService`] instance.
 ///
 pub async fn rpc_cluster_tpu_info_service(
-    rpc_client: RpcClient,
+    rpc_client: Arc<RpcClient>,
     config: RpcClusterTpuQuicInfoServiceConfig,
 ) -> Result<(RpcClusterTpuQuicInfoService, JoinHandle<()>), solana_client::client_error::ClientError>
 {

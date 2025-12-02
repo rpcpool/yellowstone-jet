@@ -6,10 +6,19 @@ use {
     std::{net::SocketAddr, num::NonZeroUsize, ops::Range, time::Duration},
 };
 
+///
+/// Specifies which TPU port to use for QUIC connections.
+///
 #[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TpuPortKind {
+    ///
+    /// Use the normal TPU port for QUIC connections.
+    ///
     Normal,
+    ///
+    /// (Preferred) Use the forwards TPU port for QUIC connections.
+    ///
     #[default]
     Forwards,
 }
@@ -50,14 +59,32 @@ where
     Range::deserialize(deserializer).map(|range| (range.start, range.end))
 }
 
+///
+/// Configuration for the TPU sender.
+///
+/// This control various aspects of the TPU QUIC sender behavior, mostly QUIC connection parameters:
+///     - number of endpoints
+///     - connection timeouts
+///     - send timeouts
+///     - max concurrent connections
+///     - port range to bind local endpoints to
+///     - etc...
+///
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TpuSenderConfig {
+    ///
+    /// Port range to bind local QUIC endpoints to.
+    ///
     #[serde(
         deserialize_with = "deserialize_port_range",
         default = "TpuSenderConfig::default_port_range"
     )]
     pub endpoint_port_range: PortRange,
 
+    ///
+    /// Maximum idle timeout for QUIC connections.
+    ///
+    /// Connections idle for longer than this duration will be closed.
     #[serde(
         default = "TpuSenderConfig::default_max_idle_timeout",
         with = "humantime_serde"
@@ -86,9 +113,15 @@ pub struct TpuSenderConfig {
     )]
     pub connecting_timeout: Duration,
 
+    ///
+    /// Which TPU port to use for QUIC connections, default is "forwards".
+    ///
     #[serde(default = "TpuSenderConfig::default_tpu_port_kind")]
     pub tpu_port: TpuPortKind,
 
+    ///
+    /// Maximum number of concurrent connections to a remote peer.
+    ///
     #[serde(default = "TpuSenderConfig::default_max_concurrent_connections")]
     pub max_concurrent_connection: usize,
 

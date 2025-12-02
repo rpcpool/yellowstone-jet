@@ -5,6 +5,7 @@ use {
         env,
         io::{self, IsTerminal as _},
         path::PathBuf,
+        sync::Arc,
     },
     tracing::level_filters::LevelFilter,
     tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt},
@@ -45,7 +46,7 @@ async fn main() {
     }
     let rpc_endpoint =
         env::var("RPC_ENDPOINT").expect("RPC_ENDPOINT must be set in dotenv file or environment");
-    let rpc_client = RpcClient::new(rpc_endpoint);
+    let rpc_client = Arc::new(RpcClient::new(rpc_endpoint));
 
     let config = RpcClusterTpuQuicInfoServiceConfig {
         refresh_interval: std::time::Duration::from_secs(10),
