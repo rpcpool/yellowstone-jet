@@ -17,6 +17,10 @@ examples = [
     "dep:tracing-subscriber",
     "dep:clap",
 ]
+yellowstone-grpc = [
+    "dep:yellowstone-grpc-client",
+    "dep:yellowstone-grpc-proto",
+]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -49,7 +53,7 @@ serde_yaml = { workspace = true }
 solana-client = { workspace = true }
 solana-net-utils = { workspace = true }
 solana-streamer = { workspace = true }
-solana-version = { workspace = true, features = ["agave-unstable-api"] }
+solana-version = { workspace = true }
 solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
 solana-instruction = { workspace = true }
 solana-pubkey = { workspace = true }
@@ -71,3 +75,5 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"], optional = true }
+yellowstone-grpc-client = { workspace = true, optional = true }
+yellowstone-grpc-proto = { workspace = true, optional = true }
