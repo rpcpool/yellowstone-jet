@@ -4,6 +4,7 @@
 use {
     crate::{core::ValidatorStakeInfoService, rpc::solana_rpc_utils::SolanaRpcErrorKindExt},
     futures::{StreamExt, stream},
+    serde::Deserialize,
     solana_client::{nonblocking::rpc_client::RpcClient, rpc_response::RpcVoteAccountStatus},
     solana_pubkey::Pubkey,
     std::{
@@ -18,6 +19,9 @@ use {
     },
     tokio_stream::wrappers::ReceiverStream,
 };
+
+pub const DEFAULT_STAKE_INFO_REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(60);
 
 ///
 /// Extract the mapping of validator identity to stake amount from the RPC response.
@@ -54,7 +58,7 @@ pub enum CacheStakeInfoMapCommand {
 }
 
 struct RefreshStakeInfoMapTask {
-    rpc: RpcClient,
+    rpc: Arc<RpcClient>,
     last_refresh: Instant,
     interval: std::time::Duration,
     cnc_rx: Option<mpsc::Receiver<CacheStakeInfoMapCommand>>,
@@ -199,24 +203,34 @@ impl RpcValidatorStakeInfoService {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RpcValidatorStakeInfoServiceConfig {
     ///
     /// Interval between stake info refreshes.
     ///
+    #[serde(
+        with = "humantime_serde",
+        default = "RpcValidatorStakeInfoServiceConfig::default_refresh_interval"
+    )]
     pub refresh_interval: std::time::Duration,
+}
+
+impl RpcValidatorStakeInfoServiceConfig {
+    fn default_refresh_interval() -> std::time::Duration {
+        DEFAULT_STAKE_INFO_REFRESH_INTERVAL
+    }
 }
 
 impl Default for RpcValidatorStakeInfoServiceConfig {
     fn default() -> Self {
         Self {
-            refresh_interval: std::time::Duration::from_secs(60),
+            refresh_interval: Self::default_refresh_interval(),
         }
     }
 }
 
 pub(crate) async fn build_validator_stake_info_service_inner(
-    rpc: RpcClient,
+    rpc: Arc<RpcClient>,
     config: RpcValidatorStakeInfoServiceConfig,
     cnc_rx: Option<mpsc::Receiver<CacheStakeInfoMapCommand>>,
 ) -> (RpcValidatorStakeInfoService, JoinHandle<()>) {
@@ -277,7 +291,7 @@ pub(crate) async fn build_validator_stake_info_service_inner(
 /// When all references to the returned service are dropped, the background task will be stopped automatically.
 ///
 pub async fn rpc_validator_stake_info_service(
-    rpc: RpcClient,
+    rpc: Arc<RpcClient>,
     config: RpcValidatorStakeInfoServiceConfig,
 ) -> (RpcValidatorStakeInfoService, JoinHandle<()>) {
     build_validator_stake_info_service_inner(rpc, config, None).await
@@ -304,6 +318,7 @@ pub mod tests {
         solana_keypair::Keypair,
         solana_pubkey::Pubkey,
         solana_signer::Signer,
+        std::sync::Arc,
         tokio::sync::{mpsc, oneshot},
     };
 
@@ -344,7 +359,10 @@ pub mod tests {
         let config = RpcValidatorStakeInfoServiceConfig {
             refresh_interval: std::time::Duration::from_secs(1),
         };
-        let mock = RpcClient::new_sender(mock_rpc_sender.clone(), RpcClientConfig::default());
+        let mock = Arc::new(RpcClient::new_sender(
+            mock_rpc_sender.clone(),
+            RpcClientConfig::default(),
+        ));
         let (stake_info_map, _handle) = stake::rpc_validator_stake_info_service(mock, config).await;
 
         let actual = stake_info_map
@@ -363,7 +381,10 @@ pub mod tests {
     #[tokio::test]
     pub async fn it_should_panic_during_spawn_if_rpc_error() {
         let mock_rpc_sender = MockRpcSender::all_fatal_errors();
-        let mock = RpcClient::new_sender(mock_rpc_sender, RpcClientConfig::default());
+        let mock = Arc::new(RpcClient::new_sender(
+            mock_rpc_sender,
+            RpcClientConfig::default(),
+        ));
         tokio::spawn(async move {
             stake::build_validator_stake_info_service_inner(mock, Default::default(), None)
                 .await
@@ -391,7 +412,10 @@ pub mod tests {
             RpcRequest::GetVoteAccounts,
             return_sucess(mock_get_vote_account),
         );
-        let mock = RpcClient::new_sender(mock_rpc_sender.clone(), RpcClientConfig::default());
+        let mock = Arc::new(RpcClient::new_sender(
+            mock_rpc_sender.clone(),
+            RpcClientConfig::default(),
+        ));
         let (cnc_tx, cnc_rx) = mpsc::channel(10);
         let config = RpcValidatorStakeInfoServiceConfig {
             refresh_interval: std::time::Duration::from_secs(1),
@@ -475,7 +499,10 @@ pub mod tests {
             RpcRequest::GetVoteAccounts,
             return_sucess(mock_get_vote_account),
         );
-        let mock = RpcClient::new_sender(mock_rpc_sender.clone(), RpcClientConfig::default());
+        let mock = Arc::new(RpcClient::new_sender(
+            mock_rpc_sender.clone(),
+            RpcClientConfig::default(),
+        ));
         let (cnc_tx, cnc_rx) = mpsc::channel(10);
         let config = RpcValidatorStakeInfoServiceConfig {
             refresh_interval: std::time::Duration::from_secs(1),
@@ -529,7 +556,10 @@ pub mod tests {
             RpcRequest::GetVoteAccounts,
             return_sucess(mock_get_vote_account),
         );
-        let mock = RpcClient::new_sender(mock_rpc_sender.clone(), RpcClientConfig::default());
+        let mock = Arc::new(RpcClient::new_sender(
+            mock_rpc_sender.clone(),
+            RpcClientConfig::default(),
+        ));
         let (cnc_tx, cnc_rx) = mpsc::channel(10);
         let config = RpcValidatorStakeInfoServiceConfig {
             refresh_interval: std::time::Duration::from_secs(1),

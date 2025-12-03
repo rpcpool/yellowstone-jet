@@ -1,5 +1,6 @@
 use {
     futures::future::join,
+    serde::Deserialize,
     solana_client::{client_error, nonblocking::rpc_client::RpcClient},
     solana_clock::DEFAULT_SLOTS_PER_EPOCH,
     solana_pubkey::Pubkey,
@@ -187,7 +188,7 @@ impl ManagedLeaderSchedule {
 async fn auto_leader_schedule_loop(
     config: ManagedLeaderScheduleConfig,
     shared: Arc<RwLock<InnerManagedLeaderSchedule>>,
-    rpc_client: RpcClient,
+    rpc_client: Arc<RpcClient>,
     cancellation_token: tokio_util::sync::CancellationToken,
 ) {
     pub struct OnDrop {
@@ -282,15 +283,29 @@ async fn auto_leader_schedule_loop(
 /// Configuration for spawning a managed leader schedule.
 ///
 /// See [`spawn_managed_leader_schedule`].
+#[derive(Debug, Clone, Deserialize)]
 pub struct ManagedLeaderScheduleConfig {
     /// How long to wait before checking for a new epoch schedule
+    #[serde(
+        with = "humantime_serde",
+        default = "ManagedLeaderScheduleConfig::default_check_interval"
+    )]
     pub check_interval: std::time::Duration,
+}
+
+impl ManagedLeaderScheduleConfig {
+    ///
+    /// Default check interval duration.
+    ///
+    pub fn default_check_interval() -> std::time::Duration {
+        DEFAULT_AUTO_LEADER_SCHEDULE_CHECK_INTERVAL
+    }
 }
 
 impl Default for ManagedLeaderScheduleConfig {
     fn default() -> Self {
         Self {
-            check_interval: DEFAULT_AUTO_LEADER_SCHEDULE_CHECK_INTERVAL,
+            check_interval: Self::default_check_interval(),
         }
     }
 }
@@ -299,7 +314,7 @@ impl Default for ManagedLeaderScheduleConfig {
 /// Spawn a managed leader schedule that automatically updates as epochs progress.
 ///
 pub async fn spawn_managed_leader_schedule(
-    rpc_client: RpcClient,
+    rpc_client: Arc<RpcClient>,
     config: ManagedLeaderScheduleConfig,
 ) -> Result<(ManagedLeaderSchedule, JoinHandle<()>), client_error::ClientError> {
     let initial_schedule = rpc_client

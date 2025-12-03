@@ -85,7 +85,7 @@ tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json
 uuid = { workspace = true, features = ["v4", "serde"] }
 yellowstone-grpc-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
-yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "bytes"] }
+yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "bytes", "yellowstone-grpc"] }
 yellowstone-shield-store = { workspace = true }
 tokio-util = { workspace = true }
 tikv-jemallocator = { workspace = true }

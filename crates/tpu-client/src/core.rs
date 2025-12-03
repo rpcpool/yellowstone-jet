@@ -361,7 +361,7 @@ where
 /// Covers must of the common cases to avoid unnecessary copies.
 ///
 #[derive(Debug)]
-enum WireTxnFlavor {
+pub(crate) enum WireTxnFlavor {
     Vec(Vec<u8>),
     #[cfg(feature = "bytes")]
     Bytes(Bytes),
@@ -389,7 +389,7 @@ pub struct TpuSenderTxn {
     /// Id set by the sender to identify the transaction. Only meaningful to the sender.
     pub tx_sig: Signature,
     /// The wire format of the transaction.
-    wire: WireTxnFlavor,
+    pub(crate) wire: WireTxnFlavor,
     /// The pubkey of the remote peer to send the transaction to.
     pub remote_peer: Pubkey,
 }
