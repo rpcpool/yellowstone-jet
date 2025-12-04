@@ -1,9 +1,10 @@
-#[cfg(feature = "bytes")]
-use bytes::Bytes;
 use {
     crate::{
         config::TpuSenderConfig,
-        core::{StakeBasedEvictionStrategy, TpuSenderResponse, TpuSenderTxn, WireTxnFlavor},
+        core::{
+            Nothing, StakeBasedEvictionStrategy, TpuSenderResponse, TpuSenderResponseCallback,
+            TpuSenderTxn,
+        },
         rpc::{
             schedule::{
                 ManagedLeaderSchedule, ManagedLeaderScheduleConfig, spawn_managed_leader_schedule,
@@ -19,6 +20,7 @@ use {
             slot_tracker::{self, YellowstoneSlotTrackerOk},
         },
     },
+    bytes::Bytes,
     derive_more::Display,
     serde::Deserialize,
     solana_client::{
@@ -33,7 +35,7 @@ use {
         fmt,
         sync::Arc,
     },
-    tokio::sync::mpsc::UnboundedReceiver,
+    tokio::sync::mpsc::UnboundedSender,
     yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcBuilder, GeyserGrpcClient},
 };
 
@@ -101,9 +103,10 @@ pub enum CreateTpuSenderError {
 }
 
 ///
-/// A fully-featured TPU sender using Yellowstone services.
+/// A fully-featured _smart_ TPU sender using Yellowstone services.
 ///
-/// This is a "smart" tpu-sender which knows who is aware of the leader schedule and the current ledger tip.
+/// This tpu-sender is aware of the leader schedule and the current ledger tip.
+///
 /// This allow this object to route transaction directly to the current/upcoming leader(s)
 ///
 /// See [`create_yellowstone_tpu_sender`] for creation.
@@ -112,46 +115,57 @@ pub enum CreateTpuSenderError {
 ///
 /// ```ignore
 ///
-/// let txn_signature: Signature = <...>;
-/// // `YellowstoneTpuSender` supports multiple bincoded container.
-/// let bincoded_txn1_vec: Vec<u8> = <...>;
-/// let bincoded_txn2_bytes: Bytes = <...>;
-/// let bincoded_txn3_shared_vec: Arc<Vec<u8>> = <...>;
-/// let bincoded_txn4_shared_slice: Arc<[u8]> = <...>;
-///
-/// let my_identity = Keypair::new();
+/// let my_identity = solana_keypair::read_keypair_file("/path/to/my/id.json").expect("read_keypair_file");
 ///
 /// let NewYellowstoneTpuSender {
 ///     sender,
 ///     related_objects_jh: _,
-///     response: _,
 /// } = create_yellowstone_tpu_sender(
 ///     Default::default(),
 ///     my_identity,
-///     config.upstream.grpc.endpoint.clone(),
-///     config.upstream.grpc.x_token.clone(),
+///     Endpoints {
+///         rpc: "https://my.rpc.endpoint".to_string(),
+///         grpc: "https://my.grpc.endpoint".to_string(),
+///         grpc_x_token: Some("my-secret".to_string()),
+///     }
 /// ).await.expect("yellowstone-tpu-sender");
 ///
+/// let rpc_client = rpc_client::RpcClient::new(
+///     "https://api.mainnet-beta.solana.com",
+///     CommitmentConfig::confirmed(),
+/// );
 ///
-/// sender.send_txn(txn_signature, bincoded_txn).await.expect("send txn 1");
-/// sender.send_txn(txn_signature, bincoded_txn1_vec).await.expect("send txn 1");
-/// sender.send_txn(txn_signature, bincoded_txn2_bytes).await.expect("send txn 2");
-/// sender.send_txn(txn_signature, bincoded_txn3_shared_vec).await.expect("send txn 3");
-/// sender.send_txn(txn_signature, bincoded_txn4_shared_slice).await.expect("send txn 4");
+/// let latest_blockhash = rpc_client
+///     .get_latest_blockhash()
+///     .await
+///     .expect("get_latest_blockhash");
 ///
-///
+/// let instructions = vec![transfer(&identity.pubkey(), &recipient, lamports)];
+/// let transaction = VersionedTransaction::try_new(
+///     VersionedMessage::V0(
+///         v0::Message::try_compile(&identity.pubkey(), &instructions, &[], latest_blockhash)
+///             .expect("try_compile"),
+///     ),
+///     &[&identity],
+/// )
+/// .expect("try_new");
+/// let signature = transaction.signatures[0];
+/// tracing::info!("generate transaction {signature} with send lamports {lamports}");
+/// let bincoded_txn = bincode::serialize(&transaction).expect("bincode::serialize");
+/// sender
+///     .send_txn(signature, bincoded_txn)
+///     .await
+///     .expect("send_transaction");
 /// ```
 ///
 /// # Send with blocklist
 ///
+/// You can provide a blocklist to prevent sending to specific leaders.
+///
 /// ```ignore
 ///
-/// let txn_signature: Signature = <...>;
-/// let my_txn: Vec<u8> = <...>;
-/// let leader_to_block = Pubkey::from_str("HEL1UZMZKAL2odpNBj2oCjffnFGaYwmbGmyewGv1e2TU").expect("from_str");
-/// let my_block_list = vec![leader_to_block];
-///
-/// sender.send_txn_with_blocklist(txn_signature, my_txn, Some(my_block_list)).await;
+/// let leader_to_block = vec![Pubkey::from_str("HEL1UZMZKAL2odpNBj2oCjffnFGaYwmbGmyewGv1e2TU").expect("from_str")];
+/// sender.send_txn_with_blocklist(signature, bincoded_txn, Some(leader_to_block)).await;
 /// ```
 ///
 /// If you are using [Yellowstone Shield crate](https://crates.io/crates/yellowstone-shield-store),
@@ -159,8 +173,6 @@ pub enum CreateTpuSenderError {
 ///
 /// ```ignore
 ///
-/// let txn_signature: Signature = <...>;
-/// let my_txn: Vec<u8> = <...>;
 /// let policy_store: yellowstone_shield_store::PolicyStore = <...>;
 /// let policies = vec![
 ///     Pubkey::from_str("PolicyPubkey1...").expect("from_str"),
@@ -173,22 +185,19 @@ pub enum CreateTpuSenderError {
 ///     default_return_value: true, // allow sending when in doubt
 /// };
 ///
-/// sender.send_txn_with_shield_policies(txn_signature, my_txn, shield_blocklist).await;
+/// sender.send_txn_with_shield_policies(signature, bincoded_txn, shield_blocklist).await;
 ///
 /// ```
 ///
 /// # Broadcast sending
 ///
 /// ```ignore
-///
-/// let txn_signature: Signature = <...>;
-/// let my_txn: Vec<u8> = <...>;
 /// let dests = vec![
 ///     Pubkey::from_str("2nhGaJvR17TeytzJVajPfABHQcAwinKoCG8F69gRdQot").expect("from_str"),
 ///     Pubkey::from_str("EdGevanA2MZsDpxDXK6b36FH7RCcTuDZZRcc6MEyE9hy").expect("from_str"),
 /// ];
 ///
-/// sender.send_txn_many_dest(txn_signature, my_txn, dests).await;
+/// sender.send_txn_many_dest(signature, bincoded_txn, dests).await;
 ///     
 /// ```
 ///
@@ -196,15 +205,86 @@ pub enum CreateTpuSenderError {
 ///
 /// ```ignore
 ///
-/// let txn_signature: Signature = <...>;
-/// let my_txn: Vec<u8> = <...>;
 /// let n = 3; // send to current leader + next 2 leaders
 ///
-/// sender.send_txn_fanout(txn_signature, my_txn, n).await;
-///
+/// sender.send_txn_fanout(signature, bincoded_txn, n).await;
 /// ```
 ///
-/// # Safety
+/// # Callbacks on TPU responses
+///
+/// You can provide an implementation of [`TpuSenderResponseCallback`] when creating the TPU sender.
+/// This callback will be invoked for each response received from the TPU, including failed and dropped transactions.
+///
+/// This module provides a default implementation that sends the responses to a provided [`tokio::sync::mpsc::UnboundedSender`].
+///
+/// ```ignore
+/// let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel::<TpuSenderResponse>();
+///
+/// let NewYellowstoneTpuSender {
+///     sender,
+///     related_objects_jh: _,
+/// } = create_yellowstone_tpu_sender_with_callback(
+///     Default::default(),
+///     my_identity,
+///     Endpoints {
+///         rpc: "https://my.rpc.endpoint".to_string(),
+///         grpc: "https://my.grpc.endpoint".to_string(),
+///         grpc_x_token: Some("my-secret".to_string()),
+///     },
+///     callback_tx,
+/// ).await.expect("yellowstone-tpu-sender");
+///
+/// // In another task, receive the responses
+/// callback_task = tokio::spawn(async move {
+///     while let Some(response) = callback_rx.recv().await {
+///         tracing::info!("Received TPU sender response: {:?}", response);
+///     }
+/// });
+/// ```
+///
+/// ## Custom callback implementation
+///
+/// You can also implement your own callback by implementing the [`TpuSenderResponseCallback`] trait.
+///
+/// ```rust
+/// #[derive(Clone)]
+/// struct LoggingCallback;
+///
+/// impl TpuSenderResponseCallback for LoggingCallback {
+///     fn call(&self, response: TpuSenderResponse) {
+///         use std::io::Write;
+///         let mut stdout = std::io::stdout();
+///         match response {
+///             TpuSenderResponse::TxSent(info) => {
+///                 writeln!(
+///                     &mut stdout,
+///                     "Transaction {} send to {}",
+///                     info.tx_sig, info.remote_peer_identity
+///                 )
+///                 .expect("writeln");
+///             }
+///             TpuSenderResponse::TxFailed(info) => {
+///                 writeln!(&mut stdout, "Transaction failed: {}", info.tx_sig).expect("writeln");
+///             }
+///             TpuSenderResponse::TxDrop(info) => {
+///                 for (txn, _) in info.dropped_tx_vec {
+///                     writeln!(&mut stdout, "Transaction dropped: {}", txn.tx_sig)
+///                         .expect("writeln");
+///                 }
+///             }
+///         }
+///     }
+/// }
+/// ```
+///
+/// # `&mut self`
+///
+/// All methods of this struct take `&mut self` because the internal state of the sender may change due to [update_identity](`crate::yellowstone_grpc::sender::YellowstoneTpuSender::update_identity`) calls.
+/// Updating identity typically requires carefully synchronizing with custom application logic, making `&mut self` appropriate to prevent concurrent usage.
+///
+/// If you need concurrent access to the sender, consider cloning the sender as it is cheaply-cloneable.
+///
+/// # Clone
 ///
 /// This struct is cheaply-cloneable and can be shared between threads.
 #[derive(Clone)]
@@ -215,55 +295,12 @@ pub struct YellowstoneTpuSender {
 }
 
 ///
-/// Represents encoded transaction ready to be written to the Wire.
+/// Error case when the leader for a transaction is unknown.
 ///
-/// There are multiples way of represents binary slice in Rust, these enum allow
-/// to support the most common one and allow some optimization when using zero-copy container such `Arc` or `Bytes`.
-///
-#[derive(Debug, Clone)]
-pub enum WireTransaction {
-    ///
-    /// [`Vec`]-backed wire formatted transaction.
-    ///
-    Vec(Vec<u8>),
-    #[cfg(feature = "bytes")]
-    /// [`Bytes`]-backed wire formatted transaction, useful for zero-copy transaction fanout.
-    Bytes(Bytes),
-    /// `Arc<Vec<u8>>`-backed wire formatted transaction.
-    SharedVec(Arc<Vec<u8>>),
-    /// `Arc<[u8]>`-backed wire formatted transaction.
-    SharedSlice(Arc<[u8]>),
-}
-
-impl From<Vec<u8>> for WireTransaction {
-    fn from(v: Vec<u8>) -> Self {
-        WireTransaction::Vec(v)
-    }
-}
-
-#[cfg(feature = "bytes")]
-impl From<Bytes> for WireTransaction {
-    fn from(b: Bytes) -> Self {
-        WireTransaction::Bytes(b)
-    }
-}
-
-impl From<Arc<Vec<u8>>> for WireTransaction {
-    fn from(v: Arc<Vec<u8>>) -> Self {
-        WireTransaction::SharedVec(v)
-    }
-}
-
-impl From<Arc<[u8]>> for WireTransaction {
-    fn from(s: Arc<[u8]>) -> Self {
-        WireTransaction::SharedSlice(s)
-    }
-}
-
 #[derive(thiserror::Error)]
 #[error("unknown leader {unknown_leader} for transaction")]
 pub struct UnknownLeaderError {
-    txn: WireTransaction,
+    txn: Bytes,
     unknown_leader: Pubkey,
 }
 
@@ -300,11 +337,20 @@ pub enum SendErrorKind {
     RemotePeerBlocked,
 }
 
+///
+/// Error returned when sending a transaction with [`YellowstoneTpuSender`]'s transaction sending API.
+///
 #[derive(Debug, thiserror::Error)]
 #[error("{kind} for transaction")]
 pub struct SendError {
+    ///
+    /// Kind of send error.
+    ///
     pub kind: SendErrorKind,
-    pub txn: WireTransaction,
+    ///
+    /// The transaction that failed to be sent.
+    ///
+    pub txn: Bytes,
 }
 
 ///
@@ -361,7 +407,14 @@ impl Blocklist for NoBlocklist {
     }
 }
 
+#[cfg_attr(
+    docsrs,
+    doc(cfg(feature = "shield", doc = "only if `shield` feature-flag is enabled"))
+)]
 #[cfg(feature = "shield")]
+///
+/// Yellowstone Shield blocklist implementation, enabled with `shield` feature-flag.
+///
 pub struct ShieldBlockList<'a> {
     ///
     /// Reference to the [`yellowstone_shield_store::PolicyStore`].
@@ -378,6 +431,7 @@ pub struct ShieldBlockList<'a> {
     pub default_return_value: bool,
 }
 
+#[cfg_attr(docsrs, doc(cfg(feature = "shield")))]
 #[cfg(feature = "shield")]
 impl Blocklist for ShieldBlockList<'_> {
     fn is_blocked(&self, peer_address: &Pubkey) -> bool {
@@ -398,7 +452,7 @@ impl YellowstoneTpuSender {
     /// # Arguments
     ///
     /// * `sig` - The [`Signature`] identifying the transaction.
-    /// * `txn` - The [`WireTransaction`] to send.
+    /// * `txn` - The bincoded transaction slice to send.
     /// * `dests` - The list of destination pubkeys to send the transaction to.
     ///
     /// # Returns
@@ -408,9 +462,7 @@ impl YellowstoneTpuSender {
     /// # Note
     ///
     /// If `dests` is empty, the function returns `Ok(())` immediately
-    /// If `dests` contains multiple entries, the transaction may be cloned multiple times.
     ///
-    /// To avoid copies when sending to multiple destinations, consider using `Bytes` (feature-flag `bytes`) or `Arc<Vec<u8>>`/`Arc<[u8]>`
     pub async fn send_txn_many_dest<T>(
         &mut self,
         sig: Signature,
@@ -418,39 +470,19 @@ impl YellowstoneTpuSender {
         dests: &[Pubkey],
     ) -> Result<(), SendError>
     where
-        T: Into<WireTransaction>,
+        T: AsRef<[u8]> + Send + 'static,
     {
         if dests.is_empty() {
             return Ok(());
         }
 
-        let wire_txn = txn.into();
-
-        let wire_txn = if dests.len() > 1 {
-            match wire_txn {
-                WireTransaction::Vec(v) => {
-                    // Promote to SharedVec to avoid copy for each destination
-                    let arc = Arc::new(v.clone());
-                    WireTransaction::SharedVec(arc)
-                }
-                whatever => whatever,
-            }
-        } else {
-            wire_txn
-        };
+        let wire_txn = Bytes::from_owner(txn);
 
         for dest in dests {
-            let wire_flavor = match &wire_txn {
-                WireTransaction::Vec(v) => WireTxnFlavor::Vec(v.clone()),
-                #[cfg(feature = "bytes")]
-                WireTransaction::Bytes(b) => WireTxnFlavor::Bytes(b.clone()),
-                WireTransaction::SharedVec(arc_v) => WireTxnFlavor::SharedVec(Arc::clone(arc_v)),
-                WireTransaction::SharedSlice(arc_s) => WireTxnFlavor::Shared(Arc::clone(arc_s)),
-            };
             let tpu_txn = TpuSenderTxn {
                 tx_sig: sig,
                 remote_peer: *dest,
-                wire: wire_flavor,
+                wire: wire_txn.clone(),
             };
             if self.base_tpu_sender.send_txn(tpu_txn).await.is_err() {
                 return Err(SendError {
@@ -468,7 +500,7 @@ impl YellowstoneTpuSender {
     /// # Arguments
     ///
     /// * `sig` - The [`Signature`] identifying the transaction.
-    /// * `txn` - The [`WireTransaction`] to send.
+    /// * `txn` - The bincoded transaction slice to send.
     /// * `n` - The number of upcoming leaders to send the transaction to. Examples include:
     ///     - `n = 1`: send to the current leader only.
     ///     - `n = 2`: send to the current leader and the next leader in the schedule
@@ -477,10 +509,7 @@ impl YellowstoneTpuSender {
     ///
     /// # Note
     ///
-    /// Setting `n` &gt; 1 may result in multiple copies of the transaction being created.
-    /// To avoid copies when sending to multiple leaders, consider using `Bytes` (feature-flag `bytes`) or `Arc<Vec<u8>>`/`Arc<[u8]>` as the transaction type.
-    ///
-    /// The fanout is "best-effort" and succeed if the sender can schedule at least one send to a leader.
+    /// The fanout succeed if the sender can schedule at least one send to a leader.
     ///
     pub async fn send_txn_fanout_with_blocklist<T, B>(
         &mut self,
@@ -490,10 +519,10 @@ impl YellowstoneTpuSender {
         blocklist: Option<B>,
     ) -> Result<(), SendError>
     where
-        T: Into<WireTransaction>,
+        T: AsRef<[u8]> + Send + 'static,
         B: Blocklist,
     {
-        let wire_txn = txn.into();
+        let wire_txn = Bytes::from_owner(txn);
         let current_slot = match self.atomic_slot_tracker.load() {
             Ok(slot) => slot,
             Err(_) => {
@@ -555,7 +584,7 @@ impl YellowstoneTpuSender {
         n: usize,
     ) -> Result<(), SendError>
     where
-        T: Into<WireTransaction>,
+        T: AsRef<[u8]> + Send + 'static,
     {
         self.send_txn_fanout_with_blocklist::<T, NoBlocklist>(sig, txn, n, None)
             .await
@@ -569,7 +598,7 @@ impl YellowstoneTpuSender {
     /// # Arguments
     ///
     /// * `sig` - The signature identifying the transaction.
-    /// * `txn` - The transaction to send.
+    /// * `txn` - The bincoded transaction slice to send.
     ///
     /// # Returns
     ///
@@ -578,7 +607,7 @@ impl YellowstoneTpuSender {
     ///
     pub async fn send_txn<T>(&mut self, sig: Signature, txn: T) -> Result<(), SendError>
     where
-        T: Into<WireTransaction>,
+        T: AsRef<[u8]> + Send + 'static,
     {
         self.send_txn_with_blocklist(sig, txn, Some(NoBlocklist))
             .await
@@ -590,7 +619,7 @@ impl YellowstoneTpuSender {
     /// # Arguments
     ///
     /// * `sig` - The [`Signature`] identifying the transaction.
-    /// * `txn` - The [`WireTransaction`] to send.
+    /// * `txn` - The bincoded transaction slice to send.
     /// * `blocklist` - The [`Blocklist`] to use.
     ///
     /// # Returns
@@ -605,25 +634,29 @@ impl YellowstoneTpuSender {
         blocklist: Option<B>,
     ) -> Result<(), SendError>
     where
-        T: Into<WireTransaction>,
+        T: AsRef<[u8]> + Send + 'static,
         B: Blocklist,
     {
         self.send_txn_fanout_with_blocklist(sig, txn, 1, blocklist)
             .await
     }
 
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(feature = "shield", doc = "only if `shield` feature-flag is enabled"))
+    )]
+    #[cfg(feature = "shield")]
     ///
     /// Sends a transaction to the TPU of the current leader, while applying Yellowstone Shield blocklist policies.
     ///
     /// # Arguments
     ///
     /// * `sig` - The [`Signature`] identifying the transaction.
-    /// * `txn` - The [`WireTransaction`] to send.
+    /// * `txn` - The bincoded transaction slice to send.
     /// * `shield` - The shield blocklist policies to apply, see [`ShieldBlockList`].
     ///
     ///  # Returns
     ///  `Ok(())` if the transaction was sent successfully, or a `SendError` if there was an error.
-    #[cfg(feature = "shield")]
     pub async fn send_txn_with_shield_policies<T>(
         &mut self,
         sig: Signature,
@@ -631,7 +664,7 @@ impl YellowstoneTpuSender {
         shield: ShieldBlockList<'_>,
     ) -> Result<(), SendError>
     where
-        T: Into<WireTransaction>,
+        T: AsRef<[u8]> + Send + 'static,
     {
         self.send_txn_fanout_with_blocklist(sig, txn, 1, Some(shield))
             .await
@@ -650,7 +683,7 @@ impl YellowstoneTpuSender {
 }
 
 ///
-/// Object returned when creating a new Yellowstone TPU sender.
+/// Object returned when creating a new [`YellowstoneTpuSender`].
 ///
 /// See [`create_yellowstone_tpu_sender_with_clients`] for creation.
 ///
@@ -666,13 +699,6 @@ pub struct NewYellowstoneTpuSender {
     /// Dropping this handle will not stop the TPU sender itself, but it still recommended to await it to ensure proper cleanup.
     ///
     pub related_objects_jh: tokio::task::JoinHandle<()>,
-    ///
-    /// Receiver for TPU sender responses.
-    ///
-    /// # Note
-    /// You can drop this receiver if you don't need to handle responses.
-    ///
-    pub response: UnboundedReceiver<TpuSenderResponse>,
 }
 
 /// Creates a Yellowstone TPU sender with the specified configuration.
@@ -689,12 +715,16 @@ pub struct NewYellowstoneTpuSender {
 /// A tuple containing the created [`YellowstoneTpuSender`] and a receiver for [`TpuSenderResponse`].
 /// You can drop the receiver if you don't need to handle responses.
 ///
-pub async fn create_yellowstone_tpu_sender_with_clients(
+pub async fn create_yellowstone_tpu_sender_with_clients<CB>(
     config: YellowstoneTpuSenderConfig,
     initial_identity: Keypair,
     rpc_client: Arc<rpc_client::RpcClient>,
     grpc_client: GeyserGrpcClient<impl yellowstone_grpc_client::Interceptor + Clone + 'static>,
-) -> Result<NewYellowstoneTpuSender, CreateTpuSenderError> {
+    callback: Option<CB>,
+) -> Result<NewYellowstoneTpuSender, CreateTpuSenderError>
+where
+    CB: TpuSenderResponseCallback,
+{
     let (tpu_info_service, tpu_info_service_jh) =
         rpc_cluster_tpu_info_service(Arc::clone(&rpc_client), config.tpu_info).await?;
 
@@ -731,13 +761,14 @@ pub async fn create_yellowstone_tpu_sender_with_clients(
         managed_schedule: managed_leader_schedule.clone(),
     };
 
-    let (base_tpu_sender, resp) = create_base_tpu_client(
+    let base_tpu_sender = create_base_tpu_client(
         config.tpu,
         initial_identity,
         Arc::new(tpu_info_service.clone()),
         Arc::new(stake_service.clone()),
         Arc::new(connection_eviction_strategy),
         Arc::new(leader_predictor),
+        callback,
         config.channel_capacity,
     )
     .await;
@@ -766,7 +797,6 @@ pub async fn create_yellowstone_tpu_sender_with_clients(
     Ok(NewYellowstoneTpuSender {
         sender,
         related_objects_jh: tokio::spawn(yellowstone_tpu_deps_overseer(handle_name_vec, handles)),
-        response: resp,
     })
 }
 
@@ -787,11 +817,15 @@ pub struct Endpoints {
 ///
 /// See [`create_yellowstone_tpu_sender_with_clients`] for more details.
 ///
-pub async fn create_yellowstone_tpu_sender(
+pub async fn create_yellowstone_tpu_sender_with_callback<CB>(
     config: YellowstoneTpuSenderConfig,
     initial_identity: Keypair,
     endpoints: Endpoints,
-) -> Result<NewYellowstoneTpuSender, CreateTpuSenderError> {
+    callback: CB,
+) -> Result<NewYellowstoneTpuSender, CreateTpuSenderError>
+where
+    CB: TpuSenderResponseCallback,
+{
     let Endpoints {
         rpc,
         grpc,
@@ -821,8 +855,22 @@ pub async fn create_yellowstone_tpu_sender(
 
     tracing::debug!("connected to rpc/grpc endpoints");
 
-    create_yellowstone_tpu_sender_with_clients(config, initial_identity, rpc_client, grpc_client)
-        .await
+    create_yellowstone_tpu_sender_with_clients(
+        config,
+        initial_identity,
+        rpc_client,
+        grpc_client,
+        Some(callback),
+    )
+    .await
+}
+
+pub async fn create_yellowstone_tpu_sender(
+    config: YellowstoneTpuSenderConfig,
+    initial_identity: Keypair,
+    endpoints: Endpoints,
+) -> Result<NewYellowstoneTpuSender, CreateTpuSenderError> {
+    create_yellowstone_tpu_sender_with_callback(config, initial_identity, endpoints, Nothing).await
 }
 
 async fn yellowstone_tpu_deps_overseer(
@@ -846,4 +894,10 @@ async fn yellowstone_tpu_deps_overseer(
 
     // Abort the rest
     rest.into_iter().for_each(|jh| jh.abort());
+}
+
+impl TpuSenderResponseCallback for UnboundedSender<TpuSenderResponse> {
+    fn call(&self, response: TpuSenderResponse) {
+        let _ = self.send(response);
+    }
 }

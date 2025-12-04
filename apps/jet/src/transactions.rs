@@ -751,21 +751,10 @@ impl TransactionFanout {
         let lewis_handler = self.lewis_handler.clone();
         let extra_fwd = Arc::clone(&self.extra_fwd);
 
-        enum WireContainer {
-            Bytes(Bytes),
-            SharedVec(Arc<Vec<u8>>),
-        }
-
         let send_fut = async move {
             let next_leaders = leader_schedule_service.leader_lookahead(leader_fwd);
             let current_slot = leader_schedule_service.get_current_slot();
-
-            let txn_wire = if tx.wire_transaction.len() == tx.wire_transaction.capacity() {
-                WireContainer::Bytes(Bytes::from(tx.wire_transaction))
-            } else {
-                WireContainer::SharedVec(Arc::new(tx.wire_transaction))
-            };
-
+            let txn_wire = Bytes::from_owner(tx.wire_transaction);
             for dest in next_leaders.iter() {
                 if !policy_store_service.is_allowed(&tx.policies, dest)? {
                     // Report skip to Lewis
@@ -776,14 +765,7 @@ impl TransactionFanout {
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
                     continue;
                 }
-                let tpu_txn = match &txn_wire {
-                    WireContainer::Bytes(b) => {
-                        TpuSenderTxn::from_bytes(tx.signature, *dest, b.clone())
-                    }
-                    WireContainer::SharedVec(v) => {
-                        TpuSenderTxn::from_shared_vec(tx.signature, *dest, Arc::clone(v))
-                    }
-                };
+                let tpu_txn = TpuSenderTxn::from_bytes(tx.signature, *dest, txn_wire.clone());
                 tpu_sink
                     .send(tpu_txn)
                     .await
@@ -795,15 +777,7 @@ impl TransactionFanout {
                     // We don't send it twice.
                     continue;
                 }
-                // We don't apply policy here.
-                let tpu_txn = match &txn_wire {
-                    WireContainer::Bytes(b) => {
-                        TpuSenderTxn::from_bytes(tx.signature, *extra, b.clone())
-                    }
-                    WireContainer::SharedVec(v) => {
-                        TpuSenderTxn::from_shared_vec(tx.signature, *extra, Arc::clone(v))
-                    }
-                };
+                let tpu_txn = TpuSenderTxn::from_bytes(tx.signature, *extra, txn_wire.clone());
 
                 tpu_sink
                     .send(tpu_txn)

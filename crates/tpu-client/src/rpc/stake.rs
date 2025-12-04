@@ -46,14 +46,11 @@ struct StakeInfoMapInner {
     total_stake: u64,
 }
 
-///
-/// Command to control the background task spawned by [`spawn_cache_stake_info_map`].
-///
-/// The task can be stopped by sending [`CacheStakeInfoMapCommand::Stop`] through the command-and-control channel.
-///
-/// Read more about the command-and-control pattern in the [`SpawnMode`] enum.
-pub enum CacheStakeInfoMapCommand {
+// use for tests
+pub(crate) enum CacheStakeInfoMapCommand {
+    #[allow(dead_code)]
     ManualRefresh { callback: oneshot::Sender<()> },
+    #[allow(dead_code)]
     Stop,
 }
 

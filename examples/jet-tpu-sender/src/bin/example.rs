@@ -1,3 +1,4 @@
+
 use {
     clap::Parser,
     solana_client::nonblocking::rpc_client::RpcClient,
@@ -11,13 +12,10 @@ use {
     solana_transaction::versioned::VersionedTransaction,
     std::{
         env,
-        io::{self, IsTerminal as _},
         path::PathBuf,
         sync::Arc,
         vec,
     },
-    tracing::level_filters::LevelFilter,
-    tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt},
     yellowstone_jet_tpu_client::{
         core::TpuSenderResponse,
         yellowstone_grpc::sender::{
@@ -27,16 +25,27 @@ use {
     },
 };
 
-pub fn setup_tracing() {
-    let env_filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-    let subscriber = tracing_subscriber::registry().with(env_filter);
-    let is_atty = io::stdout().is_terminal() && io::stderr().is_terminal();
-    let io_layer = tracing_subscriber::fmt::layer()
-        .with_line_number(true)
-        .with_ansi(is_atty);
-    subscriber.with(io_layer).try_init().expect("try_init");
+#[derive(clap::Parser, Debug)]
+struct Args {
+    #[clap(long, short)]
+    /// Path to .env file to load
+    dotenv: Option<PathBuf>,
+    /// Endpoint to Yellowstone gRPC service
+    #[clap(long, short)]
+    rpc: Option<String>,
+    #[clap(long, short)]
+    grpc: Option<String>,
+    /// X-Token for Yellowstone gRPC service
+    x_token: Option<String>,
+    ///
+    /// Path to identity keypair file
+    ///
+    identity: Option<PathBuf>,
+    ///
+    /// Recipient pubkey
+    ///
+    #[clap(long)]
+    recipient: Option<String>,
 }
 
 async fn send_lamports(
@@ -46,7 +55,7 @@ async fn send_lamports(
     lamports: u64,
     latest_blockhash: Hash,
 ) -> Signature {
-    let instructions = vec![transfer(&identity.pubkey(), recipient, lamports)];
+    let instructions = vec![transfer(&identity.pubkey(), &recipient, lamports)];
 
     let transaction = VersionedTransaction::try_new(
         VersionedMessage::V0(
@@ -57,7 +66,6 @@ async fn send_lamports(
     )
     .expect("try_new");
     let signature = transaction.signatures[0];
-    tracing::info!("generate transaction {signature} with send lamports {lamports}");
     let bincoded_txn = bincode::serialize(&transaction).expect("bincode::serialize");
 
     // Send the transaction to the current leader
@@ -72,17 +80,16 @@ async fn send_lamports(
 #[tokio::main]
 async fn main() {
     use std::io::Write;
-    setup_tracing();
 
     let mut out = std::io::stdout();
 
     let args = Args::parse();
     if let Ok(env_path) = args.dotenv.unwrap_or("./.env".into()).canonicalize() {
         if dotenvy::from_path(env_path).is_err() {
-            tracing::warn!("Failed to load .env file");
+            eprintln!("Warning: Failed to load .env file");
         }
     } else {
-        tracing::warn!("Failed to canonicalize .env file path");
+        eprintln!("Warning: Failed to canonicalize .env file path");
     }
 
     let recipient_pubkey: Pubkey = match args.recipient {
@@ -107,7 +114,7 @@ async fn main() {
         None => match env::var("GRPC_X_TOKEN") {
             Ok(token) => Some(token),
             Err(_) => {
-                tracing::warn!("GRPC_X_TOKEN not set in dotenv file or environment");
+                eprintln!("Warning: GRPC_X_TOKEN not set in dotenv file or environment");
                 None
             }
         },
@@ -122,7 +129,7 @@ async fn main() {
                 solana_keypair::read_keypair_file(identity_path)
                     .expect("Failed to read identity keypair file from ENV")
             } else {
-                tracing::warn!(
+                eprintln!(
                     "IDENTITY not set in dotenv file or environment, using new random identity"
                 );
                 Keypair::new()
@@ -189,27 +196,4 @@ async fn main() {
         resp.tx_sig, resp.remote_peer_identity
     )
     .expect("writeln");
-}
-
-#[derive(clap::Parser, Debug)]
-struct Args {
-    #[clap(long, short)]
-    /// Path to .env file to load
-    dotenv: Option<PathBuf>,
-    /// Endpoint to Yellowstone gRPC service
-    #[clap(long, short)]
-    rpc: Option<String>,
-    #[clap(long, short)]
-    grpc: Option<String>,
-    /// X-Token for Yellowstone gRPC service
-    x_token: Option<String>,
-    ///
-    /// Path to identity keypair file
-    ///
-    identity: Option<PathBuf>,
-    ///
-    /// Recipient pubkey
-    ///
-    #[clap(long)]
-    recipient: Option<String>,
 }

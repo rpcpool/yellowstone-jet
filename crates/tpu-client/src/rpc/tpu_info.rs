@@ -52,7 +52,7 @@ impl From<&RpcContactInfo> for RpcTpuQuicContactInfo {
 /// A TPU info service that fetches TPU QUIC contact info from the Solana RPC cluster nodes.
 ///
 /// Starts a background task to periodically refresh the cluster nodes info.
-/// See [`rpc_cluster_info_service`] for creating an instance of this service.
+/// See [`rpc_cluster_tpu_info_service`] for creating an instance of this service.
 ///
 /// # Clone
 ///

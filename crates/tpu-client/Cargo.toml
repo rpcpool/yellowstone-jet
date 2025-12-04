@@ -6,19 +6,42 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+description = "Triton One Yellowstone Jet TPU Client"
+keywords = ["yellowstone", "solana", "rpc", "tpu", "quic"]
 readme = "README.md"
+publish = true
+exclude = ["src/bin/*"]
+
+[[bin]]
+name = "test-managed-schedule"
+path = "src/bin/test-managed-schedule.rs"
+publish = false
+
+[[bin]]
+name = "test-tpu-info"
+path = "src/bin/test-tpu-info.rs"
+publish = false
+
+[[bin]]
+name = "test-tpu-send"
+path = "src/bin/test-tpu-send.rs"
+publish = false
+
+[[bin]]
+name = "test-slot-tracker"
+path = "src/bin/test-slot-tracker.rs"
 publish = false
 
 [features]
-default = ["yellowstone-grpc", "bytes"]
+default = ["yellowstone-grpc"]
 prometheus = ["dep:prometheus"]
-bytes = ["dep:bytes"]
 examples = [
     "dep:dotenvy",
     "dep:tracing-subscriber",
     "dep:clap",
     "dep:solana-system-interface",
     "dep:solana-transaction",
+    "dep:solana-hash",
     "dep:bincode",
     "yellowstone-grpc",
 ]
@@ -35,7 +58,7 @@ base64 = { workspace = true }
 bincode = { workspace = true, optional = true }
 bs58 = { workspace = true }
 borsh = { workspace = true }
-bytes = { workspace = true, optional = true }
+bytes = { workspace = true }
 clap = { workspace = true, features = ["cargo", "derive", "env"], optional = true }
 
 derive_more = { workspace = true, features = ["display"] }
@@ -64,6 +87,7 @@ solana-client = { workspace = true }
 solana-clock = { workspace = true }
 solana-commitment-config = { workspace = true }
 solana-epoch-info = { workspace = true }
+solana-hash = { workspace = true, optional = true }
 solana-instruction = { workspace = true }
 solana-keypair = { workspace = true }
 solana-message = { workspace = true }
