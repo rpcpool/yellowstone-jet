@@ -8,7 +8,6 @@ use {
     },
     solana_commitment_config::CommitmentConfig,
     solana_keypair::Keypair,
-    solana_pubkey::Pubkey,
     solana_rpc_client::http_sender::HttpSender,
     std::{
         collections::HashMap,
@@ -43,11 +42,14 @@ use {
         transactions::SendTransactionRequest,
         util::WaitShutdown,
     },
-    yellowstone_jet_tpu_client::yellowstone_grpc::sender::{
-        Blocklist, Endpoints, NewYellowstoneTpuSender, YellowstoneTpuSender,
-        create_yellowstone_tpu_sender,
+    yellowstone_jet_tpu_client::{
+        core::{TpuSenderResponse, TpuSenderResponseCallback},
+        yellowstone_grpc::sender::{
+            Endpoints, NewYellowstoneTpuSender, ShieldBlockList, YellowstoneTpuSender,
+            create_yellowstone_tpu_sender_with_callback,
+        },
     },
-    yellowstone_shield_store::{PolicyStore, PolicyStoreTrait},
+    yellowstone_shield_store::PolicyStore,
 };
 
 #[cfg(not(target_env = "msvc"))]
@@ -194,18 +196,45 @@ async fn run_jet(
         grpc: config.upstream.grpc.endpoint.clone(),
         grpc_x_token: config.upstream.grpc.x_token.clone(),
     };
+    #[derive(Clone)]
+    struct LoggingCallback;
+
+    impl TpuSenderResponseCallback for LoggingCallback {
+        fn call(&self, response: TpuSenderResponse) {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            match response {
+                TpuSenderResponse::TxSent(info) => {
+                    writeln!(
+                        &mut stdout,
+                        "Transaction {} send to {}",
+                        info.tx_sig, info.remote_peer_identity
+                    )
+                    .expect("writeln");
+                }
+                TpuSenderResponse::TxFailed(info) => {
+                    writeln!(&mut stdout, "Transaction failed: {}", info.tx_sig).expect("writeln");
+                }
+                TpuSenderResponse::TxDrop(info) => {
+                    for (txn, _) in info.dropped_tx_vec {
+                        writeln!(&mut stdout, "Transaction dropped: {}", txn.tx_sig)
+                            .expect("writeln");
+                    }
+                }
+            }
+        }
+    }
     let NewYellowstoneTpuSender {
         sender,
         related_objects_jh,
-        response,
-    } = create_yellowstone_tpu_sender(
+    } = create_yellowstone_tpu_sender_with_callback(
         Default::default(),
         initial_identity.insecure_clone(),
         tpu_sender_endpoints,
+        LoggingCallback,
     )
     .await
     .expect("yellowstone-tpu-sender");
-    drop(response); // drop response handle, we don't need it
 
     let ah = tg.spawn(async move {
         related_objects_jh
@@ -225,7 +254,12 @@ async fn run_jet(
         proxy_preflight_check: false,
     };
 
-    let ah = tg.spawn(tpu_sender_loop(scheduler_out, sender, shield_policy_store));
+    let ah = tg.spawn(tpu_sender_loop(
+        scheduler_out,
+        sender,
+        shield_policy_store,
+        jet_cancellation_token.child_token(),
+    ));
 
     tg_name_map.insert(ah.id(), "tpu_sender_loop".to_string());
 
@@ -386,22 +420,12 @@ pub async fn tpu_sender_loop(
     mut incoming: UnboundedReceiver<Arc<SendTransactionRequest>>,
     mut tpu_sender: YellowstoneTpuSender,
     shield: Option<PolicyStore>,
+    cancellation_token: CancellationToken,
 ) {
-    struct ShieldBlocklist<'a> {
-        shield: &'a PolicyStore,
-        policies: &'a [Pubkey],
-    }
-
-    impl Blocklist for ShieldBlocklist<'_> {
-        fn is_blocked(&self, account: &Pubkey) -> bool {
-            self.shield
-                .snapshot()
-                .is_allowed(self.policies, account)
-                .unwrap_or(true)
-        }
-    }
-
     while let Some(request) = incoming.recv().await {
+        if cancellation_token.is_cancelled() {
+            break;
+        }
         let request = Arc::unwrap_or_clone(request);
         let SendTransactionRequest {
             signature,
@@ -411,13 +435,14 @@ pub async fn tpu_sender_loop(
             policies,
         } = request;
 
-        let blocklist = shield.as_ref().map(|shield| ShieldBlocklist {
-            shield,
-            policies: &policies,
+        let blocklist = shield.as_ref().map(|shield| ShieldBlockList {
+            policy_store: shield,
+            shield_policy_addresses: &policies,
+            default_return_value: false,
         });
 
         let result = tpu_sender
-            .send_txn_with_blocklist(signature, wire_transaction, blocklist)
+            .send_txn_fanout_with_blocklist(signature, wire_transaction, 2, blocklist)
             .await;
         if let Err(e) = result {
             tracing::error!(

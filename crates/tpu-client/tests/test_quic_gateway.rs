@@ -25,7 +25,7 @@ use {
     yellowstone_jet_tpu_client::{
         config::TpuSenderConfig,
         core::{
-            IgnorantLeaderPredictor, LeaderTpuInfoService, StakeBasedEvictionStrategy,
+            IgnorantLeaderPredictor, LeaderTpuInfoService, Nothing, StakeBasedEvictionStrategy,
             TpuSenderDriverSpawner, TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn,
             TxDropReason, UpcomingLeaderPredictor, ValidatorStakeInfoService,
         },
@@ -230,13 +230,12 @@ async fn send_buffer_should_land_properly() {
         leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
         driver_tx_channel_capacity: 100,
     };
-
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: _,
         driver_tx_sink: transaction_sink,
-        mut driver_response_source,
         driver_join_handle: _,
-    } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
+    } = gateway_spawner.spawn_default_with_callback(gateway_kp.insecure_clone(), callback_tx);
 
     let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
         rx_server_identity.insecure_clone(),
@@ -244,14 +243,16 @@ async fn send_buffer_should_land_properly() {
         Default::default(),
     );
     let tx_sig = Signature::new_unique();
-    let txn =
-        TpuSenderTxn::from_slice(tx_sig, rx_server_identity.pubkey(), "helloworld".as_bytes());
+    let txn = TpuSenderTxn::from_owned(
+        tx_sig,
+        rx_server_identity.pubkey(),
+        "helloworld".as_bytes().to_vec(),
+    );
     transaction_sink.send(txn).await.expect("send tx");
 
     let spy_req = client_rx.recv().await.expect("recv");
 
-    let TpuSenderResponse::TxSent(actual_resp) =
-        driver_response_source.recv().await.expect("recv response")
+    let TpuSenderResponse::TxSent(actual_resp) = callback_rx.recv().await.expect("recv response")
     else {
         panic!("Expected TpuSenderResponse::TxSent, got something else");
     };
@@ -283,12 +284,13 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         driver_tx_channel_capacity: 100,
     };
 
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+
     let TpuSenderSessionContext {
         identity_updater: _,
         driver_tx_sink: transaction_sink,
-        mut driver_response_source,
         driver_join_handle: _,
-    } = gateway_spawner.spawn_with_default(gateway_kp.insecure_clone());
+    } = gateway_spawner.spawn_default_with_callback(gateway_kp.insecure_clone(), callback_tx);
     const MAX_TX: u64 = 5;
 
     let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
@@ -301,10 +303,10 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         .map(|_| Signature::new_unique())
         .collect::<Vec<_>>();
     for (i, tx_sig) in tx_sig_vec.iter().enumerate() {
-        let txn = TpuSenderTxn::from_slice(
+        let txn = TpuSenderTxn::from_owned(
             *tx_sig,
             rx_server_identity.pubkey(),
-            format!("helloworld{i}").as_bytes(),
+            format!("helloworld{i}").as_bytes().to_vec(),
         );
         transaction_sink.send(txn).await.expect("send tx");
     }
@@ -313,7 +315,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
     for i in 0..MAX_TX {
         tracing::trace!("Waiting for tx response {i}");
         let TpuSenderResponse::TxSent(actual_resp) =
-            driver_response_source.recv().await.expect("recv response")
+            callback_rx.recv().await.expect("recv response")
         else {
             panic!("Expected TpuSenderResponse::TxSent, got something else");
         };
@@ -356,17 +358,17 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         ..Default::default()
     };
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
-
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: _,
         driver_tx_sink: transaction_sink,
-        mut driver_response_source,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
     );
 
     let rx_server_handle = tokio::spawn(async move {
@@ -375,13 +377,16 @@ async fn gateway_should_handle_connection_refused_by_peer() {
     });
 
     let tx_sig = Signature::new_unique();
-    let txn =
-        TpuSenderTxn::from_slice(tx_sig, rx_server_identity.pubkey(), "helloworld".as_bytes());
+    let txn = TpuSenderTxn::from_owned(
+        tx_sig,
+        rx_server_identity.pubkey(),
+        "helloworld".as_bytes().to_vec(),
+    );
     transaction_sink.send(txn).await.expect("send tx");
 
     rx_server_handle.await.expect("h2");
 
-    let resp = driver_response_source.recv().await.expect("recv response");
+    let resp = callback_rx.recv().await.expect("recv response");
 
     let TpuSenderResponse::TxDrop(mut actual_resp) = resp else {
         panic!("Expected TpuSenderResponse::TxSent, got something {resp:?}");
@@ -420,13 +425,13 @@ async fn it_should_update_gatway_identity() {
     let TpuSenderSessionContext {
         mut identity_updater,
         driver_tx_sink: transaction_sink,
-        driver_response_source: _,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
+        Some(Nothing),
     );
 
     let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
@@ -435,10 +440,10 @@ async fn it_should_update_gatway_identity() {
         Default::default(),
     );
 
-    let txn = TpuSenderTxn::from_slice(
+    let txn = TpuSenderTxn::from_owned(
         Signature::new_unique(),
         rx_server_identity.pubkey(),
-        "helloworld".as_bytes(),
+        "helloworld".as_bytes().to_vec(),
     );
     transaction_sink.send(txn).await.expect("send tx");
 
@@ -452,10 +457,10 @@ async fn it_should_update_gatway_identity() {
         .update_identity(gateway_identity2.insecure_clone())
         .await;
 
-    let txn = TpuSenderTxn::from_slice(
+    let txn = TpuSenderTxn::from_owned(
         Signature::new_unique(),
         rx_server_identity.pubkey(),
-        "helloworld".as_bytes(),
+        "helloworld".as_bytes().to_vec(),
     );
     transaction_sink.send(txn).await.expect("send tx");
 
@@ -491,13 +496,13 @@ async fn it_should_support_concurrent_remote_peer_connection() {
     let TpuSenderSessionContext {
         identity_updater: _,
         driver_tx_sink: transaction_sink,
-        driver_response_source: _,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
+        Some(Nothing),
     );
 
     let (validator_rx1, _) = MockedRemoteValidator::spawn(
@@ -524,19 +529,19 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         ReceiverStream::new(validator_rx2),
     );
 
-    let txn = TpuSenderTxn::from_slice(
+    let txn = TpuSenderTxn::from_owned(
         Signature::new_unique(),
         remote_validator_identity1.pubkey(),
-        "helloworld".as_bytes(),
+        "helloworld".as_bytes().to_vec(),
     );
     // Send it to the first remote peer
     transaction_sink.send(txn).await.expect("send tx");
 
     // Send it to the second remote peer
-    let txn2 = TpuSenderTxn::from_slice(
+    let txn2 = TpuSenderTxn::from_owned(
         Signature::new_unique(),
         remote_validator_identity2.pubkey(),
-        "helloworld2".as_bytes(),
+        "helloworld2".as_bytes().to_vec(),
     );
     transaction_sink.send(txn2).await.expect("send tx");
 
@@ -587,13 +592,13 @@ async fn it_should_evict_connection() {
     let TpuSenderSessionContext {
         identity_updater: _,
         driver_tx_sink: transaction_sink,
-        driver_response_source: _,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
+        Some(Nothing),
     );
 
     let (tx, mut validator_conn_spy1) = mpsc::channel(100);
@@ -629,10 +634,10 @@ async fn it_should_evict_connection() {
         remote_validator_identity2.pubkey(),
         ReceiverStream::new(validator_rx2),
     );
-    let txn = TpuSenderTxn::from_slice(
+    let txn = TpuSenderTxn::from_owned(
         Signature::new_unique(),
         remote_validator_identity1.pubkey(),
-        "helloworld".as_bytes(),
+        "helloworld".as_bytes().to_vec(),
     );
     transaction_sink.send(txn).await.expect("send tx");
 
@@ -643,10 +648,10 @@ async fn it_should_evict_connection() {
     );
 
     // Now we send a tx to the second remote peer, this should evict the first connection
-    let txn2 = TpuSenderTxn::from_slice(
+    let txn2 = TpuSenderTxn::from_owned(
         Signature::new_unique(),
         remote_validator_identity2.pubkey(),
-        "helloworld2".as_bytes(),
+        "helloworld2".as_bytes().to_vec(),
     );
     transaction_sink.send(txn2).await.expect("send tx");
 
@@ -662,10 +667,10 @@ async fn it_should_evict_connection() {
     );
 
     // Finally, send it back to the first remote peer, this should evict the second connection
-    let txn3 = TpuSenderTxn::from_slice(
+    let txn3 = TpuSenderTxn::from_owned(
         Signature::new_unique(),
         remote_validator_identity1.pubkey(),
-        "helloworld3".as_bytes(),
+        "helloworld3".as_bytes().to_vec(),
     );
     transaction_sink.send(txn3).await.expect("send tx");
     let actual_remote_validator3 = stream_map.next().await.expect("next").0;
@@ -712,16 +717,17 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     };
     let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
 
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: _,
         driver_tx_sink: transaction_sink,
-        mut driver_response_source,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
     );
 
     let _rx_server_handle = tokio::spawn(async move {
@@ -736,7 +742,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     });
 
     let tx_sig = Signature::new_unique();
-    let txn = TpuSenderTxn::from_bytes(tx_sig, rx_server_identity.pubkey(), huge_payload.clone());
+    let txn = TpuSenderTxn::from_owned(tx_sig, rx_server_identity.pubkey(), huge_payload.clone());
     transaction_sink.send(txn).await.expect("send tx");
 
     // This handle should return after MAX_CONN_ATTEMPT attempts
@@ -744,7 +750,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     // let _ = rx_server_handle.await;
     tracing::trace!("rx_server_handle finished");
 
-    let resp = driver_response_source.recv().await.expect("recv response");
+    let resp = callback_rx.recv().await.expect("recv response");
     tracing::trace!("Received response: {:?}", resp);
 
     let TpuSenderResponse::TxFailed(actual_resp) = resp else {
@@ -776,16 +782,17 @@ async fn it_should_detect_remote_peer_address_change() {
         ..Default::default()
     };
 
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: _,
         driver_tx_sink: transaction_sink,
-        mut driver_response_source,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
     );
 
     let (tx, mut conn_spy_rx1) = mpsc::channel(100);
@@ -799,14 +806,16 @@ async fn it_should_detect_remote_peer_address_change() {
         notifier,
     );
     let tx_sig = Signature::new_unique();
-    let txn =
-        TpuSenderTxn::from_slice(tx_sig, rx_server_identity.pubkey(), "helloworld".as_bytes());
+    let txn = TpuSenderTxn::from_owned(
+        tx_sig,
+        rx_server_identity.pubkey(),
+        "helloworld".as_bytes().to_vec(),
+    );
     transaction_sink.send(txn).await.expect("send tx");
 
     let _ = client_rx1.recv().await.expect("recv");
 
-    let TpuSenderResponse::TxSent(actual_resp) =
-        driver_response_source.recv().await.expect("recv response")
+    let TpuSenderResponse::TxSent(actual_resp) = callback_rx.recv().await.expect("recv response")
     else {
         panic!("Expected TpuSenderResponse::TxSent, got something else");
     };
@@ -830,16 +839,15 @@ async fn it_should_detect_remote_peer_address_change() {
     assert!(conn_ended.result.is_err(), "connection should be evicted");
     // Send a new transaction to the new address
     let tx_sig2 = Signature::new_unique();
-    let txn2 = TpuSenderTxn::from_slice(
+    let txn2 = TpuSenderTxn::from_owned(
         tx_sig2,
         rx_server_identity.pubkey(),
-        "helloworld2".as_bytes(),
+        "helloworld2".as_bytes().to_vec(),
     );
     transaction_sink.send(txn2).await.expect("send tx");
 
     let _ = client_rx2.recv().await.expect("recv");
-    let TpuSenderResponse::TxSent(actual_resp) =
-        driver_response_source.recv().await.expect("recv response")
+    let TpuSenderResponse::TxSent(actual_resp) = callback_rx.recv().await.expect("recv response")
     else {
         panic!("Expected TpuSenderResponse::TxSent, got something else");
     };
@@ -936,13 +944,13 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
     let TpuSenderSessionContext {
         identity_updater: _,
         driver_tx_sink: transaction_sink,
-        driver_response_source: _,
         driver_join_handle: _,
     } = driver_spawner.spawn(
         gateway_kp.insecure_clone(),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::clone(&fake_predictor) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>,
+        Some(Nothing),
     );
 
     // Since we provided a predictor strategy and a lookahead, the gateway should preemptively connect to the upcoming leaders.
@@ -960,10 +968,10 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 
     for (i, validator_rx) in validator_rx_vec.iter_mut().enumerate() {
         let tx_sig = Signature::new_unique();
-        let txn = TpuSenderTxn::from_slice(
+        let txn = TpuSenderTxn::from_owned(
             tx_sig,
             validators_kp_vec[i].pubkey(),
-            format!("helloworld{i}").as_bytes(),
+            format!("helloworld{i}").as_bytes().to_vec(),
         );
         transaction_sink.send(txn).await.expect("send tx");
 

@@ -3,8 +3,8 @@ use {
         config::TpuSenderConfig,
         core::{
             ConnectionEvictionStrategy, LeaderTpuInfoService, TpuSenderDriverSpawner,
-            TpuSenderIdentityUpdater, TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn,
-            UpcomingLeaderPredictor, ValidatorStakeInfoService,
+            TpuSenderIdentityUpdater, TpuSenderResponseCallback, TpuSenderSessionContext,
+            TpuSenderTxn, UpcomingLeaderPredictor, ValidatorStakeInfoService,
         },
     },
     solana_keypair::Keypair,
@@ -74,15 +74,20 @@ impl TpuSender {
 /// Note: This function is `async` because it requires spawning async tasks for the TPU sender driver.
 /// This function is a building block for higher-level TPU client factories.
 ///
-pub async fn create_base_tpu_client(
+#[allow(clippy::too_many_arguments)]
+pub async fn create_base_tpu_client<CB>(
     config: TpuSenderConfig,
     initial_identity: Keypair,
     tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync>,
     stake_map_service: Arc<dyn ValidatorStakeInfoService + Send + Sync>,
     eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync>,
     leader_schedule_predictor: Arc<dyn UpcomingLeaderPredictor + Send + Sync>,
+    callback: Option<CB>,
     txn_capacity: usize,
-) -> (TpuSender, mpsc::UnboundedReceiver<TpuSenderResponse>) {
+) -> TpuSender
+where
+    CB: TpuSenderResponseCallback,
+{
     let spawner = TpuSenderDriverSpawner {
         stake_info_map: stake_map_service,
         leader_tpu_info_service: tpu_info_service,
@@ -94,19 +99,17 @@ pub async fn create_base_tpu_client(
         config,
         eviction_strategy,
         leader_schedule_predictor,
+        callback,
     );
 
     let TpuSenderSessionContext {
         identity_updater,
         driver_tx_sink,
-        driver_response_source,
         driver_join_handle: _,
     } = session;
 
-    let tpu_sender = TpuSender {
+    TpuSender {
         identity_updated: Arc::new(Mutex::new(identity_updater)),
         txn_tx: driver_tx_sink,
-    };
-
-    (tpu_sender, driver_response_source)
+    }
 }

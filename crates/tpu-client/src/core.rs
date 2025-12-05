@@ -1,53 +1,47 @@
 //!
-//! This module replaces the legacy `ConnectionCache` from Agave, which was known to over-create connections.
+//! Core types and traits for TPU client implementations.
 //!
-//! Following discussions with Anza, it was concluded that the previous implementation led to excessive fragmentation and increased ping overhead on the network.
+//! # Overview
 //!
-//! For a summary of the issues in the old implementation, see: https://gist.github.com/lvboudre/86e965389338758391f72834def72d9b
+//! This module contains the core event loop driver and related types for implementing
+//! a TPU sender using Tokio and QUIC via the `quinn` library.
 //!
-//! Rather than maintaining a "pool of connection pools" to remote peers, this module optimizes the use of QUIC connections
-//! by opening multiple streams over a single connection and multiplexing transactions across them.
+//! It defines the main driver struct `TpuSenderDriver`, which manages connections to remote peers,
+//! transaction sending workers, and leader prediction.
 //!
-//! The number of streams is limited based on the driver's stake.
+//! # Connection Eviction
 //!
-//! This design also decouples transaction sending from connection establishment. Since connections can drop during active streams,
-//! embedding reconnection logic directly into the sending path would introduce unnecessary complexity and responsibility creep.
+//! The driver supports connection eviction strategies via the [`crate::core::ConnectionEvictionStrategy`] trait.
+//! See [`crate::core::StakeBasedEvictionStrategy`] for a basic implementation.
 //!
-//! Connection lifecycle management—including establishment and failure recovery—is handled by `TpuSenderDriver`.
-//! Meanwhile, transaction sending is delegated to `QuicTxSenderWorker`.
+//! # Upcoming Leader Prediction
 //!
-//! `TpuSenderDriver` spawns a `QuicTxSenderWorker` for each remote peer. If a connection to a peer is lost,
-//! the corresponding worker will terminate and can be restarted by the runtime.
+//! The driver can predict upcoming leaders using the [`crate::core::UpcomingLeaderPredictor`] trait.
 //!
-//! Whether or not to re-establish a connection depends on the nature of the error encountered.
+//! # Callback Mechanism
 //!
-//! Compared to the old `ConnectionCache`, this module includes significantly more robust error handling.
-//! QUIC connections can fail for a wide variety of reasons, so it’s important to distinguish between recoverable and unrecoverable errors.
-//! Added error handlings includes:
-//!  1. Fatal errors like incompatible protocol versions or unsupported ALPN protocols will not trigger a reconnection.
-//!  2. Non-fatal errors like stream limit exceeded or connection closed will trigger a reconnection.
+//! The driver supports a callback mechanism for notifying the caller about transaction send results.
+//! See [`crate::core::TpuSenderResponseCallback`] for details.
 //!
-//! Unlike the deprecated `ConnectionCache`, the QUIC driver manage connections eviction which is an important
-//! part of the QUIC driver design as it allows to evict lesser staked connections in favor of higher staked connections in
-//! case of port exhaustion or maximum number of concurrent connections reached.
+//! ## Example
 //!
-//! The [`ConnectionEvictionStrategy`] trait is used to define the eviction strategy.
-//! The default eviction strategy is [`StakedBaseEvictionStrategy`], which evicts the lowest staked connections first AND least recently used peer.
+//! ```ignore
+//! #[derive(Clone)]
+//! struct LoggingCallback;
 //!
-//!
-//! Finally, QUIC-driver reuses the same [`quinn::Endpoint`] for multiple remote peers. Unlike `ConnectionCache`, which created a new endpoint for each remote peer,
-//! this should considerably reduce overhead as each [`quinn::Endpoint`] has its own event loop.
+//! impl TpuSenderResponseCallback for LoggingCallback {
+//!     fn call(&self, response: TpuSenderResponse) {
+//!         tracing::info!("Received TPU sender response: {:?}", response);
+//!     }
+//! }
+//! ```
 //!
 //!
-//! Note that this module does not implement retry logic beyond attempting to reconnect when appropriate and safe to do so.
-//!
-
 #[cfg(feature = "prometheus")]
 use crate::prom;
-#[cfg(feature = "bytes")]
-use bytes::Bytes;
 use {
     crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
+    bytes::Bytes,
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
@@ -98,7 +92,7 @@ pub(crate) enum ConnectingError {
     PeerNotInLeaderSchedule,
 }
 
-pub struct SentOk {
+pub(crate) struct SentOk {
     pub e2e_time: Duration,
 }
 
@@ -202,7 +196,7 @@ struct TxWorkerMeta {
 ///
 /// Tokio-based driver for tpu sender.
 ///
-pub(crate) struct TpuSenderDriver {
+pub(crate) struct TpuSenderDriver<CB> {
     ///
     /// The stake info map used to compute max stream limit
     ///
@@ -276,7 +270,7 @@ pub(crate) struct TpuSenderDriver {
     ///
     /// Outlet to send transaction "sent" status.
     ///
-    response_outlet: mpsc::UnboundedSender<TpuSenderResponse>,
+    response_outlet: Option<CB>,
 
     ///
     /// Command-and-control channel : low-bandwidth channel to receive driver configuration mutation.
@@ -356,30 +350,29 @@ where
     }
 }
 
-///
-/// The wire format of a transaction to be sent over the network.
-/// Covers must of the common cases to avoid unnecessary copies.
-///
-#[derive(Debug)]
-pub(crate) enum WireTxnFlavor {
-    Vec(Vec<u8>),
-    #[cfg(feature = "bytes")]
-    Bytes(Bytes),
-    Shared(Arc<[u8]>),
-    SharedVec(Arc<Vec<u8>>),
-}
+// ///
+// /// The wire format of a transaction to be sent over the network.
+// /// Covers must of the common cases to avoid unnecessary copies.
+// ///
+// #[derive(Debug)]
+// pub(crate) enum WireTxnFlavor {
+//     Vec(Vec<u8>),
+//     Bytes(Bytes),
+//     Shared(Arc<[u8]>),
+//     SharedVec(Arc<Vec<u8>>),
+// }
 
-impl AsRef<[u8]> for WireTxnFlavor {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            WireTxnFlavor::Vec(v) => v.as_ref(),
-            #[cfg(feature = "bytes")]
-            WireTxnFlavor::Bytes(b) => b.as_ref(),
-            WireTxnFlavor::Shared(s) => s.as_ref(),
-            WireTxnFlavor::SharedVec(sv) => sv.as_ref(),
-        }
-    }
-}
+// impl AsRef<[u8]> for WireTxnFlavor {
+//     fn as_ref(&self) -> &[u8] {
+//         match self {
+//             WireTxnFlavor::Vec(v) => v.as_ref(),
+//             #[cfg(feature = "bytes")]
+//             WireTxnFlavor::Bytes(b) => b.as_ref(),
+//             WireTxnFlavor::Shared(s) => s.as_ref(),
+//             WireTxnFlavor::SharedVec(sv) => sv.as_ref(),
+//         }
+//     }
+// }
 
 ///
 /// A transaction with destination details to be sent to a remote peer.
@@ -389,135 +382,238 @@ pub struct TpuSenderTxn {
     /// Id set by the sender to identify the transaction. Only meaningful to the sender.
     pub tx_sig: Signature,
     /// The wire format of the transaction.
-    pub(crate) wire: WireTxnFlavor,
+    pub(crate) wire: Bytes,
     /// The pubkey of the remote peer to send the transaction to.
     pub remote_peer: Pubkey,
 }
 
 impl TpuSenderTxn {
-    ///
-    /// Creates a new [`TpuSenderTxn`] from an owned Vec<u8> wire data.
-    ///
-    pub fn from_vec(tx_sig: Signature, remote_peer: Pubkey, wire: Vec<u8>) -> Self {
-        Self {
-            tx_sig,
-            wire: WireTxnFlavor::Vec(wire),
-            remote_peer,
-        }
-    }
+    // ///
+    // /// Creates a new [`TpuSenderTxn`] from an owned `Vec<u8>` wire data.
+    // ///
+    // pub fn from_vec(tx_sig: Signature, remote_peer: Pubkey, wire: Vec<u8>) -> Self {
+    //     Self {
+    //         tx_sig,
+    //         wire: WireTxnFlavor::Vec(wire),
+    //         remote_peer,
+    //     }
+    // }
 
-    ///
-    /// Creates a new [`TpuSenderTxn`] from a slice wire data (copy).
-    ///
-    pub fn from_slice<S: AsRef<[u8]>>(tx_sig: Signature, remote_peer: Pubkey, wire: S) -> Self {
-        Self {
-            tx_sig,
-            wire: WireTxnFlavor::Vec(wire.as_ref().to_vec()),
-            remote_peer,
-        }
-    }
+    // ///
+    // /// Creates a new [`TpuSenderTxn`] from a slice wire data (copy).
+    // ///
+    // pub fn from_slice<S: AsRef<[u8]>>(tx_sig: Signature, remote_peer: Pubkey, wire: S) -> Self {
+    //     Self {
+    //         tx_sig,
+    //         wire: WireTxnFlavor::Vec(wire.as_ref().to_vec()),
+    //         remote_peer,
+    //     }
+    // }
 
-    ///
-    /// Creates a new [`TpuSenderTxn`] from an owned slice wire data.
-    ///
-    pub fn from_owned_slice(tx_sig: Signature, remote_peer: Pubkey, wire: Box<[u8]>) -> Self {
-        Self {
-            tx_sig,
-            wire: WireTxnFlavor::Vec(Vec::from(wire)), // Convert Box<[u8]> to Vec<u8> (this is zero-copy)
-            remote_peer,
-        }
-    }
+    // ///
+    // /// Creates a new [`TpuSenderTxn`] from an owned slice wire data.
+    // ///
+    // pub fn from_owned_slice(tx_sig: Signature, remote_peer: Pubkey, wire: Box<[u8]>) -> Self {
+    //     Self {
+    //         tx_sig,
+    //         wire: WireTxnFlavor::Vec(Vec::from(wire)), // Convert Box<[u8]> to Vec<u8> (this is zero-copy)
+    //         remote_peer,
+    //     }
+    // }
 
-    ///
-    /// Creates a new [`TpuSenderTxn`] from a Bytes wire data.
-    ///
-    #[cfg(feature = "bytes")]
+    // ///
+    // /// Creates a new [`TpuSenderTxn`] from a Bytes wire data.
+    // ///
+    // #[cfg(feature = "bytes")]
+    // pub fn from_bytes(tx_sig: Signature, remote_peer: Pubkey, wire: Bytes) -> Self {
+    //     Self {
+    //         tx_sig,
+    //         wire: WireTxnFlavor::Bytes(wire),
+    //         remote_peer,
+    //     }
+    // }
+
+    // ///
+    // /// Creates a new [`TpuSenderTxn`] from a shared wire data.
+    // ///
+    // pub fn from_shared(tx_sig: Signature, remote_peer: Pubkey, wire: Arc<[u8]>) -> Self {
+    //     Self {
+    //         tx_sig,
+    //         wire: WireTxnFlavor::Shared(wire),
+    //         remote_peer,
+    //     }
+    // }
+
+    // ///
+    // /// Creates a new [`TpuSenderTxn`] from a shared `Vec<u8>` wire data.
+    // ///
+    // pub fn from_shared_vec(tx_sig: Signature, remote_peer: Pubkey, wire: Arc<Vec<u8>>) -> Self {
+    //     Self {
+    //         tx_sig,
+    //         wire: WireTxnFlavor::SharedVec(wire),
+    //         remote_peer,
+    //     }
+    // }
+
+    // pub fn wire(&self) -> &[u8] {
+    //     self.wire.as_ref()
+    // }
+
     pub fn from_bytes(tx_sig: Signature, remote_peer: Pubkey, wire: Bytes) -> Self {
         Self {
             tx_sig,
-            wire: WireTxnFlavor::Bytes(wire),
+            wire,
             remote_peer,
         }
     }
 
-    ///
-    /// Creates a new [`TpuSenderTxn`] from a shared wire data.
-    ///
-    pub fn from_shared(tx_sig: Signature, remote_peer: Pubkey, wire: Arc<[u8]>) -> Self {
+    pub fn from_owned<T>(tx_sig: Signature, remote_peer: Pubkey, wire: T) -> Self
+    where
+        T: AsRef<[u8]> + Send + 'static,
+    {
         Self {
             tx_sig,
-            wire: WireTxnFlavor::Shared(wire),
+            wire: Bytes::from_owner(wire),
             remote_peer,
         }
-    }
-
-    ///
-    /// Creates a new [`TpuSenderTxn`] from a shared Vec<u8> wire data.
-    ///
-    pub fn from_shared_vec(tx_sig: Signature, remote_peer: Pubkey, wire: Arc<Vec<u8>>) -> Self {
-        Self {
-            tx_sig,
-            wire: WireTxnFlavor::SharedVec(wire),
-            remote_peer,
-        }
-    }
-
-    pub fn wire(&self) -> &[u8] {
-        self.wire.as_ref()
     }
 }
 
+///
+/// Errors that can occur when sending a transaction.
+///
 #[derive(thiserror::Error, Debug)]
 pub enum SendTxError {
+    ///
+    /// [`ConnectionError`] from quinn when attempting to write to the stream.
     #[error(transparent)]
     ConnectionError(#[from] ConnectionError),
+    ///
+    /// [`WriteError`] from quinn when attempting to write to the stream.
+    ///
     #[error("Failed to send transaction to remote peer {0:?}")]
     StreamStopped(VarInt),
+    ///
+    /// Stream is closed or reset by the remote peer (dropped or disallow).
+    ///
+    /// # Note
+    ///
+    /// Stream may be closed primarly for two reason:
+    ///
+    /// 1. "dropped" : The remote peer has evicted this connection to make room for other peers.
+    /// 2. "disallow" : The remote peer is throttling our IP Address (too many connectino opened from same IP in the last throttling window).
+    ///
     #[error("stream is closed or reset by remote peer")]
     StreamClosed,
+    ///
+    /// 0-RTT rejected by remote peer.
+    ///
+    /// # Note
+    ///
+    /// As of Agave v3.0.x, this error should not be raised since agave does not support 0-RTT yet.
     #[error("0-RTT rejected by remote peer")]
     ZeroRttRejected,
 }
 
+///
+/// Information about a successful transaction send.
+///
+/// Note: The transaction may still fail to be processed by the remote peer.
+/// This struct only indicates that the transaction was successfully sent over quinn's internal stream buffers.
+///
 #[derive(Debug)]
 pub struct TxSent {
+    ///
+    /// The remote peer identity to which the transaction was sent.
+    ///
     pub remote_peer_identity: Pubkey,
+    ///
+    /// The remote peer socket address to which the transaction was sent.
+    ///
     pub remote_peer_addr: SocketAddr,
+    ///
+    /// The transaction signature.
+    ///
     pub tx_sig: Signature,
 }
 
+///
+/// Information about a failed transaction send attempt.
+///
 #[derive(Debug)]
 pub struct TxFailed {
+    ///
+    /// The remote peer identity to which the transaction send failed.
     pub remote_peer_identity: Pubkey,
+    ///
+    /// The remote peer socket address to which the transaction send failed.
+    ///
     pub remote_peer_addr: SocketAddr,
+    ///
+    /// The transaction signature.
+    ///
     pub tx_sig: Signature,
+    ///
+    /// Low-level reason for the failure.
+    ///
     pub failure_reason: String,
 }
 
+///
+/// Reason why a transaction was dropped.
+///
 #[derive(Clone, Debug, Display)]
 pub enum TxDropReason {
+    ///
+    /// The transaction queue for the remote peer reached its maximum capacity.
+    ///
     #[display("reached downstream transaction worker transaction queue capacity")]
     RateLimited,
+    ///
+    /// The remote peer is unreachable via its gossup TPU QUIC contact info.
+    ///
     #[display("remote peer is unreachable")]
     RemotePeerUnreachable,
+    ///
+    /// The internal event loop schedule dropped the transaction due to overload or out-dated information.
+    ///
     #[display("tx got drop by driver")]
     DropByDriver,
+    ///
+    /// The remote peer is being evicted to make room for higher staked connections.
+    ///
     #[display("remote peer is being evicted")]
     RemotePeerBeingEvicted,
 }
 
+///
+/// Information about dropped transactions.
+///
 #[derive(Debug)]
 pub struct TxDrop {
+    ///
+    /// The remote peer identity for which the transaction(s) were dropped.
+    ///
     pub remote_peer_identity: Pubkey,
-    // pub tx_sig: Signatu
+    ///
+    /// Reason why the transaction(s) were dropped.
+    ///
     pub drop_reason: TxDropReason,
+    ///
+    /// The list of dropped transactions with their attempt count.
     pub dropped_tx_vec: VecDeque<(TpuSenderTxn, usize)>,
 }
 
+///
+/// Response from the internal TPU sender.
+///
 #[derive(Debug)]
 pub enum TpuSenderResponse {
+    /// Transaction sucessfully written to a QUIC STREAM Frame.
     TxSent(TxSent),
+    /// Transaction failed to be sent after retries.
     TxFailed(TxFailed),
+    /// Transaction(s) dropped before being sent.
     TxDrop(TxDrop),
 }
 
@@ -541,7 +637,7 @@ struct ConnectingTask {
 /// since Solana does not rely on DNS names, but we need to provide a unique
 /// one to ensure that we present correct QUIC tokens to the correct server.
 ///
-/// Code taken from https://github.com/anza-xyz/agave/pull/7260
+/// Code taken from <https://github.com/anza-xyz/agave/pull/7260>
 pub fn socket_addr_to_quic_server_name(peer: SocketAddr) -> String {
     format!("{}.{}.sol", peer.ip(), peer.port())
 }
@@ -633,13 +729,13 @@ impl ConnectingTask {
 ///
 /// Although it might seem appealing to use multiple streams across different Tokio tasks on the same connection,
 /// benchmarks conducted by the Anza team indicate that this approach degrades performance rather than improving it.
-struct QuicTxSenderWorker {
+struct QuicTxSenderWorker<CB> {
     remote_peer: Pubkey,
     connection: Connection,
     /// The current client identity being used for the connection
     current_client_identity: Pubkey,
     incoming_rx: mpsc::Receiver<TpuSenderTxn>,
-    output_tx: mpsc::UnboundedSender<TpuSenderResponse>,
+    output_tx: Option<CB>,
     tx_queue: VecDeque<(TpuSenderTxn, usize)>,
     cancel_notify: Arc<Notify>,
     max_tx_attempt: NonZeroUsize,
@@ -666,7 +762,10 @@ struct TxSenderWorkerCompleted {
     canceled: bool,
 }
 
-impl QuicTxSenderWorker {
+impl<CB> QuicTxSenderWorker<CB>
+where
+    CB: TpuSenderResponseCallback,
+{
     async fn send_tx(&mut self, tx: &[u8]) -> Result<SentOk, SendTxError> {
         let t = Instant::now();
         let mut uni = self.connection.open_uni().await?;
@@ -688,7 +787,7 @@ impl QuicTxSenderWorker {
         tx: TpuSenderTxn,
         attempt: usize,
     ) -> Option<TxSenderWorkerError> {
-        let result = self.send_tx(tx.wire()).await;
+        let result = self.send_tx(tx.wire.as_ref()).await;
         let remote_addr = self.connection.remote_address();
         let tx_sig = tx.tx_sig;
         match result {
@@ -703,7 +802,9 @@ impl QuicTxSenderWorker {
                     remote_peer_addr: remote_addr,
                     tx_sig,
                 };
-                let _ = self.output_tx.send(TpuSenderResponse::TxSent(resp));
+                if let Some(callback) = &self.output_tx {
+                    callback.call(TpuSenderResponse::TxSent(resp));
+                }
                 #[cfg(feature = "prometheus")]
                 {
                     let path_stats = self.connection.stats().path;
@@ -741,7 +842,9 @@ impl QuicTxSenderWorker {
                         failure_reason: e.to_string(),
                         tx_sig,
                     };
-                    let _ = self.output_tx.send(TpuSenderResponse::TxFailed(resp));
+                    if let Some(callback) = &self.output_tx {
+                        callback.call(TpuSenderResponse::TxFailed(resp));
+                    }
                 } else {
                     tracing::trace!(
                         "Retrying to send transaction: {} to remote peer: {} after {} attempts: {:?}",
@@ -852,6 +955,7 @@ impl QuicTxSenderWorker {
 /// Connection eviction is called when the QUIC driver does not have a local port available
 /// to use for new QUIC connections.
 ///
+///
 pub trait ConnectionEvictionStrategy {
     ///
     /// Plan up to `plan_ahead_size` [`quinn::Connection`] to evicts.
@@ -883,6 +987,9 @@ pub trait ConnectionEvictionStrategy {
     ) -> Vec<Pubkey>;
 }
 
+///
+/// A set of remote peer identities sorted by their stake value.
+///
 #[derive(Debug, Default)]
 pub struct StakeSortedPeerSet {
     peer_stake_map: HashMap<Pubkey, u64 /* stake */>,
@@ -890,6 +997,13 @@ pub struct StakeSortedPeerSet {
 }
 
 impl StakeSortedPeerSet {
+    ///
+    /// Removes a peer from the set.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the peer was present and removed, `false` otherwise.
+    ///
     pub fn remove(&mut self, peer: &Pubkey) -> bool {
         if let Some(old_stake) = self.peer_stake_map.remove(peer) {
             let mut is_entry_empty = false;
@@ -908,6 +1022,13 @@ impl StakeSortedPeerSet {
         }
     }
 
+    ///
+    /// Inserts or updates a peer with the given stake.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the peer was already present and updated, `false` if it was newly inserted.
+    ///
     pub fn insert(&mut self, peer: Pubkey, stake: u64) -> bool {
         let already_present = self.remove(&peer);
         self.peer_stake_map.insert(peer, stake);
@@ -915,17 +1036,27 @@ impl StakeSortedPeerSet {
         already_present
     }
 
+    ///
+    /// Iterates over the set in ascending order of stake.
+    ///
     pub fn iter(&self) -> impl Iterator<Item = (u64, Pubkey)> {
         self.sorted_map
             .iter()
             .flat_map(|(stake, peers)| peers.iter().map(|peer| (*stake, *peer)))
     }
 
+    ///
+    /// Checks if the set is empty.
+    ///
     pub fn is_empty(&self) -> bool {
         self.peer_stake_map.is_empty()
     }
 }
 
+///
+/// An eviction strategy that evicts the lowest staked remote peer first,
+/// unless it has been used recently.
+///
 #[derive(Debug)]
 pub struct StakeBasedEvictionStrategy {
     ///
@@ -1027,7 +1158,10 @@ enum SpawnSource {
 ///   │  to peer "X"      │
 ///   └───────────────────┘
 ///
-impl TpuSenderDriver {
+impl<CB> TpuSenderDriver<CB>
+where
+    CB: TpuSenderResponseCallback + Send + Sync + 'static,
+{
     ///
     /// Spawns a "connecting" task to a remote peer.
     /// this is called when a transaction is received for a remote peer which does not have a worker installed yet.
@@ -1154,9 +1288,9 @@ impl TpuSenderDriver {
                 drop_reason: reason.clone(),
                 dropped_tx_vec: tx_queues,
             };
-            let _ = self
-                .response_outlet
-                .send(TpuSenderResponse::TxDrop(tx_drop));
+            if let Some(callback) = self.response_outlet.as_ref() {
+                callback.call(TpuSenderResponse::TxDrop(tx_drop));
+            }
         }
     }
 
@@ -1448,7 +1582,9 @@ impl TpuSenderDriver {
                         {
                             prom::incr_quic_gw_drop_tx_cnt(remote_peer_identity, 1);
                         }
-                        let _ = self.response_outlet.send(TpuSenderResponse::TxDrop(txdrop));
+                        if let Some(callback) = self.response_outlet.as_ref() {
+                            callback.call(TpuSenderResponse::TxDrop(txdrop));
+                        }
                     }
                     mpsc::error::TrySendError::Closed(tx) => {
                         tracing::debug!("Enqueuing tx: {tx_id:.10}",);
@@ -2135,6 +2271,9 @@ impl RemotePeerAddrWatcherEvLoop {
     }
 }
 
+///
+/// Context struct holding handles to interact with a spawned TPU sender driver.
+///
 pub struct TpuSenderSessionContext {
     ///
     /// The [`TpuSenderIdentityUpdater`] use to change the driver configured [`Keypair`].
@@ -2148,15 +2287,40 @@ pub struct TpuSenderSessionContext {
     pub driver_tx_sink: mpsc::Sender<TpuSenderTxn>,
 
     ///
-    /// Source emitting driver feedback response.
-    ///
-    pub driver_response_source: mpsc::UnboundedReceiver<TpuSenderResponse>,
-
-    ///
     /// Handle to tokio-based QUIC driver runtime.
     /// Dropping this handle does not interrupt the driver runtime.
     ///
     pub driver_join_handle: JoinHandle<()>,
+}
+
+///
+/// Callback trait to handle TPU [`TpuSenderResponse`]s.
+///
+/// # Clone + Safety
+///
+/// The implementee must be cloneable since each remote peer connection will hold its own instance
+/// and call it independently.
+///
+/// Lastly, the implementation is expected to be thread-safe since the callback can be called from multiple
+/// threads.
+///
+/// # Note
+/// A no-op implementation is provided via the [`Nothing`] struct.
+///
+pub trait TpuSenderResponseCallback: Clone + Send + Sync + 'static {
+    fn call(&self, response: TpuSenderResponse);
+}
+
+///
+/// A no-op implementation of [`TpuSenderResponseCallback`].
+///
+#[derive(Debug, Clone)]
+pub struct Nothing;
+
+impl TpuSenderResponseCallback for Nothing {
+    fn call(&self, _response: TpuSenderResponse) {
+        // Do nothing
+    }
 }
 
 ///
@@ -2172,41 +2336,67 @@ pub struct TpuSenderDriverSpawner {
 }
 
 impl TpuSenderDriverSpawner {
-    pub fn spawn_with_default(&self, identity: Keypair) -> TpuSenderSessionContext {
-        self.spawn(
+    pub fn spawn_default_with_callback<CB>(
+        &self,
+        identity: Keypair,
+        callback_sink: CB,
+    ) -> TpuSenderSessionContext
+    where
+        CB: TpuSenderResponseCallback,
+    {
+        self.spawn::<CB>(
             identity,
             Default::default(),
             Arc::new(StakeBasedEvictionStrategy::default()),
             Arc::new(IgnorantLeaderPredictor),
+            Some(callback_sink),
         )
     }
 
-    pub fn spawn(
+    pub fn spawn_with_default(&self, identity: Keypair) -> TpuSenderSessionContext {
+        self.spawn::<Nothing>(
+            identity,
+            Default::default(),
+            Arc::new(StakeBasedEvictionStrategy::default()),
+            Arc::new(IgnorantLeaderPredictor),
+            None,
+        )
+    }
+
+    pub fn spawn<CB>(
         &self,
         identity: Keypair,
         config: TpuSenderConfig,
         eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
         leader_schedule: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
-    ) -> TpuSenderSessionContext {
+        callback_sink: Option<CB>,
+    ) -> TpuSenderSessionContext
+    where
+        CB: TpuSenderResponseCallback,
+    {
         self.spawn_on(
             identity,
             config,
             eviction_strategy,
             leader_schedule,
+            callback_sink,
             tokio::runtime::Handle::current(),
         )
     }
 
-    pub fn spawn_on(
+    pub fn spawn_on<CB>(
         &self,
         identity: Keypair,
         config: TpuSenderConfig,
         eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
         leader_predictor: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
+        response_callback: Option<CB>,
         driver_rt: Handle,
-    ) -> TpuSenderSessionContext {
+    ) -> TpuSenderSessionContext
+    where
+        CB: TpuSenderResponseCallback,
+    {
         let (tx_inlet, tx_outlet) = mpsc::channel(self.driver_tx_channel_capacity);
-        let (driver_resp_tx, driver_resp_rx) = mpsc::unbounded_channel();
         let (driver_cnc_tx, driver_cnc_rx) = mpsc::channel(10);
 
         let (certificate, private_key) = new_dummy_x509_certificate(&identity);
@@ -2260,7 +2450,7 @@ impl TpuSenderDriverSpawner {
             config,
             client_certificate: cert,
             tx_inlet: tx_outlet,
-            response_outlet: driver_resp_tx,
+            response_outlet: response_callback.clone(),
             cnc_rx: driver_cnc_rx,
             tasklet: Default::default(),
             tasklet_meta: Default::default(),
@@ -2282,12 +2472,14 @@ impl TpuSenderDriverSpawner {
             identity_updater: TpuSenderIdentityUpdater {
                 cnc_tx: driver_cnc_tx,
             },
-            driver_response_source: driver_resp_rx,
             driver_join_handle: jh,
         }
     }
 }
 
+///
+/// Handle to update the identity used by the TPU sender driver.
+///
 pub struct TpuSenderIdentityUpdater {
     ///
     /// Command-and-control channel to send command to the QUIC driver
@@ -2323,6 +2515,16 @@ impl TpuSenderIdentityUpdater {
         update_identity.await
     }
 
+    ///
+    /// Changes the configured identity in the QUIC driver,
+    ///
+    /// waiting on the provided barrier before resuming driver operations.
+    ///
+    /// # Parameters
+    ///
+    /// - `identity`: The new identity to set in the driver.
+    /// - `barrier`: An `Arc<Barrier>` that the driver will wait on before resuming operations.
+    ///
     pub async fn update_identity_with_confirmation_barrier(
         &self,
         identity: Keypair,

@@ -348,10 +348,10 @@ async fn run_jet(
         Arc::new(IgnorantLeaderPredictor)
     };
 
+    let (gateway_callback_tx, gateway_response_source) = tokio::sync::mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: gateway_identity_updater,
         driver_tx_sink: gateway_tx_sink,
-        driver_response_source: gateway_response_source,
         driver_join_handle: gateway_join_handle,
     } = quic_gateway_spawner.spawn(
         initial_identity.insecure_clone(),
@@ -360,6 +360,7 @@ async fn run_jet(
             peer_idle_eviction_grace_period: config.quic.connection_idle_eviction_grace,
         }),
         connection_predictor,
+        Some(gateway_callback_tx),
     );
 
     let ah = tg.spawn(async move {
