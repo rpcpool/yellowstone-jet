@@ -30,7 +30,7 @@ yellowstone-jet --config yellowstone.yaml
 
 ## Config file
 
-A sample configuration file can be found [config.yml](https://github.com/rpcpool/yellowstone-jet/blob/main/config.yml)
+A sample configuration file can be found [config.yml](https://github.com/rpcpool/yellowstone-jet/blob/main/apps/jet/config.yml)
 
 ### Systemd
 
