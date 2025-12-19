@@ -49,7 +49,7 @@ use {
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         transaction_handler::TransactionHandler,
         transactions::{
-            AlwaysAllowTransactionPolicyStore, GrpcRootedTxReceiver, QuicGatewayBidi,
+            AlwaysAllowTransactionPolicyStore, FanoutConfig, GrpcRootedTxReceiver, QuicGatewayBidi,
             TransactionFanout, TransactionNoRetryScheduler, TransactionPolicyStore,
             TransactionRetryScheduler, TransactionRetrySchedulerConfig,
         },
@@ -405,12 +405,16 @@ async fn run_jet(
         jet_cancellation_token.child_token(),
     );
 
+    #[allow(deprecated)]
     let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
         shield_policy_store,
         scheduler_out,
         quic_gateway_bidi,
-        config.send_transaction_service.leader_forward_count,
+        config
+            .send_transaction_service
+            .leader_forward_count
+            .map_or(FanoutConfig::SmartFanout, FanoutConfig::Custom),
         config.send_transaction_service.extra_fanout,
         lewis_handler,
     );

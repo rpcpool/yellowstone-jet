@@ -14,7 +14,7 @@ use {
     },
     tokio::sync::mpsc,
     yellowstone_jet::transactions::{
-        AlwaysAllowTransactionPolicyStore, QuicGatewayBidi, SendTransactionRequest,
+        AlwaysAllowTransactionPolicyStore, FanoutConfig, QuicGatewayBidi, SendTransactionRequest,
         TransactionFanout, TransactionPolicyStore, UpcomingLeaderSchedule,
     },
     yellowstone_shield_store::CheckError,
@@ -93,12 +93,13 @@ async fn it_should_fanout_three_times() {
     ];
     fake_schedule.set_schedule(my_schedule.clone());
 
+    #[allow(deprecated)]
     let mut fanout = TransactionFanout::new(
         Arc::new(fake_schedule),
         Arc::new(AlwaysAllowTransactionPolicyStore),
         source,
         gateway_bidi,
-        FANOUT_FACTOR,
+        FanoutConfig::Custom(FANOUT_FACTOR),
         Vec::new(),
         None,
     );
@@ -153,12 +154,13 @@ async fn it_should_apply_shield_policies() {
         blacklist: vec![my_schedule[0], my_schedule[1]],
     };
 
+    #[allow(deprecated)]
     let mut fanout = TransactionFanout::new(
         Arc::new(fake_schedule),
         Arc::new(policy),
         source,
         gateway_bidi,
-        FANOUT_FACTOR,
+        FanoutConfig::Custom(FANOUT_FACTOR),
         Vec::new(),
         None,
     );
@@ -197,12 +199,13 @@ async fn it_should_support_extra_fanout() {
     ];
     fake_schedule.set_schedule(my_schedule.clone());
 
+    #[allow(deprecated)]
     let mut fanout = TransactionFanout::new(
         Arc::new(fake_schedule),
         Arc::new(AlwaysAllowTransactionPolicyStore),
         source,
         gateway_bidi,
-        FANOUT_FACTOR,
+        FanoutConfig::Custom(FANOUT_FACTOR),
         extra_fanout_pubkeys.clone(),
         None,
     );

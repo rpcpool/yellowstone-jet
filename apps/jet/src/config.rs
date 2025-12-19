@@ -325,8 +325,11 @@ pub struct ConfigSendTransactionService {
     pub stop_send_on_commitment: CommitmentLevel,
 
     /// The number of upcoming leaders to which to forward transactions
+    #[deprecated(
+        note = "jet already implements smart fanout based on slot timing. Having too high fanout creates jitter."
+    )]
     #[serde(default = "ConfigSendTransactionService::default_leader_forward_count")]
-    pub leader_forward_count: usize,
+    pub leader_forward_count: Option<usize>,
 
     /// Try to send transaction every retry_rate duration
     #[serde(
@@ -354,8 +357,8 @@ impl ConfigSendTransactionService {
         CommitmentLevel::Confirmed
     }
 
-    const fn default_leader_forward_count() -> usize {
-        4
+    const fn default_leader_forward_count() -> Option<usize> {
+        None
     }
 
     const fn default_retry_rate() -> Duration {

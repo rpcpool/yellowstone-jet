@@ -201,14 +201,6 @@ pub enum CreateTpuSenderError {
 ///     
 /// ```
 ///
-/// # Sends to the current leader and the next N-1 leaders in the schedule
-///
-/// ```ignore
-///
-/// let n = 3; // send to current leader + next 2 leaders
-///
-/// sender.send_txn_fanout(signature, bincoded_txn, n).await;
-/// ```
 ///
 /// # Callbacks on TPU responses
 ///
@@ -495,27 +487,22 @@ impl YellowstoneTpuSender {
     }
 
     ///
-    /// Sends a transaction to the TPUs of the next `n` leaders (include the current leader).
+    /// Sends a transaction to the TPUs of the current leader and to the next leader iff near the slot boundary (2/4 slots).
     ///
     /// # Arguments
     ///
     /// * `sig` - The [`Signature`] identifying the transaction.
     /// * `txn` - The bincoded transaction slice to send.
-    /// * `n` - The number of upcoming leaders to send the transaction to. Examples include:
-    ///     - `n = 1`: send to the current leader only.
-    ///     - `n = 2`: send to the current leader and the next leader in the schedule
-    ///     - `n = 3`: send to the current leader and the next two leaders in the schedule
     /// * `blocklist` - (Optional) [`Blocklist`], if provided, prevent a transaction from being sent to a disallow remote peer.
     ///
     /// # Note
     ///
     /// The fanout succeed if the sender can schedule at least one send to a leader.
     ///
-    pub async fn send_txn_fanout_with_blocklist<T, B>(
+    async fn send_txn_fanout_with_blocklist<T, B>(
         &mut self,
         sig: Signature,
         txn: T,
-        n: usize,
         blocklist: Option<B>,
     ) -> Result<(), SendError>
     where
@@ -534,6 +521,10 @@ impl YellowstoneTpuSender {
         };
         let reminder = current_slot % 4;
         let floor_leader_boundary = current_slot.saturating_sub(reminder);
+
+        // Each leader gets 4 slots
+        // If we are near the boundary (2/4), we need to send to the next leader as well
+        let n = if reminder >= 2 { 2 } else { 1 };
 
         let mut blocked_cnt = 0;
         let result = (0..n)
@@ -575,19 +566,6 @@ impl YellowstoneTpuSender {
                 txn: wire_txn,
             }),
         }
-    }
-
-    pub async fn send_txn_fanout<T>(
-        &mut self,
-        sig: Signature,
-        txn: T,
-        n: usize,
-    ) -> Result<(), SendError>
-    where
-        T: AsRef<[u8]> + Send + 'static,
-    {
-        self.send_txn_fanout_with_blocklist::<T, NoBlocklist>(sig, txn, n, None)
-            .await
     }
 
     ///
@@ -637,7 +615,7 @@ impl YellowstoneTpuSender {
         T: AsRef<[u8]> + Send + 'static,
         B: Blocklist,
     {
-        self.send_txn_fanout_with_blocklist(sig, txn, 1, blocklist)
+        self.send_txn_fanout_with_blocklist(sig, txn, blocklist)
             .await
     }
 
@@ -666,7 +644,7 @@ impl YellowstoneTpuSender {
     where
         T: AsRef<[u8]> + Send + 'static,
     {
-        self.send_txn_fanout_with_blocklist(sig, txn, 1, Some(shield))
+        self.send_txn_fanout_with_blocklist(sig, txn, Some(shield))
             .await
     }
 
