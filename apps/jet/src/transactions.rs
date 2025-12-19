@@ -537,6 +537,14 @@ impl TransactionRetryScheduler {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FanoutConfig {
+    #[deprecated(note = "use SmartFanout instead")]
+    Custom(usize),
+    #[default]
+    SmartFanout,
+}
+
 ///
 /// Foward transactions to N validators.
 ///
@@ -550,10 +558,10 @@ pub struct TransactionFanout {
     tpu_sender: mpsc::Sender<TpuSenderTxn>,
     gateway_response_rx: mpsc::UnboundedReceiver<TpuSenderResponse>,
     incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
-    leader_fwd_count: usize,
     transaction_send_set: JoinSet<Result<Signature, SendTransactionError>>,
     transaction_send_set_meta: HashMap<task::Id, Signature>,
     inflight_transactions: HashSet<Signature>,
+    fanout_config: FanoutConfig,
     lewis_handler: Option<Arc<LewisEventHandler>>,
     extra_fwd: Arc<[Pubkey]>,
 }
@@ -626,8 +634,8 @@ impl TransactionFanout {
         policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
         incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
         quic_gateway_bidi: QuicGatewayBidi,
-        leader_fwd_count: usize,
         // Extra remote peer to forward too
+        fanout_config: FanoutConfig,
         extra_fwd: Vec<Pubkey>,
         lewis_handler: Option<Arc<LewisEventHandler>>,
     ) -> Self {
@@ -637,12 +645,12 @@ impl TransactionFanout {
             tpu_sender: quic_gateway_bidi.sink,
             gateway_response_rx: quic_gateway_bidi.source,
             incoming_transaction_rx,
-            leader_fwd_count,
             transaction_send_set: JoinSet::new(),
             transaction_send_set_meta: HashMap::new(),
             inflight_transactions: HashSet::new(),
             lewis_handler,
             extra_fwd: extra_fwd.into(),
+            fanout_config,
         }
     }
 
@@ -745,17 +753,27 @@ impl TransactionFanout {
         self.inflight_transactions.insert(tx.signature);
         let leader_schedule_service = Arc::clone(&self.leader_schedule_service);
         let policy_store_service = Arc::clone(&self.policy_store_service);
-        let leader_fwd = self.leader_fwd_count;
         let tpu_sink = self.tpu_sender.clone();
         let signature = tx.signature;
         let lewis_handler = self.lewis_handler.clone();
         let extra_fwd = Arc::clone(&self.extra_fwd);
-
+        let fanout_config = self.fanout_config;
         let send_fut = async move {
-            let next_leaders = leader_schedule_service.leader_lookahead(leader_fwd);
             let current_slot = leader_schedule_service.get_current_slot();
+            #[allow(deprecated)]
+            let fanout_count = match fanout_config {
+                FanoutConfig::Custom(count) => count.max(1),
+                FanoutConfig::SmartFanout => {
+                    // We only fanout when we reached half of the current leader window.
+                    let reminder = current_slot % 4;
+                    if reminder < 2 { 1 } else { 2 }
+                }
+            };
+            let next_leaders = leader_schedule_service.leader_lookahead(fanout_count);
+            let mut sent_mask = Vec::with_capacity(next_leaders.capacity());
+            sent_mask.resize(next_leaders.len(), false);
             let txn_wire = Bytes::from_owner(tx.wire_transaction);
-            for dest in next_leaders.iter() {
+            for (i, dest) in next_leaders.iter().enumerate() {
                 if !policy_store_service.is_allowed(&tx.policies, dest)? {
                     // Report skip to Lewis
                     if let Some(handler) = &lewis_handler {
@@ -765,6 +783,7 @@ impl TransactionFanout {
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
                     continue;
                 }
+                sent_mask[i] = true;
                 let tpu_txn = TpuSenderTxn::from_bytes(tx.signature, *dest, txn_wire.clone());
                 tpu_sink
                     .send(tpu_txn)
@@ -773,10 +792,16 @@ impl TransactionFanout {
             }
 
             for extra in extra_fwd.iter() {
-                if next_leaders.contains(extra) {
-                    // We don't send it twice.
+                let already_sent = next_leaders
+                    .iter()
+                    .zip(sent_mask.iter())
+                    .any(|(leader, &sent)| sent && (leader == extra));
+
+                if already_sent {
+                    // We don't need to send again to this extra peer
                     continue;
                 }
+
                 let tpu_txn = TpuSenderTxn::from_bytes(tx.signature, *extra, txn_wire.clone());
 
                 tpu_sink

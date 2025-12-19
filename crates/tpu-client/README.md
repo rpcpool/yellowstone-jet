@@ -6,7 +6,7 @@ This library is a standalone port of the TPU-QUIC client code ported from [Yello
 
 When you enable `yellowstone-grpc` feature-flag, you will have access to a the _smart_ `YellowstoneTpuSender` which handles:
 
-- Connection lifecycke: connect/disconnect
+- Connection lifecycle: connect/disconnect
 - Slot tracking
 - Leader tracking and upcoming schedules
 - Connection evictions

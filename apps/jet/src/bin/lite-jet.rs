@@ -442,7 +442,7 @@ pub async fn tpu_sender_loop(
         });
 
         let result = tpu_sender
-            .send_txn_fanout_with_blocklist(signature, wire_transaction, 2, blocklist)
+            .send_txn_with_blocklist(signature, wire_transaction, blocklist)
             .await;
         if let Err(e) = result {
             tracing::error!(
