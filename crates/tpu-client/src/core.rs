@@ -349,31 +349,6 @@ where
             .or_else(|| self.other.get_quic_tpu_fwd_socket_addr(leader_pubkey))
     }
 }
-
-// ///
-// /// The wire format of a transaction to be sent over the network.
-// /// Covers must of the common cases to avoid unnecessary copies.
-// ///
-// #[derive(Debug)]
-// pub(crate) enum WireTxnFlavor {
-//     Vec(Vec<u8>),
-//     Bytes(Bytes),
-//     Shared(Arc<[u8]>),
-//     SharedVec(Arc<Vec<u8>>),
-// }
-
-// impl AsRef<[u8]> for WireTxnFlavor {
-//     fn as_ref(&self) -> &[u8] {
-//         match self {
-//             WireTxnFlavor::Vec(v) => v.as_ref(),
-//             #[cfg(feature = "bytes")]
-//             WireTxnFlavor::Bytes(b) => b.as_ref(),
-//             WireTxnFlavor::Shared(s) => s.as_ref(),
-//             WireTxnFlavor::SharedVec(sv) => sv.as_ref(),
-//         }
-//     }
-// }
-
 ///
 /// A transaction with destination details to be sent to a remote peer.
 ///
@@ -388,77 +363,6 @@ pub struct TpuSenderTxn {
 }
 
 impl TpuSenderTxn {
-    // ///
-    // /// Creates a new [`TpuSenderTxn`] from an owned `Vec<u8>` wire data.
-    // ///
-    // pub fn from_vec(tx_sig: Signature, remote_peer: Pubkey, wire: Vec<u8>) -> Self {
-    //     Self {
-    //         tx_sig,
-    //         wire: WireTxnFlavor::Vec(wire),
-    //         remote_peer,
-    //     }
-    // }
-
-    // ///
-    // /// Creates a new [`TpuSenderTxn`] from a slice wire data (copy).
-    // ///
-    // pub fn from_slice<S: AsRef<[u8]>>(tx_sig: Signature, remote_peer: Pubkey, wire: S) -> Self {
-    //     Self {
-    //         tx_sig,
-    //         wire: WireTxnFlavor::Vec(wire.as_ref().to_vec()),
-    //         remote_peer,
-    //     }
-    // }
-
-    // ///
-    // /// Creates a new [`TpuSenderTxn`] from an owned slice wire data.
-    // ///
-    // pub fn from_owned_slice(tx_sig: Signature, remote_peer: Pubkey, wire: Box<[u8]>) -> Self {
-    //     Self {
-    //         tx_sig,
-    //         wire: WireTxnFlavor::Vec(Vec::from(wire)), // Convert Box<[u8]> to Vec<u8> (this is zero-copy)
-    //         remote_peer,
-    //     }
-    // }
-
-    // ///
-    // /// Creates a new [`TpuSenderTxn`] from a Bytes wire data.
-    // ///
-    // #[cfg(feature = "bytes")]
-    // pub fn from_bytes(tx_sig: Signature, remote_peer: Pubkey, wire: Bytes) -> Self {
-    //     Self {
-    //         tx_sig,
-    //         wire: WireTxnFlavor::Bytes(wire),
-    //         remote_peer,
-    //     }
-    // }
-
-    // ///
-    // /// Creates a new [`TpuSenderTxn`] from a shared wire data.
-    // ///
-    // pub fn from_shared(tx_sig: Signature, remote_peer: Pubkey, wire: Arc<[u8]>) -> Self {
-    //     Self {
-    //         tx_sig,
-    //         wire: WireTxnFlavor::Shared(wire),
-    //         remote_peer,
-    //     }
-    // }
-
-    // ///
-    // /// Creates a new [`TpuSenderTxn`] from a shared `Vec<u8>` wire data.
-    // ///
-    // pub fn from_shared_vec(tx_sig: Signature, remote_peer: Pubkey, wire: Arc<Vec<u8>>) -> Self {
-    //     Self {
-    //         tx_sig,
-    //         wire: WireTxnFlavor::SharedVec(wire),
-    //         remote_peer,
-    //     }
-    // }
-
-    // pub fn wire(&self) -> &[u8] {
-    //     self.wire.as_ref()
-    // }
-
     pub fn from_bytes(tx_sig: Signature, remote_peer: Pubkey, wire: Bytes) -> Self {
         Self {
             tx_sig,
