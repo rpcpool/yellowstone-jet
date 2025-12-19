@@ -17,7 +17,8 @@ jobs:
       matrix:
         os: [ubuntu-22.04]
 
-    runs-on: ["${{ matrix.os }}"]
+    runs-on:
+      group: Public
     steps:
       - uses: actions/checkout@v4
         with:
