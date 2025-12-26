@@ -2,13 +2,3 @@
 all-features = true
 
 [advisories]
-ignore = [
-    # curve25519-dalek vulnerability
-    "RUSTSEC-2024-0344",
-
-    # web-time not maintained
-    "RUSTSEC-2024-0384",
-
-    # ed25519-dalek 1.0.1
-    "RUSTSEC-2022-0093",
-]
