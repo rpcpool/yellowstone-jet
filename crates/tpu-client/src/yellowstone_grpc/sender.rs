@@ -39,6 +39,9 @@ use {
     yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcBuilder, GeyserGrpcClient},
 };
 
+#[cfg(feature = "prometheus")]
+use crate::prom;
+
 pub const DEFAULT_TPU_SENDER_CHANNEL_CAPACITY: usize = 100_000;
 
 ///
@@ -324,6 +327,10 @@ pub enum SendErrorKind {
     #[display("managed leader schedule disconnected")]
     ManagedLeaderScheduleDisconnected,
     ///
+    /// The leader schedule did not contain the requested slot boundary.
+    #[display("unknown leader for slot boundary {slot_boundary}")]
+    UnknownLeader { slot_boundary: u64 },
+    ///
     /// No remote peers currently matched the user-provided `Blocklist`.
     #[display("destination(s) blocked")]
     RemotePeerBlocked,
@@ -437,6 +444,52 @@ impl Blocklist for ShieldBlockList<'_> {
     }
 }
 
+fn collect_leaders<B, F>(
+    current_slot: u64,
+    floor_leader_boundary: u64,
+    n: usize,
+    blocklist: Option<&B>,
+    mut leader_lookup: F,
+) -> Result<(Vec<Pubkey>, usize), SendErrorKind>
+where
+    B: Blocklist,
+    F: FnMut(u64) -> Result<Option<Pubkey>, SendErrorKind>,
+{
+    let mut blocked_cnt = 0;
+    let mut leaders = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let leader_slot_boundary = floor_leader_boundary + (i * 4) as u64;
+        match leader_lookup(leader_slot_boundary)? {
+            Some(leader) => {
+                if let Some(blocklist) = blocklist {
+                    if blocklist.is_blocked(&leader) {
+                        blocked_cnt += 1;
+                        continue;
+                    }
+                }
+                leaders.push(leader);
+            }
+            None => {
+                #[cfg(feature = "prometheus")]
+                prom::incr_unknown_leader_total();
+
+                tracing::warn!(
+                    current_slot,
+                    leader_slot_boundary,
+                    "unknown leader for slot boundary"
+                );
+
+                return Err(SendErrorKind::UnknownLeader {
+                    slot_boundary: leader_slot_boundary,
+                });
+            }
+        }
+    }
+
+    Ok((leaders, blocked_cnt))
+}
+
 impl YellowstoneTpuSender {
     ///
     /// Sends a transaction to the specified destinations.
@@ -526,45 +579,33 @@ impl YellowstoneTpuSender {
         // If we are near the boundary (2/4), we need to send to the next leader as well
         let n = if reminder >= 2 { 2 } else { 1 };
 
-        let mut blocked_cnt = 0;
-        let result = (0..n)
-            .map(|i| floor_leader_boundary + (i * 4) as u64)
-            .map(|leader_slot_boundary| self.leader_schedule.get_leader(leader_slot_boundary))
-            .filter_map(|res| match res {
-                Ok(None) => {
-                    panic!("unknown leader for slot boundary {}", floor_leader_boundary);
-                }
-                Ok(Some(leader)) => {
-                    if let Some(blocklist) = &blocklist {
-                        if blocklist.is_blocked(&leader) {
-                            blocked_cnt += 1;
-                            None
-                        } else {
-                            Some(Ok(leader))
-                        }
-                    } else {
-                        Some(Ok(leader))
-                    }
-                }
-                Err(_) => Some(Err(SendErrorKind::ManagedLeaderScheduleDisconnected)),
-            })
-            .collect::<Result<Vec<_>, SendErrorKind>>();
-
-        match result {
-            Ok(leaders) => {
-                if leaders.is_empty() && blocked_cnt > 0 {
-                    Err(SendError {
-                        kind: SendErrorKind::RemotePeerBlocked,
-                        txn: wire_txn,
-                    })
-                } else {
-                    self.send_txn_many_dest(sig, wire_txn, &leaders).await
-                }
+        let (leaders, blocked_cnt) = match collect_leaders(
+            current_slot,
+            floor_leader_boundary,
+            n,
+            blocklist.as_ref(),
+            |leader_slot_boundary| {
+                self.leader_schedule
+                    .get_leader(leader_slot_boundary)
+                    .map_err(|_| SendErrorKind::ManagedLeaderScheduleDisconnected)
+            },
+        ) {
+            Ok(result) => result,
+            Err(err_kind) => {
+                return Err(SendError {
+                    kind: err_kind,
+                    txn: wire_txn,
+                });
             }
-            Err(err_kind) => Err(SendError {
-                kind: err_kind,
+        };
+
+        if leaders.is_empty() && blocked_cnt > 0 {
+            Err(SendError {
+                kind: SendErrorKind::RemotePeerBlocked,
                 txn: wire_txn,
-            }),
+            })
+        } else {
+            self.send_txn_many_dest(sig, wire_txn, &leaders).await
         }
     }
 
@@ -877,5 +918,60 @@ async fn yellowstone_tpu_deps_overseer(
 impl TpuSenderResponseCallback for UnboundedSender<TpuSenderResponse> {
     fn call(&self, response: TpuSenderResponse) {
         let _ = self.send(response);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn returns_unknown_leader_on_missing_schedule_entry() {
+        let current_slot = 8u64;
+        let floor_leader_boundary = current_slot.saturating_sub(current_slot % 4);
+
+        let result = collect_leaders::<Vec<Pubkey>, _>(
+            current_slot,
+            floor_leader_boundary,
+            1,
+            None::<&Vec<Pubkey>>,
+            |_slot_boundary| Ok(None),
+        );
+
+        match result {
+            Err(SendErrorKind::UnknownLeader { slot_boundary }) => {
+                assert_eq!(slot_boundary, floor_leader_boundary);
+            }
+            other => panic!("expected unknown leader error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn returns_unknown_leader_when_fanout_reaches_next_boundary() {
+        let current_slot = 7u64; // remainder 3 triggers fanout to two leaders
+        let floor_leader_boundary = current_slot.saturating_sub(current_slot % 4);
+        let next_boundary = floor_leader_boundary + 4;
+        let known_leader = Pubkey::new_from_array([1u8; 32]);
+
+        let result = collect_leaders::<Vec<Pubkey>, _>(
+            current_slot,
+            floor_leader_boundary,
+            2,
+            None::<&Vec<Pubkey>>,
+            |slot_boundary| {
+                if slot_boundary == floor_leader_boundary {
+                    Ok(Some(known_leader))
+                } else {
+                    Ok(None)
+                }
+            },
+        );
+
+        match result {
+            Err(SendErrorKind::UnknownLeader { slot_boundary }) => {
+                assert_eq!(slot_boundary, next_boundary);
+            }
+            other => panic!("expected unknown leader error for next boundary, got {other:?}"),
+        }
     }
 }

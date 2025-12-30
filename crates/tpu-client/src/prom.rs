@@ -138,12 +138,21 @@ lazy_static::lazy_static! {
         &["remote_peer"]
     ).unwrap();
 
+    static ref UNKNOWN_LEADER_TOTAL: IntCounter = IntCounter::new(
+        "unknown_leader_total",
+        "Number of times leader lookup returned no leader for a slot boundary"
+    ).unwrap();
+
 }
 
 pub fn incr_quic_gw_tx_relayed_to_worker(remote_peer: Pubkey) {
     QUIC_GW_TX_RELAYED_TO_WORKER_CNT
         .with_label_values(&[&remote_peer.to_string()])
         .inc();
+}
+
+pub fn incr_unknown_leader_total() {
+    UNKNOWN_LEADER_TOTAL.inc();
 }
 
 pub fn incr_quic_gw_worker_tx_process_cnt(remote_peer: Pubkey, status: &str) {
