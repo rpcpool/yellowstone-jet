@@ -36,38 +36,53 @@ A sample configuration file can be found [config.yml](https://github.com/rpcpool
 
 Running Jet as a service under SystemD is our recommended approach. A sample systemd file:
 
-```
+```ini
 [Unit]
 Description=Yellowstone Jet transaction forwarder
 After=network-online.target
-StartLimitInterval=0
+Wants=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=yellowstone-jet
-Group=yellowstone-jet
-PermissionsStartOnly=true
-ExecStart=/usr/local/bin/yellowstone-jet --config /etc/yellowstone-jet.yml
+DynamicUser=yes
+ConfigDirectory=yellowstone-jet
+
+ExecStart=/usr/local/bin/yellowstone-jet --config /etc/yellowstone-jet/config.yml
 
 Environment=RUST_LOG="warn"
-
-SyslogIdentifier=yellowstone-jet
-KillMode=process
 Restart=always
 RestartSec=5
 
+# Resource Limits
 LimitNOFILE=700000
 LimitNPROC=700000
 
-LockPersonality=true
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-RemoveIPC=true
-RestrictSUIDSGID=true
+# File System Sandboxing
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+PrivateUsers=yes
 
-ProtectSystem=full
+# Privilege Escalation & System Calls
+NoNewPrivileges=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
