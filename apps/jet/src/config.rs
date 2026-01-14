@@ -556,7 +556,7 @@ where
                 port,
             ))),
             Value::Env { env } => std::env::var(env)
-                .map_err(|error| format!("{:}", error))
+                .map_err(|error| format!("{error:}"))
                 .and_then(|value| match value.parse() {
                     Ok(addr) => Ok(addr),
                     Err(error) => match value.parse() {
@@ -564,7 +564,7 @@ where
                             Ipv4Addr::new(0, 0, 0, 0),
                             port,
                         ))),
-                        Err(_) => Err(format!("{:?}", error)),
+                        Err(_) => Err(format!("{error:?}")),
                     },
                 })
                 .map_err(de::Error::custom),

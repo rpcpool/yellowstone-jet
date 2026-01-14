@@ -154,8 +154,7 @@ async fn main() {
 
         writeln!(
             &mut out,
-            "current_slot: {}, leader: {}, upcoming leaders: {:?}",
-            current_slot, leader, upcoming_leaders
+            "current_slot: {current_slot}, leader: {leader}, upcoming leaders: {upcoming_leaders:?}"
         )
         .expect("writeln");
     }

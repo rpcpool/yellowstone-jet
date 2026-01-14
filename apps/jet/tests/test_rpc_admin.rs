@@ -108,7 +108,7 @@ pub async fn set_identity_if_expected() {
     .await;
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr))
+        .build(format!("http://{rpc_addr}"))
         .expect("Error build rpc client");
 
     let client2 = client.clone();
@@ -156,7 +156,7 @@ pub async fn set_identity_wrong_keypair() {
     .await;
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr))
+        .build(format!("http://{rpc_addr}"))
         .expect("Error build rpc client");
 
     let invalid_kp = Keypair::new();
@@ -199,7 +199,7 @@ pub async fn set_identity_from_file() {
     .await;
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr))
+        .build(format!("http://{rpc_addr}"))
         .expect("Error build rpc client");
 
     let client2 = client.clone();
@@ -247,7 +247,7 @@ pub async fn reset_identity_to_random() {
     .await;
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr))
+        .build(format!("http://{rpc_addr}"))
         .expect("Error build rpc client");
 
     let client2 = client.clone();
@@ -304,7 +304,7 @@ pub async fn test_get_latest_slot() {
     .await;
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr))
+        .build(format!("http://{rpc_addr}"))
         .expect("Error build rpc client");
 
     let latest_slot = client
@@ -375,7 +375,7 @@ pub async fn test_get_latest_slot_updates() {
     .await;
 
     let client = HttpClientBuilder::default()
-        .build(format!("http://{}", rpc_addr))
+        .build(format!("http://{rpc_addr}"))
         .expect("Error build rpc client");
 
     // Verify initial slot

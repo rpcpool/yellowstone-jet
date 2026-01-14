@@ -99,7 +99,7 @@ async fn main() {
             }
         }
         let slot = atomic_slot_tracker.load().expect("load");
-        writeln!(&mut out, "Current Yellowstone slot: {}", slot).expect("write");
+        writeln!(&mut out, "Current Yellowstone slot: {slot}").expect("write");
         tracing::info!("Current Yellowstone slot: {}", slot);
     }
 }

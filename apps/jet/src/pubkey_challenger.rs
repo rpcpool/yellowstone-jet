@@ -244,7 +244,7 @@ impl OneTimeAuthTokenStore for InMemoryTokenStore {
         let expire_at = Instant::now() + ttl;
         let mut inner = self.inner.lock().await;
         if let Some(old) = inner.insert(token.clone(), (pubkey, expire_at)) {
-            panic!("Token collision: with {:?}", old);
+            panic!("Token collision: with {old:?}");
         }
 
         // Here we garbage collect expired tokens

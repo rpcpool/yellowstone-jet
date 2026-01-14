@@ -109,7 +109,7 @@ impl Config {
         let path = path.as_ref();
         let contents = fs::read(path)
             .await
-            .with_context(|| format!("failed to read config from {:?}", path))?;
+            .with_context(|| format!("failed to read config from {path:?}"))?;
         Ok(serde_yaml::from_slice(&contents)?)
     }
 
@@ -208,7 +208,7 @@ impl TransactionSender {
                             encoded_tx,
                             {
                                 "skipPreflight": config.config.skip_preflight,
-                                "preflightCommitment": config.config.preflight_commitment.map(|c| format!("{:?}", c).to_lowercase()),
+                                "preflightCommitment": config.config.preflight_commitment.map(|c| format!("{c:?}").to_lowercase()),
                                 "encoding": "base64",
                                 "maxRetries": config.config.max_retries,
                                 "minContextSlot": config.config.min_context_slot,
@@ -227,7 +227,7 @@ impl TransactionSender {
                         .await?;
 
                     if let Some(err) = response.get("error") {
-                        return Err(anyhow::anyhow!("RPC error: {:?}", err));
+                        return Err(anyhow::anyhow!("RPC error: {err:?}"));
                     }
 
                     if let Some(result) = response.get("result") {
