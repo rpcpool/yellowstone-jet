@@ -142,7 +142,7 @@ impl IncrementalBackoff {
         }
     }
 
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.retries = None;
     }
 

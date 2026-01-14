@@ -198,7 +198,7 @@ pub enum CreateTpuSenderError {
 /// ];
 ///
 /// sender.send_txn_many_dest(signature, bincoded_txn, dests).await;
-///     
+///
 /// ```
 ///
 ///
@@ -532,7 +532,7 @@ impl YellowstoneTpuSender {
             .map(|leader_slot_boundary| self.leader_schedule.get_leader(leader_slot_boundary))
             .filter_map(|res| match res {
                 Ok(None) => {
-                    panic!("unknown leader for slot boundary {}", floor_leader_boundary);
+                    panic!("unknown leader for slot boundary {floor_leader_boundary}");
                 }
                 Ok(Some(leader)) => {
                     if let Some(blocklist) = &blocklist {

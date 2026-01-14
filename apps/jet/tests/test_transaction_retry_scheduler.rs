@@ -156,7 +156,7 @@ async fn it_should_not_attempt_invalid_transaction() {
         .await
         .expect("Expected valid transaction in dead letter queue");
 
-    println!("dlq_ev: {:?}", dlq_ev);
+    println!("dlq_ev: {dlq_ev:?}");
     assert!(matches!(
         dlq_ev,
         TransactionRetrySchedulerDlqEvent::ReachedMaxProcessingAge(_)

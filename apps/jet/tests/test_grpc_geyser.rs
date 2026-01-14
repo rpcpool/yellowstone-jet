@@ -320,7 +320,7 @@ async fn test_stream_error_handling() {
     assert!(result.is_err());
     match result.unwrap_err() {
         yellowstone_jet::grpc_geyser::GeyserError::StreamError(_) => {}
-        e => panic!("Expected StreamError, got {:?}", e),
+        e => panic!("Expected StreamError, got {e:?}"),
     }
 }
 
@@ -349,6 +349,6 @@ async fn test_invalid_block_meta() {
     assert!(result.is_err());
     match result.unwrap_err() {
         yellowstone_jet::grpc_geyser::GeyserError::MissingBlockHeight => {}
-        e => panic!("Expected MissingBlockHeight, got {:?}", e),
+        e => panic!("Expected MissingBlockHeight, got {e:?}"),
     }
 }

@@ -222,7 +222,7 @@ impl RefreshStakeInfoMapTask {
                     tracing::error!("Failed to get epoch info: {:?}", err);
                     return;
                 } else {
-                    panic!("Failed to get epoch info: {:?}", err);
+                    panic!("Failed to get epoch info: {err:?}");
                 }
             }
         };
@@ -248,7 +248,7 @@ impl RefreshStakeInfoMapTask {
                 if err.is_transient() {
                     tracing::error!("Failed to get vote accounts: {:?}", err);
                 } else {
-                    panic!("Failed to get vote accounts: {:?}", err);
+                    panic!("Failed to get vote accounts: {err:?}");
                 }
             }
         }

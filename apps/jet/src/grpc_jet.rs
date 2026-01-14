@@ -234,8 +234,7 @@ pub async fn grpc_subscribe_jet_gw(
         Ok(resp) => resp.into_inner(),
         Err(status) => {
             return Err(anyhow::anyhow!(
-                "Failed to establish subscription: {}",
-                status
+                "Failed to establish subscription: {status}"
             ));
         }
     };
@@ -271,7 +270,7 @@ pub async fn grpc_subscribe_jet_gw(
     };
 
     if let Err(e) = init_tx.clone().send(limit_message).await {
-        return Err(anyhow::anyhow!("Failed to send rate limit message: {}", e));
+        return Err(anyhow::anyhow!("Failed to send rate limit message: {e}"));
     }
 
     // Forward remaining messages

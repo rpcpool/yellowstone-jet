@@ -103,7 +103,7 @@ struct SlotTrackingInfo {
 }
 
 impl SlotTrackingInfo {
-    fn mark_status_seen(&mut self, status: SlotStatus) {
+    const fn mark_status_seen(&mut self, status: SlotStatus) {
         self.statuses_seen |= 1 << (status as i32 as u8);
     }
 
@@ -711,7 +711,7 @@ impl GeyserSubscriber {
         let response = geyser
             .get_version()
             .await
-            .map_err(|e| GeyserError::GrpcClient(format!("failed to get version: {}", e)))?;
+            .map_err(|e| GeyserError::GrpcClient(format!("failed to get version: {e}")))?;
 
         let version = match serde_json::from_str::<GrpcVersion>(&response.version)? {
             GrpcVersion::Old(s) => s.version,
@@ -720,13 +720,12 @@ impl GeyserSubscriber {
 
         let version = Version::parse(&version)?;
         let required = VersionReq::parse(">=1.14.1").map_err(|e| {
-            GeyserError::VersionParse(format!("failed to parse required version: {}", e))
+            GeyserError::VersionParse(format!("failed to parse required version: {e}"))
         })?;
 
         if !required.matches(&version) {
             return Err(GeyserError::VersionValidation(format!(
-                "gRPC version {} doesn't match required {}",
-                version, required
+                "gRPC version {version} doesn't match required {required}"
             )));
         }
 

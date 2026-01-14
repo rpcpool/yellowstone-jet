@@ -394,8 +394,7 @@ mod tests {
             let pubkey_str = pubkey.to_string();
             assert!(
                 nested_schedule.contains_key(&pubkey_str),
-                "Unknown pubkey {}",
-                pubkey_str
+                "Unknown pubkey {pubkey_str}",
             );
             // println!("Slot {} assigned to leader {}", slot, pubkey_str);
             actual.entry(pubkey_str).or_default().push(slot as usize);
@@ -408,7 +407,7 @@ mod tests {
             .filter(|k| !actual.contains_key(*k))
             .collect::<Vec<_>>();
 
-        assert!(diff.is_empty(), "Mismatched keys: {:?}", diff);
+        assert!(diff.is_empty(), "Mismatched keys: {diff:?}");
         assert_eq!(nested_schedule, actual);
     }
 }
