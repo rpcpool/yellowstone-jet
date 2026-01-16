@@ -88,8 +88,18 @@ pub struct OneTimeAuthToken {
 }
 
 impl OneTimeAuthToken {
+    /// Create a new OneTimeAuthToken
+    pub const fn new(pubkey: Pubkey, nonce: Vec<u8>) -> Self {
+        Self { pubkey, nonce }
+    }
+
     pub const fn pubkey(&self) -> Pubkey {
         self.pubkey
+    }
+
+    /// Get the nonce
+    pub fn nonce(&self) -> &[u8] {
+        &self.nonce
     }
 }
 
@@ -150,13 +160,45 @@ where
             timestamp: since_epoch,
             nonce,
         };
-        let ser_challenge = bincode::serialize(&challenge).expect("serialize challenge");
+
+        #[cfg(feature = "wincode")]
+        let ser_challenge = {
+            use crate::wincode_schema::{PubkeySchema, SigChallengeSchema};
+            let schema = SigChallengeSchema {
+                pubkey_to_verify: PubkeySchema::from(challenge.pubkey_to_verify),
+                timestamp: challenge.timestamp,
+                nonce: challenge.nonce.clone(),
+            };
+            schema
+                .to_bytes()
+                .expect("SigChallengeSchema serialization is infallible")
+        };
+
+        #[cfg(not(feature = "wincode"))]
+        let ser_challenge =
+            bincode::serialize(&challenge).expect("SigChallenge serialization is infallible");
 
         let signature = self.challenge_signer.sign_message(&ser_challenge);
 
         let sig_challenge = SignedSigChallenge(signature, ser_challenge);
-        let sig_challenge = bincode::serialize(&sig_challenge).expect("serialize signed challenge");
-        bs58::encode(sig_challenge).into_string()
+
+        #[cfg(feature = "wincode")]
+        let sig_challenge_bytes = {
+            use crate::wincode_schema::{SignatureSchema, SignedSigChallengeSchema};
+            let schema = SignedSigChallengeSchema {
+                signature: SignatureSchema::from(sig_challenge.0),
+                payload: sig_challenge.1.clone(),
+            };
+            schema
+                .to_bytes()
+                .expect("SignedSigChallengeSchema serialization is infallible")
+        };
+
+        #[cfg(not(feature = "wincode"))]
+        let sig_challenge_bytes = bincode::serialize(&sig_challenge)
+            .expect("SignedSigChallenge serialization is infallible");
+
+        bs58::encode(sig_challenge_bytes).into_string()
     }
 
     async fn verify_answer(
@@ -170,9 +212,41 @@ where
             .into_vec()
             .map_err(|_| VerifyAnswerError::InvalidChallengeFormat)?;
 
+        #[cfg(feature = "wincode")]
+        let sig_challenge: SignedSigChallenge = {
+            use crate::wincode_schema::SignedSigChallengeSchema;
+            use std::mem::MaybeUninit;
+            use wincode::{SchemaRead, io::Cursor};
+            let mut cursor = Cursor::new(&bincoded_challenge[..]);
+            let mut dst = MaybeUninit::uninit();
+            SignedSigChallengeSchema::read(&mut cursor, &mut dst)
+                .map_err(|_| VerifyAnswerError::InvalidChallengeFormat)?;
+            let schema = unsafe { dst.assume_init() };
+            SignedSigChallenge(Signature::from(schema.signature.0), schema.payload)
+        };
+
+        #[cfg(not(feature = "wincode"))]
         let sig_challenge: SignedSigChallenge = bincode::deserialize(&bincoded_challenge)
             .map_err(|_| VerifyAnswerError::InvalidChallengeFormat)?;
 
+        #[cfg(feature = "wincode")]
+        let sig_challenge_payload: SigChallenge = {
+            use crate::wincode_schema::SigChallengeSchema;
+            use std::mem::MaybeUninit;
+            use wincode::{SchemaRead, io::Cursor};
+            let mut cursor = Cursor::new(&sig_challenge.1[..]);
+            let mut dst = MaybeUninit::uninit();
+            SigChallengeSchema::read(&mut cursor, &mut dst)
+                .map_err(|_| VerifyAnswerError::InvalidChallengeFormat)?;
+            let schema = unsafe { dst.assume_init() };
+            SigChallenge {
+                pubkey_to_verify: Pubkey::from(schema.pubkey_to_verify.0),
+                timestamp: schema.timestamp,
+                nonce: schema.nonce,
+            }
+        };
+
+        #[cfg(not(feature = "wincode"))]
         let sig_challenge_payload = bincode::deserialize::<SigChallenge>(&sig_challenge.1)
             .map_err(|_| VerifyAnswerError::InvalidChallengeFormat)?;
 

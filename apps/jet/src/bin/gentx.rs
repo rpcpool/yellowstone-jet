@@ -197,7 +197,12 @@ impl TransactionSender {
                 if !config.forwarding_policies.is_empty() && !should_use_legacy_txn {
                     let client = Client::new();
 
+                    #[cfg(feature = "wincode")]
+                    let tx_bytes =
+                        yellowstone_jet::wincode_schema::serialize_transaction(&transaction)?;
+                    #[cfg(not(feature = "wincode"))]
                     let tx_bytes = bincode::serialize(&transaction)?;
+
                     let encoded_tx = BASE64_STANDARD.encode(tx_bytes);
 
                     let payload = serde_json::json!({

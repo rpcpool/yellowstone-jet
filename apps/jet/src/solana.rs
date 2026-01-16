@@ -19,6 +19,9 @@ use {
     std::any::type_name,
 };
 
+#[cfg(feature = "wincode")]
+use std::any::TypeId;
+
 const MAX_BASE58_SIZE: usize = 1683; // Golden, bump if PACKET_DATA_SIZE changes
 const MAX_BASE64_SIZE: usize = 1644; // Golden, bump if PACKET_DATA_SIZE changes
 pub fn decode_and_deserialize<T>(
@@ -26,7 +29,7 @@ pub fn decode_and_deserialize<T>(
     encoding: TransactionBinaryEncoding,
 ) -> RpcResult<(Vec<u8>, T)>
 where
-    T: serde::de::DeserializeOwned,
+    T: serde::de::DeserializeOwned + 'static,
 {
     let wire_output = match encoding {
         TransactionBinaryEncoding::Base58 => {
@@ -77,6 +80,31 @@ where
             PACKET_DATA_SIZE
         )));
     }
+
+    // Use wincode for VersionedTransaction when feature is enabled
+    #[cfg(feature = "wincode")]
+    if TypeId::of::<T>() == TypeId::of::<VersionedTransaction>() {
+        return match crate::wincode_schema::deserialize_transaction_with_limit(
+            &wire_output,
+            PACKET_DATA_SIZE,
+        ) {
+            Ok((tx, _consumed)) => {
+                // SAFETY: We verified T == VersionedTransaction above
+                let output = unsafe { std::mem::transmute_copy::<VersionedTransaction, T>(&tx) };
+                std::mem::forget(tx);
+                Ok((wire_output, output))
+            }
+            Err(err) => {
+                metrics::jet::increment_transaction_deserialize_error("wincode");
+                Err(invalid_params(format!(
+                    "failed to deserialize {}: {}",
+                    type_name::<T>(),
+                    err
+                )))
+            }
+        };
+    }
+
     match bincode::options()
         .with_limit(PACKET_DATA_SIZE as u64)
         .with_fixint_encoding()

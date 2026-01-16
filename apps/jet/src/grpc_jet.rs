@@ -130,12 +130,24 @@ async fn get_jet_gw_subscribe_auth_token(
             let challenge = &challenge_resp.challenge;
             let nonce = Uuid::new_v4().as_bytes().to_vec();
             let signed_challenge = append_nonce_and_sign(&signer, challenge, &nonce);
+
+            #[cfg(feature = "wincode")]
+            let signature_bytes = {
+                use crate::wincode_schema::SignatureSchema;
+                let schema = SignatureSchema::from(signed_challenge);
+                schema
+                    .to_bytes()
+                    .map_err(|e| anyhow::anyhow!("failed to serialize signed challenge: {e}"))?
+            };
+            #[cfg(not(feature = "wincode"))]
+            let signature_bytes = bincode::serialize(&signed_challenge)
+                .map_err(|e| anyhow::anyhow!("failed to serialize signed challenge: {e}"))?;
+
             AuthRequest {
                 auth_step: Some(auth_request::AuthStep::CompleteAuth(
                     AnswerChallengeRequest {
                         challenge: challenge_resp.challenge,
-                        signature: bincode::serialize(&signed_challenge)
-                            .expect("failed to serialize signed challenge"),
+                        signature: signature_bytes,
                         pubkey_to_verify: signer.pubkey().to_bytes().to_vec(),
                         nonce,
                     },
@@ -155,9 +167,20 @@ async fn get_jet_gw_subscribe_auth_token(
             if success {
                 let otak = bs58::decode(one_time_auth_token)
                     .into_vec()
-                    .expect("failed to decode one-time-auth-token");
+                    .map_err(|e| anyhow::anyhow!("failed to decode one-time-auth-token: {e}"))?;
+
+                #[cfg(feature = "wincode")]
+                let otak = {
+                    use crate::wincode_schema::OneTimeAuthTokenSchema;
+                    let schema = OneTimeAuthTokenSchema::from_bytes(&otak).map_err(|e| {
+                        anyhow::anyhow!("unexpected one-time-auth-token format: {e}")
+                    })?;
+                    OneTimeAuthToken::new(solana_pubkey::Pubkey::from(schema.pubkey), schema.nonce)
+                };
+                #[cfg(not(feature = "wincode"))]
                 let otak = bincode::deserialize::<OneTimeAuthToken>(&otak)
-                    .expect("unexpected one-time-auth-token format");
+                    .map_err(|e| anyhow::anyhow!("unexpected one-time-auth-token format: {e}"))?;
+
                 Ok(otak)
             } else {
                 Err(anyhow::anyhow!("failed to authenticate"))
@@ -212,7 +235,22 @@ pub async fn grpc_subscribe_jet_gw(
 
     // Set up authenticated connection
     let mut subscribe_req = Request::new(init_rx);
-    let ser_otak = bincode::serialize(&otak).expect("failed to serialize one-time-auth-token");
+
+    #[cfg(feature = "wincode")]
+    let ser_otak = {
+        use crate::wincode_schema::{OneTimeAuthTokenSchema, PubkeySchema};
+        let schema = OneTimeAuthTokenSchema {
+            pubkey: PubkeySchema::from(otak.pubkey()),
+            nonce: otak.nonce().to_vec(),
+        };
+        schema
+            .to_bytes()
+            .map_err(|e| anyhow::anyhow!("failed to serialize one-time-auth-token: {e}"))?
+    };
+    #[cfg(not(feature = "wincode"))]
+    let ser_otak = bincode::serialize(&otak)
+        .map_err(|e| anyhow::anyhow!("failed to serialize one-time-auth-token: {e}"))?;
+
     let bs58_otak = bs58::encode(ser_otak).into_string();
     subscribe_req.metadata_mut().insert(
         X_ONE_TIME_AUTH_TOKEN,

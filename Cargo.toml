@@ -49,6 +49,7 @@ semver = "1.0.22"
 serde = "1.0.215"
 serde_json = "1.0.116"
 serde_yaml = "0.9.25"
+wincode = { version = "0.2", features = ["std", "alloc", "derive"] }
 
 # Agave Crates
 solana-client = "3.0.0"

@@ -38,6 +38,10 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
     )
     .expect("try new");
 
+    #[cfg(feature = "wincode")]
+    let wire_transaction = yellowstone_jet::wincode_schema::serialize_transaction(&tx)
+        .expect("Error getting wire_transaction");
+    #[cfg(not(feature = "wincode"))]
     let wire_transaction = bincode::serialize(&tx).expect("Error getting wire_transaction");
 
     SendTransactionRequest {
