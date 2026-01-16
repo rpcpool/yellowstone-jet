@@ -109,6 +109,11 @@ impl TransactionHandler {
         }
 
         let signature = transaction.signatures[0];
+
+        #[cfg(feature = "wincode")]
+        let wire_transaction = crate::wincode_schema::serialize_transaction(&transaction)
+            .map_err(|e| Box::new(bincode::ErrorKind::Custom(e.to_string())))?;
+        #[cfg(not(feature = "wincode"))]
         let wire_transaction = bincode::serialize(&transaction)?;
 
         self.transaction_sink

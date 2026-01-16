@@ -32,6 +32,8 @@ pub mod transaction_handler;
 pub mod transactions;
 pub mod util;
 pub mod version;
+#[cfg(feature = "wincode")]
+pub mod wincode_schema;
 
 pub fn setup_tracing(json: bool) -> anyhow::Result<()> {
     let env_filter = EnvFilter::builder()

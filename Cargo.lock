@@ -6671,6 +6671,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
+name = "wincode"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5cec722a3274e47d1524cbe2cea762f2c19d615bd9d73ada21db9066349d57e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "thiserror 2.0.17",
+ "wincode-derive",
+]
+
+[[package]]
+name = "wincode-derive"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8961eb04054a1b2e026b5628e24da7e001350249a787e1a85aa961f33dc5f286"
+dependencies = [
+ "darling 0.21.3",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7102,6 +7126,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vergen",
+ "wincode",
  "yellowstone-grpc-client",
  "yellowstone-grpc-proto",
  "yellowstone-jet-tpu-client",

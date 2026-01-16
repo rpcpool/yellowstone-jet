@@ -89,6 +89,11 @@ yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yell
 yellowstone-shield-store = { workspace = true }
 tokio-util = { workspace = true }
 tikv-jemallocator = { workspace = true }
+wincode = { workspace = true, optional = true }
+
+[features]
+default = []
+wincode = ["dep:wincode"]
 
 [build-dependencies]
 anyhow = { workspace = true }

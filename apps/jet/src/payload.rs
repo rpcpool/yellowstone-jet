@@ -89,6 +89,9 @@ pub enum PayloadError {
     UnsupportedEncoding,
     #[error("failed to deserialize transaction: {0}")]
     BincodeError(#[from] bincode::Error),
+    #[cfg(feature = "wincode")]
+    #[error("failed to serialize/deserialize transaction with wincode: {0}")]
+    WincodeSerialize(String),
     #[error("failed to parse pubkey: {0}")]
     InvalidPubkey(#[from] ParsePubkeyError),
     #[error("failed to convert proto message: {0}")]
@@ -128,6 +131,10 @@ impl TransactionPayload {
         tx: &VersionedTransaction,
         encoding: UiTransactionEncoding,
     ) -> Result<String, PayloadError> {
+        #[cfg(feature = "wincode")]
+        let tx_bytes = crate::wincode_schema::serialize_transaction(tx)
+            .map_err(|e| PayloadError::WincodeSerialize(e.to_string()))?;
+        #[cfg(not(feature = "wincode"))]
         let tx_bytes = bincode::serialize(tx)?;
         Ok(match encoding {
             UiTransactionEncoding::Base58 => bs58::encode(tx_bytes).into_string(),
@@ -264,6 +271,10 @@ impl TryFrom<(&VersionedTransaction, JetRpcSendTransactionConfig)> for Transacti
             }
         }
 
+        #[cfg(feature = "wincode")]
+        let tx_bytes = crate::wincode_schema::serialize_transaction(transaction)
+            .map_err(|e| PayloadError::WincodeSerialize(e.to_string()))?;
+        #[cfg(not(feature = "wincode"))]
         let tx_bytes = bincode::serialize(transaction)?;
 
         // Create new payload format with forwarding policies supported
@@ -302,6 +313,13 @@ impl TransactionDecoder {
 
                 let tx_bytes =
                     TransactionPayload::decode_transaction(&legacy.transaction, encoding)?;
+
+                #[cfg(feature = "wincode")]
+                let tx: VersionedTransaction =
+                    crate::wincode_schema::deserialize_transaction(&tx_bytes)
+                        .map_err(|e| PayloadError::WincodeSerialize(e.to_string()))?;
+
+                #[cfg(not(feature = "wincode"))]
                 let tx = bincode::deserialize(&tx_bytes)?;
 
                 // Legacy format doesn't have forwarding policies, so we pass None
@@ -311,7 +329,14 @@ impl TransactionDecoder {
                 ))
             }
             TransactionPayload::New(wrapper) => {
+                #[cfg(feature = "wincode")]
+                let tx: VersionedTransaction =
+                    crate::wincode_schema::deserialize_transaction(&wrapper.transaction)
+                        .map_err(|e| PayloadError::WincodeSerialize(e.to_string()))?;
+
+                #[cfg(not(feature = "wincode"))]
                 let tx = bincode::deserialize(&wrapper.transaction)?;
+
                 let config = if let Some(proto_config) = &wrapper.config {
                     match proto_config.try_into() {
                         Ok(config) => Some(config),
@@ -348,10 +373,30 @@ impl TryFrom<&TransactionConfig> for JetRpcSendTransactionConfig {
 mod tests {
     use {super::*, crate::util::ms_since_epoch};
 
+    // Helper for bincode tests (default, non-wincode)
+    #[cfg(not(feature = "wincode"))]
     fn create_test_wrapper(
         tx: &VersionedTransaction,
     ) -> Result<TransactionWrapper, bincode::Error> {
         let tx_bytes = bincode::serialize(tx)?;
+        Ok(TransactionWrapper {
+            transaction: tx_bytes,
+            config: Some(TransactionConfig {
+                max_retries: Some(5),
+                forwarding_policies: vec![],
+                skip_preflight: true,
+                skip_sanitize: true,
+            }),
+            timestamp: Some(1234567890),
+        })
+    }
+
+    // Helper for wincode tests
+    #[cfg(feature = "wincode")]
+    fn create_test_wrapper(
+        tx: &VersionedTransaction,
+    ) -> Result<TransactionWrapper, crate::wincode_schema::WincodeError> {
+        let tx_bytes = crate::wincode_schema::serialize_transaction(tx)?;
         Ok(TransactionWrapper {
             transaction: tx_bytes,
             config: Some(TransactionConfig {
@@ -395,9 +440,36 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "wincode"))]
     fn test_new_format_features() -> Result<(), Box<dyn std::error::Error>> {
         let tx = VersionedTransaction::default();
         let tx_bytes = bincode::serialize(&tx)?;
+
+        let wrapper = TransactionWrapper {
+            transaction: tx_bytes,
+            config: Some(TransactionConfig {
+                max_retries: Some(5),
+                forwarding_policies: vec!["test1".to_string()],
+                skip_preflight: true,
+                skip_sanitize: true,
+            }),
+            timestamp: Some(ms_since_epoch()),
+        };
+
+        let payload = TransactionPayload::New(wrapper);
+        let (_, config) = TransactionDecoder::decode(&payload)?;
+
+        assert!(config.is_some());
+        let config_with_forwarding_policies = config.unwrap();
+        assert_eq!(config_with_forwarding_policies.config.max_retries, Some(5));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "wincode")]
+    fn test_new_format_features() -> Result<(), Box<dyn std::error::Error>> {
+        let tx = VersionedTransaction::default();
+        let tx_bytes = crate::wincode_schema::serialize_transaction(&tx)?;
 
         let wrapper = TransactionWrapper {
             transaction: tx_bytes,
