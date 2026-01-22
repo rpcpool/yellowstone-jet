@@ -90,14 +90,14 @@ send_transaction_service:
 
 quic:
   # Maximum number of concurrent connections to remote peers validators.
-  # We recommend 1024, since most of the stake is cover by 1024 validators.
-  max_concurrent_connection: 1024
+  # Set near your fanout; avoid opening hundreds of duplicate connections to the same proxy.
+  max_concurrent_connection: 64
   # How many "endpoint" to host connections.
   # Each endpoint creates an Event loop that actual send the transaction to remote peers.
   # Many connections can share the same endpoint.
   # For maximum performance, it should be equal to `max_concurrent_connections`
   # default: 5
-  endpoint_count: 1024
+  endpoint_count: 64
   # Number of immediate retries in case of failed send
   send_retry_count: 1
   # How far in the leader schedule from current slot should we pre-emptively warm-up connections.

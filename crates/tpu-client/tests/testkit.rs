@@ -1,39 +1,29 @@
 use {
     quinn::crypto::rustls::QuicServerConfig,
-    rand::Rng,
     solana_keypair::Keypair,
     solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
     solana_tls_utils::{SkipClientVerification, new_dummy_x509_certificate},
     std::{
-        net::{SocketAddr, TcpListener},
+        net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
         sync::Arc,
     },
     yellowstone_jet_tpu_client::core::crypto_provider,
 };
 
 #[allow(dead_code)]
-pub fn find_available_port() -> Option<u16> {
-    let mut rng = rand::rng();
-
-    for _ in 0..100 {
-        // Try up to 100 times to find an open port
-        let (begin, end) = (32768, 60999);
-        let port = rng.random_range(begin..=end);
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-
-        // Try to bind to the port; if successful, port is free
-        if TcpListener::bind(addr).is_ok() {
-            return Some(port);
-        }
-    }
-
-    None // If no port found after 100 attempts, return None
+pub fn bind_ephemeral_port() -> u16 {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral udp port");
+    socket.local_addr().expect("local addr").port()
 }
 
 #[allow(dead_code)]
 pub fn generate_random_local_addr() -> SocketAddr {
-    let port = find_available_port().expect("port");
-    SocketAddr::new("127.0.0.1".parse().expect("ipv4"), port)
+    SocketAddr::new("127.0.0.1".parse().expect("ipv4"), bind_ephemeral_port())
+}
+
+#[allow(dead_code)]
+pub fn generate_local_addr_for(ip: [u8; 4]) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), bind_ephemeral_port())
 }
 
 #[allow(dead_code)]

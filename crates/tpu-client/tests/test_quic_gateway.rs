@@ -1,7 +1,7 @@
 mod testkit;
 
 use {
-    crate::testkit::{build_validator_quic_tpu_endpoint, find_available_port},
+    crate::testkit::{bind_ephemeral_port, build_validator_quic_tpu_endpoint},
     bytes::Bytes,
     quinn::{ConnectionError, VarInt},
     solana_keypair::Keypair,
@@ -16,10 +16,11 @@ use {
         sync::{Arc, Mutex, RwLock},
         time::Duration,
     },
-    testkit::{build_random_endpoint, generate_random_local_addr},
+    testkit::{build_random_endpoint, generate_local_addr_for, generate_random_local_addr},
     tokio::{
         sync::mpsc,
         task::{self, JoinHandle, JoinSet},
+        time::{sleep, timeout},
     },
     tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream},
     yellowstone_jet_tpu_client::{
@@ -215,6 +216,28 @@ impl MockedRemoteValidator {
     }
 }
 
+async fn wait_for_pubkey(
+    stream_map: &mut StreamMap<Pubkey, ReceiverStream<MockReceipt>>,
+    pending: &mut Vec<(Pubkey, MockReceipt)>,
+    target: Pubkey,
+    label: &str,
+) -> MockReceipt {
+    if let Some(idx) = pending.iter().position(|(pk, _)| *pk == target) {
+        return pending.swap_remove(idx).1;
+    }
+    loop {
+        match timeout(Duration::from_secs(5), stream_map.next()).await {
+            Ok(Some((pk, receipt))) if pk == target => return receipt,
+            Ok(Some(other)) => {
+                pending.push(other);
+                continue;
+            }
+            Ok(None) => panic!("stream_map closed while waiting for {label}"),
+            Err(_) => panic!("timeout waiting for {label}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn send_buffer_should_land_properly() {
     let rx_server_addr = generate_random_local_addr();
@@ -404,6 +427,109 @@ async fn gateway_should_handle_connection_refused_by_peer() {
 }
 
 #[tokio::test]
+async fn gateway_should_fast_fail_when_disallowed() {
+    let rx_server_addr = generate_random_local_addr();
+    let rx_server_identity = Keypair::new();
+
+    let gateway_kp = Keypair::new();
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let fake_tpu_info_service =
+        FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+
+    let gateway_spawner = TpuSenderDriverSpawner {
+        stake_info_map: Arc::new(stake_info_map.clone()),
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        driver_tx_channel_capacity: 100,
+    };
+    let gateway_config = TpuSenderConfig {
+        max_connection_attempts: 3,
+        ..Default::default()
+    };
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        driver_join_handle: _,
+    } = gateway_spawner.spawn(
+        gateway_kp.insecure_clone(),
+        gateway_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
+    );
+
+    let (conn_notify_tx, mut conn_notify_rx) = mpsc::channel(4);
+    let rx_server_identity_for_spawn = rx_server_identity.insecure_clone();
+    let rx_server_handle = tokio::spawn(async move {
+        let endpoint =
+            build_validator_quic_tpu_endpoint(&rx_server_identity_for_spawn, rx_server_addr);
+        let mut accept_count = 0usize;
+        loop {
+            let Some(connecting) = tokio::select! (
+                res = endpoint.accept() => res,
+                _ = sleep(Duration::from_millis(500)) => { break; }
+            ) else {
+                break;
+            };
+            let conn = connecting.await.expect("quinn connection");
+            accept_count = accept_count.saturating_add(1);
+            let _ = conn_notify_tx.send(accept_count).await;
+            conn.close(VarInt::from_u32(2), b"disallowed");
+            let _ = conn.closed().await;
+        }
+    });
+
+    let tx_sig = Signature::new_unique();
+    let txn = TpuSenderTxn::from_owned(
+        tx_sig,
+        rx_server_identity.pubkey(),
+        "helloworld".as_bytes().to_vec(),
+    );
+    transaction_sink.send(txn).await.expect("send tx");
+
+    let resp = callback_rx.recv().await.expect("recv response");
+    match resp {
+        TpuSenderResponse::TxDrop(mut actual_resp) => {
+            let (dropped_tx, _curr_attempt) = actual_resp.dropped_tx_vec.pop_front().unwrap();
+            assert_eq!(dropped_tx.tx_sig, tx_sig);
+            assert!(matches!(
+                actual_resp.drop_reason,
+                TxDropReason::DropByDriver
+            ));
+            assert_eq!(
+                actual_resp.remote_peer_identity,
+                rx_server_identity.pubkey()
+            );
+        }
+        TpuSenderResponse::TxFailed(actual_resp) => {
+            // Accept a direct failure as long as we don't retry.
+            assert_eq!(actual_resp.tx_sig, tx_sig);
+            assert_eq!(
+                actual_resp.remote_peer_identity,
+                rx_server_identity.pubkey()
+            );
+        }
+        TpuSenderResponse::TxSent(actual_resp) => {
+            // If the close arrives after first write, we still accept the single send as long as we don't reconnect.
+            assert_eq!(actual_resp.tx_sig, tx_sig);
+            assert_eq!(
+                actual_resp.remote_peer_identity,
+                rx_server_identity.pubkey()
+            );
+        }
+    }
+
+    // Ensure we only ever connected once (no retry loop after disallow).
+    sleep(Duration::from_millis(200)).await;
+    let mut total_accepts = 0usize;
+    while let Ok(count) = conn_notify_rx.try_recv() {
+        total_accepts = count;
+    }
+    assert_eq!(total_accepts, 1);
+    rx_server_handle.abort();
+}
+
+#[tokio::test]
 async fn it_should_update_gatway_identity() {
     let rx_server_addr = generate_random_local_addr();
     let rx_server_identity = Keypair::new();
@@ -472,8 +598,8 @@ async fn it_should_update_gatway_identity() {
 
 #[tokio::test]
 async fn it_should_support_concurrent_remote_peer_connection() {
-    let remote_validator_addr1 = generate_random_local_addr();
-    let remote_validator_addr2 = generate_random_local_addr();
+    let remote_validator_addr1 = generate_local_addr_for([127, 0, 0, 1]);
+    let remote_validator_addr2 = generate_local_addr_for([127, 0, 0, 2]);
     let remote_validator_identity1 = Keypair::new();
     let remote_validator_identity2 = Keypair::new();
     let gateway_config = TpuSenderConfig {
@@ -518,6 +644,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
     );
 
     let mut stream_map = StreamMap::new();
+    let mut pending: Vec<(Pubkey, MockReceipt)> = Vec::new();
 
     stream_map.insert(
         remote_validator_identity1.pubkey(),
@@ -545,27 +672,31 @@ async fn it_should_support_concurrent_remote_peer_connection() {
     );
     transaction_sink.send(txn2).await.expect("send tx");
 
-    let mut expected_remote_validators = vec![
+    let receipt1 = wait_for_pubkey(
+        &mut stream_map,
+        &mut pending,
         remote_validator_identity1.pubkey(),
+        "first remote peer",
+    )
+    .await;
+    let receipt2 = wait_for_pubkey(
+        &mut stream_map,
+        &mut pending,
         remote_validator_identity2.pubkey(),
-    ];
-    expected_remote_validators.sort_unstable();
+        "second remote peer",
+    )
+    .await;
 
-    let actual_remote_validator1 = stream_map.next().await.expect("next").0;
-    let actual_remote_validator2 = stream_map.next().await.expect("next").0;
-
-    let mut actual_remote_validators = vec![actual_remote_validator1, actual_remote_validator2];
-    actual_remote_validators.sort_unstable();
-
-    assert_eq!(actual_remote_validators, expected_remote_validators,);
+    assert_eq!(receipt1.from, gateway_kp.pubkey());
+    assert_eq!(receipt2.from, gateway_kp.pubkey());
 }
 
 #[tokio::test]
 async fn it_should_evict_connection() {
-    let really_limited_port_range = find_available_port().expect("port");
+    let really_limited_port_range = bind_ephemeral_port();
 
-    let remote_validator_addr1 = generate_random_local_addr();
-    let remote_validator_addr2 = generate_random_local_addr();
+    let remote_validator_addr1 = generate_local_addr_for([127, 0, 0, 1]);
+    let remote_validator_addr2 = generate_local_addr_for([127, 0, 0, 2]);
     let remote_validator_identity1 = Keypair::new();
     let remote_validator_identity2 = Keypair::new();
     let gateway_config = TpuSenderConfig {
@@ -624,6 +755,7 @@ async fn it_should_evict_connection() {
     );
 
     let mut stream_map = StreamMap::new();
+    let mut pending: Vec<(Pubkey, MockReceipt)> = Vec::new();
 
     stream_map.insert(
         remote_validator_identity1.pubkey(),
@@ -641,11 +773,14 @@ async fn it_should_evict_connection() {
     );
     transaction_sink.send(txn).await.expect("send tx");
 
-    let actual_remote_validator1 = stream_map.next().await.expect("next").0;
-    assert_eq!(
-        actual_remote_validator1,
-        remote_validator_identity1.pubkey()
-    );
+    let actual_remote_validator1 = wait_for_pubkey(
+        &mut stream_map,
+        &mut pending,
+        remote_validator_identity1.pubkey(),
+        "first remote peer",
+    )
+    .await;
+    assert_eq!(actual_remote_validator1.from, gateway_kp.pubkey());
 
     // Now we send a tx to the second remote peer, this should evict the first connection
     let txn2 = TpuSenderTxn::from_owned(
@@ -660,11 +795,14 @@ async fn it_should_evict_connection() {
     assert!(conn_end.result.is_err(), "connection should be evicted");
     assert_eq!(conn_end.remote_pubkey, gateway_kp.pubkey());
 
-    let actual_remote_validator2 = stream_map.next().await.expect("next").0;
-    assert_eq!(
-        actual_remote_validator2,
-        remote_validator_identity2.pubkey()
-    );
+    let actual_remote_validator2 = wait_for_pubkey(
+        &mut stream_map,
+        &mut pending,
+        remote_validator_identity2.pubkey(),
+        "second remote peer",
+    )
+    .await;
+    assert_eq!(actual_remote_validator2.from, gateway_kp.pubkey());
 
     // Finally, send it back to the first remote peer, this should evict the second connection
     let txn3 = TpuSenderTxn::from_owned(
@@ -673,11 +811,14 @@ async fn it_should_evict_connection() {
         "helloworld3".as_bytes().to_vec(),
     );
     transaction_sink.send(txn3).await.expect("send tx");
-    let actual_remote_validator3 = stream_map.next().await.expect("next").0;
-    assert_eq!(
-        actual_remote_validator3,
-        remote_validator_identity1.pubkey()
-    );
+    let actual_remote_validator3 = wait_for_pubkey(
+        &mut stream_map,
+        &mut pending,
+        remote_validator_identity1.pubkey(),
+        "first remote peer again",
+    )
+    .await;
+    assert_eq!(actual_remote_validator3.from, gateway_kp.pubkey());
 
     // The second connection should be evicted
     let conn_end = validator_conn_spy2.recv().await.expect("recv");
@@ -866,8 +1007,8 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
     const NUM_VALIDATORS: usize = 3;
 
     // We spawn NUM_VALIDATORS remote validators, each with its own address and identity.
-    for _ in 0..NUM_VALIDATORS {
-        let remote_validator_addr = generate_random_local_addr();
+    for i in 0..NUM_VALIDATORS {
+        let remote_validator_addr = generate_local_addr_for([127, 0, 0, (i + 1) as u8]);
         let remote_validator_identity = Keypair::new();
         validators_kp_vec.push(remote_validator_identity.insecure_clone());
         validators_addr_vec.push(remote_validator_addr);
