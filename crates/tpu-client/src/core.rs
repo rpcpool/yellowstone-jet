@@ -88,8 +88,6 @@ pub(crate) enum ConnectingError {
     ConnectError(#[from] quinn::ConnectError),
     #[error(transparent)]
     ConnectionError(#[from] quinn::ConnectionError),
-    #[error("Connection to remote peer not in leader schedule")]
-    PeerNotInLeaderSchedule,
 }
 
 pub(crate) struct SentOk {
@@ -100,8 +98,12 @@ pub(crate) struct SentOk {
 /// Metadata about an inflight connection attempt to a remote peer.
 ///
 struct ConnectingMeta {
+    /// The identity used in the certificate to connect with.
     current_client_identity: Pubkey,
-    remote_peer_identity: Pubkey,
+    /// List of all remote peer identities being connected to in this task.
+    /// (multiplexing multiple remote peer connection in one task since multiple remote peer can share same endpoint).
+    multiplexed_remote_peer_identity_vec: Vec<Pubkey>,
+    remote_peer_address: SocketAddr,
     connection_attempt: usize,
     endpoint_idx: usize,
     created_at: Instant,
@@ -244,6 +246,11 @@ pub(crate) struct TpuSenderDriver<CB> {
     /// Reversed of [`TokioQuicDriver::connecting_meta`]
     ///
     connecting_remote_peers: HashMap<Pubkey, tokio::task::Id>,
+
+    ///
+    /// Map from remote peer socket address to the connecting task ids.
+    /// Task Id is the key for [`TokioQuicDriver::connecting_tasks`].
+    connecting_remote_peers_addr: HashMap<SocketAddr, tokio::task::Id>,
 
     ///
     /// Service to locate tpu port address from remote peer identity.
@@ -525,12 +532,10 @@ pub enum TpuSenderResponse {
 /// A task to connect to a remote peer.
 ///
 struct ConnectingTask {
-    service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     remote_peer_identity: Pubkey,
     cert: Arc<QuicClientCertificate>,
     max_idle_timeout: Duration,
     connection_timeout: Duration,
-    tpu_port_kind: TpuPortKind,
     wait_for_eviction: Option<Arc<Notify>>,
     endpoint: Endpoint,
 }
@@ -556,7 +561,7 @@ pub fn crypto_provider() -> CryptoProvider {
 }
 
 impl ConnectingTask {
-    async fn run(self) -> Result<Connection, ConnectingError> {
+    async fn run(self, remote_peer_addr: SocketAddr) -> Result<Connection, ConnectingError> {
         if let Some(signal) = &self.wait_for_eviction {
             tracing::trace!(
                 "Waiting for eviction to complete before connecting to remote peer: {}",
@@ -565,10 +570,10 @@ impl ConnectingTask {
             signal.notified().await;
         }
 
-        let remote_peer_addr = self
-            .service
-            .get_quic_dest_addr(&self.remote_peer_identity, self.tpu_port_kind);
-        let remote_peer_addr = remote_peer_addr.ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
+        // let remote_peer_addr = self
+        //     .service
+        //     .get_quic_dest_addr(&self.remote_peer_identity, self.tpu_port_kind);
+        // let remote_peer_addr = remote_peer_addr.ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
         let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
             .with_safe_default_protocol_versions()
             .expect("Failed to set QUIC client protocol versions")
@@ -635,7 +640,7 @@ impl ConnectingTask {
 /// benchmarks conducted by the Anza team indicate that this approach degrades performance rather than improving it.
 struct QuicTxSenderWorker<CB> {
     remote_peer: Pubkey,
-    connection: Connection,
+    connection: Arc<Connection>,
     /// The current client identity being used for the connection
     current_client_identity: Pubkey,
     incoming_rx: mpsc::Receiver<TpuSenderTxn>,
@@ -1068,7 +1073,12 @@ where
 {
     ///
     /// Spawns a "connecting" task to a remote peer.
+    ///
     /// this is called when a transaction is received for a remote peer which does not have a worker installed yet.
+    ///
+    /// If there is already a connecting task for the same remote peer address, the remote peer identity will be multiplexed
+    /// and share the same underlying connection.
+    /// Since two leaders cannot be leader at the same time, this is safe to do.
     ///
     fn spawn_connecting(
         &mut self,
@@ -1107,58 +1117,101 @@ where
             return;
         }
 
-        // We need signal to wait for eviction to complete before we can proceed with the connection.
-        // Otherwise, the connecting attempt may fail to bind a local port.
-        let maybe_wait_for_eviction = if !self.has_connection_capacity() {
-            let notify = Arc::new(Notify::new());
-            let waiting_eviction = WaitingEviction {
-                remote_peer_identity,
-                notify: Arc::clone(&notify),
-            };
-            self.connecting_blocked_by_eviction_list
-                .push_back(waiting_eviction);
-            Some(notify)
-        } else {
-            None
+        // Check if we already have a connection for the remote peer address
+        let Some(remote_peer_addr) = self
+            .leader_tpu_info_service
+            .get_quic_dest_addr(&remote_peer_identity, self.config.tpu_port)
+        else {
+            self.unreachable_peer(remote_peer_identity);
+            return;
         };
 
-        let service = Arc::clone(&self.leader_tpu_info_service);
-        let endpoint_idx = self.get_least_used_endpoint();
-        let cert = Arc::clone(&self.client_certificate);
-        let max_idle_timeout = self.config.max_idle_timeout;
-        let fut = ConnectingTask {
-            service,
-            remote_peer_identity,
-            cert,
-            max_idle_timeout,
-            connection_timeout: self.config.connecting_timeout,
-            tpu_port_kind: self.config.tpu_port,
-            wait_for_eviction: maybe_wait_for_eviction,
-            endpoint: self.endpoints[endpoint_idx].clone(),
+        let maybe_existing_connecting_task =
+            self.connecting_remote_peers_addr.get(&remote_peer_addr);
+
+        // We need signal to wait for eviction to complete before we can proceed with the connection.
+        // Otherwise, the connecting attempt may fail to bind a local port.
+        let maybe_wait_for_eviction =
+            if !self.has_connection_capacity() && maybe_existing_connecting_task.is_none() {
+                let notify = Arc::new(Notify::new());
+                let waiting_eviction = WaitingEviction {
+                    remote_peer_identity,
+                    notify: Arc::clone(&notify),
+                };
+                self.connecting_blocked_by_eviction_list
+                    .push_back(waiting_eviction);
+                Some(notify)
+            } else {
+                None
+            };
+
+        match maybe_existing_connecting_task {
+            Some(existing_task_id) => {
+                tracing::info!(
+                    "Re-using existing connecting task to remote peer address: {} for remote peer identity: {}",
+                    remote_peer_addr,
+                    remote_peer_identity
+                );
+                let meta = self
+                    .connecting_meta
+                    .get_mut(existing_task_id)
+                    .expect("missing connecting meta for existing task");
+                meta.multiplexed_remote_peer_identity_vec
+                    .push(remote_peer_identity);
+                let endpoint_idx = meta.endpoint_idx;
+                self.endpoints_usage[endpoint_idx]
+                    .connecting_remote_peers
+                    .insert(remote_peer_identity);
+                let old = self
+                    .connecting_remote_peers
+                    .insert(remote_peer_identity, *existing_task_id);
+                assert!(
+                    old.is_none(),
+                    "Remote peer should not be already connecting"
+                );
+            }
+            None => {
+                let endpoint_idx = self.get_least_used_endpoint();
+                let cert = Arc::clone(&self.client_certificate);
+                let max_idle_timeout = self.config.max_idle_timeout;
+                let fut = ConnectingTask {
+                    remote_peer_identity,
+                    cert,
+                    max_idle_timeout,
+                    connection_timeout: self.config.connecting_timeout,
+                    wait_for_eviction: maybe_wait_for_eviction,
+                    endpoint: self.endpoints[endpoint_idx].clone(),
+                }
+                .run(remote_peer_addr);
+                let meta = ConnectingMeta {
+                    current_client_identity: self.identity.pubkey(),
+                    multiplexed_remote_peer_identity_vec: vec![remote_peer_identity],
+                    remote_peer_address: remote_peer_addr,
+                    connection_attempt: attempt,
+                    endpoint_idx,
+                    created_at: Instant::now(),
+                };
+
+                self.endpoints_usage[endpoint_idx]
+                    .connecting_remote_peers
+                    .insert(remote_peer_identity);
+                let abort_handle = self.connecting_tasks.spawn(fut);
+
+                tracing::info!(
+                    "Spawning connection for remote peer: {remote_peer_identity}, attempt: {attempt}, source: {debug_source:?}",
+                );
+                let old = self
+                    .connecting_remote_peers
+                    .insert(remote_peer_identity, abort_handle.id());
+                assert!(
+                    old.is_none(),
+                    "Remote peer should not be already connecting"
+                );
+                self.connecting_meta.insert(abort_handle.id(), meta);
+                self.connecting_remote_peers_addr
+                    .insert(remote_peer_addr, abort_handle.id());
+            }
         }
-        .run();
-        let meta = ConnectingMeta {
-            current_client_identity: self.identity.pubkey(),
-            remote_peer_identity,
-            connection_attempt: attempt,
-            endpoint_idx,
-            created_at: Instant::now(),
-        };
-        self.endpoints_usage[endpoint_idx]
-            .connecting_remote_peers
-            .insert(remote_peer_identity);
-        let abort_handle = self.connecting_tasks.spawn(fut);
-        tracing::info!(
-            "Spawning connection for remote peer: {remote_peer_identity}, attempt: {attempt}, source: {debug_source:?}",
-        );
-        let old = self
-            .connecting_remote_peers
-            .insert(remote_peer_identity, abort_handle.id());
-        assert!(
-            old.is_none(),
-            "Remote peer should not be already connecting"
-        );
-        self.connecting_meta.insert(abort_handle.id(), meta);
     }
 
     fn get_least_used_endpoint(&mut self) -> usize {
@@ -1259,7 +1312,7 @@ where
         &mut self,
         remote_peer_identity: Pubkey,
         endpoint_idx: usize,
-        connection: Connection,
+        connection: Arc<Connection>,
     ) {
         let (tx, rx) = mpsc::channel(self.config.transaction_sender_worker_channel_capacity);
 
@@ -1320,8 +1373,9 @@ where
                 #[allow(unused_variables)]
                 let ConnectingMeta {
                     current_client_identity,
-                    remote_peer_identity,
+                    multiplexed_remote_peer_identity_vec,
                     connection_attempt,
+                    remote_peer_address,
                     endpoint_idx,
                     created_at,
                 } = self
@@ -1332,49 +1386,59 @@ where
                 {
                     prom::observe_quic_gw_connection_time(created_at.elapsed());
                 }
-
-                self.endpoints_usage[endpoint_idx]
-                    .connecting_remote_peers
-                    .remove(&remote_peer_identity);
-
-                let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
+                for remote_peer_identity in &multiplexed_remote_peer_identity_vec {
+                    self.endpoints_usage[endpoint_idx]
+                        .connecting_remote_peers
+                        .remove(remote_peer_identity);
+                    self.connecting_remote_peers.remove(remote_peer_identity);
+                }
+                self.connecting_remote_peers_addr
+                    .remove(&remote_peer_address);
 
                 if self.identity.pubkey() != current_client_identity {
                     // THIS SHOULD NOT HAPPEN SINCE ON IDENTITY CHANGE WE ABORT ALL CONNECTING TASKS
                     // BUT JUST IN CASE, WE CHECK AGAIN.
                     tracing::warn!(
-                        "Abandoning connection attempt to remote peer: {remote_peer_identity} since the client identity has changed"
+                        "Abandoning connection attempt to remote peer: {multiplexed_remote_peer_identity_vec:?} since the client identity has changed"
                     );
-                    self.spawn_connecting(
-                        remote_peer_identity,
-                        connection_attempt,
-                        SpawnSource::UpdateIdentity,
-                    );
+                    for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                        self.spawn_connecting(
+                            remote_peer_identity,
+                            connection_attempt,
+                            SpawnSource::UpdateIdentity,
+                        );
+                    }
                     return;
                 }
 
                 match result {
                     Ok(conn) => {
-                        tracing::debug!("Connected to remote peer: {:?}", remote_peer_identity);
-                        let remote_peer_stake = self
-                            .stake_info_map
-                            .get_stake_info(&remote_peer_identity)
-                            .unwrap_or(0);
-                        self.active_staked_sorted_remote_peer
-                            .insert(remote_peer_identity, remote_peer_stake);
-
-                        self.remote_peer_addr_watcher
-                            .register_watch(remote_peer_identity, conn.remote_address());
-
-                        self.install_worker(remote_peer_identity, endpoint_idx, conn);
-
-                        self.endpoints_usage[endpoint_idx]
-                            .connected_remote_peers
-                            .insert(remote_peer_identity);
-
                         #[cfg(feature = "prometheus")]
                         {
                             prom::incr_quic_gw_connection_success_cnt();
+                        }
+                        let conn = Arc::new(conn);
+                        for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                            tracing::debug!("Connected to remote peer: {:?}", remote_peer_identity);
+                            let remote_peer_stake = self
+                                .stake_info_map
+                                .get_stake_info(&remote_peer_identity)
+                                .unwrap_or(0);
+                            self.active_staked_sorted_remote_peer
+                                .insert(remote_peer_identity, remote_peer_stake);
+
+                            self.remote_peer_addr_watcher
+                                .register_watch(remote_peer_identity, conn.remote_address());
+
+                            self.install_worker(
+                                remote_peer_identity,
+                                endpoint_idx,
+                                Arc::clone(&conn),
+                            );
+
+                            self.endpoints_usage[endpoint_idx]
+                                .connected_remote_peers
+                                .insert(remote_peer_identity);
                         }
                     }
                     Err(connect_err) => {
@@ -1390,27 +1454,50 @@ where
                                 // This should never happen, but if it does, we panic.
                                 // The endpoint is stopping, so we cannot connect to the remote peer.
                                 panic!(
-                                    "Endpoint is stopping, cannot connect to remote peer: {remote_peer_identity}, with identity: {current_client_identity}"
+                                    "Endpoint is stopping, cannot connect to remote peer: {multiplexed_remote_peer_identity_vec:?}, with identity: {current_client_identity}"
                                 );
                             }
                             ConnectingError::ConnectionError(_)
                                 if connection_attempt < self.config.max_connection_attempts =>
                             {
                                 tracing::warn!(
-                                    "Connection attempt {} to remote peer: {remote_peer_identity} failed, retrying...",
+                                    "Connection attempt {} to remote peer: {multiplexed_remote_peer_identity_vec:?} failed, retrying...",
                                     connection_attempt
                                 );
-                                self.spawn_connecting(
-                                    remote_peer_identity,
-                                    connection_attempt.saturating_add(1),
-                                    SpawnSource::Reattempt,
-                                );
+
+                                //
+                                for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                                    let latest_remote_peer_address =
+                                        self.leader_tpu_info_service.get_quic_dest_addr(
+                                            &remote_peer_identity,
+                                            self.config.tpu_port,
+                                        );
+                                    let Some(latest_remote_peer_address) =
+                                        latest_remote_peer_address
+                                    else {
+                                        self.unreachable_peer(remote_peer_identity);
+                                        continue;
+                                    };
+                                    let new_connection_attempt =
+                                        if latest_remote_peer_address != remote_peer_address {
+                                            1
+                                        } else {
+                                            connection_attempt.saturating_add(1)
+                                        };
+                                    self.spawn_connecting(
+                                        remote_peer_identity,
+                                        new_connection_attempt,
+                                        SpawnSource::Reattempt,
+                                    );
+                                }
                             }
                             whatever => {
                                 tracing::warn!(
-                                    "Failed to connect to remote peer: {remote_peer_identity}, with identity: {current_client_identity}, error: {whatever:?}"
+                                    "Failed to connect to remote peer: {multiplexed_remote_peer_identity_vec:?}, with identity: {current_client_identity}, error: {whatever:?}"
                                 );
-                                self.unreachable_peer(remote_peer_identity);
+                                for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                                    self.unreachable_peer(remote_peer_identity);
+                                }
                             }
                         }
                     }
@@ -1423,8 +1510,9 @@ where
                 }
                 let ConnectingMeta {
                     current_client_identity: _,
-                    remote_peer_identity,
+                    multiplexed_remote_peer_identity_vec,
                     connection_attempt: _,
+                    remote_peer_address,
                     endpoint_idx,
                     created_at: _,
                 } = self
@@ -1432,14 +1520,18 @@ where
                     .remove(&join_err.id())
                     .expect("connecting_meta");
 
-                self.endpoints_usage[endpoint_idx]
-                    .connecting_remote_peers
-                    .remove(&remote_peer_identity);
-                let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
-                tracing::error!(
-                    "Join error during connecting to {remote_peer_identity:?}: {:?}",
-                    join_err
-                );
+                self.connecting_remote_peers_addr
+                    .remove(&remote_peer_address);
+                for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                    self.endpoints_usage[endpoint_idx]
+                        .connecting_remote_peers
+                        .remove(&remote_peer_identity);
+                    let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
+                    tracing::error!(
+                        "Join error during connecting to {remote_peer_identity:?}: {:?}",
+                        join_err
+                    );
+                }
             }
         }
     }
@@ -1713,6 +1805,7 @@ where
         self.connecting_tasks.abort_all();
         self.connecting_tasks.detach_all();
         self.connecting_remote_peers.clear();
+        self.connecting_remote_peers_addr.clear();
         let connecting_meta = std::mem::take(&mut self.connecting_meta);
 
         // Make sure to properly update the endpoint usage
@@ -1734,11 +1827,15 @@ where
             prom::quic_set_identity(self.identity.pubkey());
         }
         connecting_meta.values().for_each(|meta| {
-            self.spawn_connecting(
-                meta.remote_peer_identity,
-                meta.connection_attempt,
-                SpawnSource::UpdateIdentity,
-            );
+            meta.multiplexed_remote_peer_identity_vec
+                .iter()
+                .for_each(|remote_peer_identity| {
+                    self.spawn_connecting(
+                        *remote_peer_identity,
+                        meta.connection_attempt,
+                        SpawnSource::UpdateIdentity,
+                    );
+                });
         });
 
         if !connecting_meta.is_empty() {
@@ -1772,6 +1869,7 @@ where
         self.connecting_tasks.abort_all();
         self.connecting_tasks.detach_all();
         self.connecting_remote_peers.clear();
+        self.connecting_remote_peers_addr.clear();
         let connecting_meta = std::mem::take(&mut self.connecting_meta);
 
         // Make sure to properly update the endpoint usage
@@ -1795,11 +1893,15 @@ where
         // Wait for the barrier to be released
         barrier.wait().await;
         connecting_meta.values().for_each(|meta| {
-            self.spawn_connecting(
-                meta.remote_peer_identity,
-                meta.connection_attempt,
-                SpawnSource::UpdateIdentity,
-            );
+            meta.multiplexed_remote_peer_identity_vec
+                .iter()
+                .for_each(|remote_peer_identity| {
+                    self.spawn_connecting(
+                        *remote_peer_identity,
+                        meta.connection_attempt,
+                        SpawnSource::UpdateIdentity,
+                    );
+                });
         });
 
         if !connecting_meta.is_empty() {
@@ -2367,6 +2469,7 @@ impl TpuSenderDriverSpawner {
             remote_peer_addr_watcher,
             leader_predictor,
             next_leader_prediction_deadline: Instant::now(),
+            connecting_remote_peers_addr: Default::default(),
         };
 
         let jh = driver_rt.spawn(driver.run());
