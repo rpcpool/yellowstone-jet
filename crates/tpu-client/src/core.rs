@@ -134,6 +134,7 @@ enum DriverTaskMeta {
 }
 
 struct TxWorkerSenderHandle {
+    #[allow(dead_code)]
     remote_peer_identity: Pubkey,
     remote_peer_addr: SocketAddr,
     connection_version: u64,
@@ -313,12 +314,29 @@ pub(crate) struct TpuSenderDriver<CB> {
     /// Used to do round-robin selection of endpoint for new connections.
     ///
     endpoint_sequence: usize,
+
+    ///
+    /// Sets of pending connection eviction.
+    ///
+    pending_connection_eviction_set: HashSet<ConnectionEviction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConnectionEviction {
+    ///
+    /// The remote peer identity being evicted.
+    ///
+    pub remote_peer_addr: SocketAddr,
+    ///
+    /// The connection version being evicted.
+    ///
+    pub connection_version: u64,
 }
 
 pub struct ActiveConnection {
     conn: Arc<Connection>,
     connection_version: u64,
-    multiplexed_remote_peer_identity_vec: HashSet<Pubkey>,
+    multiplexed_remote_peer_identity_with_stake: HashMap<Pubkey, u64>,
 }
 
 pub trait LeaderTpuInfoService {
@@ -575,6 +593,10 @@ impl ConnectingTask {
                 self.remote_peer_identity
             );
             signal.notified().await;
+            tracing::trace!(
+                "Eviction completed, proceeding to connect to remote peer: {}",
+                self.remote_peer_identity
+            );
         }
 
         // let remote_peer_addr = self
@@ -920,7 +942,7 @@ impl StakeSortedPeerSet {
     ///
     /// `true` if the peer was present and removed, `false` otherwise.
     ///
-    pub fn remove(&mut self, peer: &Pubkey) -> bool {
+    fn remove(&mut self, peer: &Pubkey) -> bool {
         if let Some(old_stake) = self.peer_stake_map.remove(peer) {
             let mut is_entry_empty = false;
             if let Some(peers) = self.sorted_map.get_mut(&old_stake) {
@@ -945,7 +967,7 @@ impl StakeSortedPeerSet {
     ///
     /// `true` if the peer was already present and updated, `false` if it was newly inserted.
     ///
-    pub fn insert(&mut self, peer: Pubkey, stake: u64) -> bool {
+    fn insert(&mut self, peer: Pubkey, stake: u64) -> bool {
         let already_present = self.remove(&peer);
         self.peer_stake_map.insert(peer, stake);
         self.sorted_map.entry(stake).or_default().insert(peer);
@@ -1282,7 +1304,7 @@ where
         if eviction_count_required == 0 {
             return;
         }
-        let eviction_plan = self.eviction_strategy.plan_eviction(
+        let mut eviction_plan = self.eviction_strategy.plan_eviction(
             Instant::now(),
             &self.active_staked_sorted_remote_peer,
             &self.last_peer_activity,
@@ -1291,18 +1313,63 @@ where
         );
         if !eviction_plan.is_empty() {
             tracing::info!("Planned {} evictions", eviction_plan.len());
-        }
-        eviction_plan
-            .into_iter()
-            .flat_map(|peer| self.tx_worker_handle_map.get(&peer))
-            .for_each(|handle| {
-                handle.cancel_notify.notify_one();
-                #[cfg(feature = "prometheus")]
-                {
-                    prom::incr_quic_gw_total_connection_evictions_cnt(1);
-                }
-                self.being_evicted_peers.insert(handle.remote_peer_identity);
+
+            // If the evictin plan is empty, pick the connection with the least amount of a active stake
+            let min_staked_active_conn = self.connection_map.values().min_by_key(|active_conn| {
+                active_conn
+                    .multiplexed_remote_peer_identity_with_stake
+                    .values()
+                    .sum::<u64>()
             });
+            if let Some(active_conn) = min_staked_active_conn {
+                for peer in active_conn
+                    .multiplexed_remote_peer_identity_with_stake
+                    .keys()
+                {
+                    eviction_plan.push(*peer);
+                }
+            }
+        }
+
+        // Because of multiplexing, in order to do the connection eviction we must
+        // evict all tx workers that are using the same connection.
+        // For each remote peer to evict, we need to extends the eviction set to include all neighboring
+        // remote peers that are multiplexed on the same connection.
+        let mut cancel_handles_vec = Vec::with_capacity(eviction_plan.len());
+        for peer in eviction_plan {
+            if let Some(handle) = self.tx_worker_handle_map.get(&peer) {
+                let remote_peer_addr = handle.remote_peer_addr;
+                self.being_evicted_peers.insert(peer);
+                cancel_handles_vec.push(Arc::clone(&handle.cancel_notify));
+                if let Some(active_conn) = self.connection_map.get(&remote_peer_addr) {
+                    if active_conn.connection_version != handle.connection_version {
+                        // This means the connection has been re-established since the worker was created.
+                        // So we don't need to evict other multiplexed peers on this connection.
+                        continue;
+                    }
+                    let connection_eviction = ConnectionEviction {
+                        remote_peer_addr: active_conn.conn.remote_address(),
+                        connection_version: active_conn.connection_version,
+                    };
+                    self.pending_connection_eviction_set
+                        .insert(connection_eviction);
+                    for multiplexed_peer in active_conn
+                        .multiplexed_remote_peer_identity_with_stake
+                        .keys()
+                    {
+                        self.being_evicted_peers.insert(*multiplexed_peer);
+                        if let Some(handle) = self.tx_worker_handle_map.get(multiplexed_peer) {
+                            let cancel_notify = Arc::clone(&handle.cancel_notify);
+                            cancel_handles_vec.push(cancel_notify);
+                        }
+                    }
+                }
+            }
+        }
+
+        for cancel_handle in cancel_handles_vec {
+            cancel_handle.notify_one();
+        }
     }
 
     ///
@@ -1364,10 +1431,15 @@ where
         let Some(active_conn) = self.connection_map.get_mut(&remote_peer_addr) else {
             unreachable!();
         };
+        let remote_peer_stake = self
+            .stake_info_map
+            .get_stake_info(&remote_peer_identity)
+            .unwrap_or(0);
         assert!(
             active_conn
-                .multiplexed_remote_peer_identity_vec
-                .insert(remote_peer_identity),
+                .multiplexed_remote_peer_identity_with_stake
+                .insert(remote_peer_identity, remote_peer_stake)
+                .is_none(),
             "duplicate remote peer identity in active connection"
         );
         tracing::debug!("Installed tx worker for remote peer: {remote_peer_identity}");
@@ -1431,7 +1503,7 @@ where
                         let active_connection = ActiveConnection {
                             conn: Arc::clone(&conn),
                             connection_version: self.next_connection_version(),
-                            multiplexed_remote_peer_identity_vec: Default::default(),
+                            multiplexed_remote_peer_identity_with_stake: Default::default(),
                         };
                         self.connection_map
                             .insert(remote_peer_address, active_connection);
@@ -1650,6 +1722,58 @@ where
     }
 
     ///
+    /// Removes a worker from an active connection's multiplexed peer list.
+    ///
+    /// If the connection has no more multiplexed peers and is marked for eviction,
+    /// the connection is removed from the active connection map and eviction waiters are unblocked.
+    ///
+    /// # Note
+    ///
+    /// if the connection version does not match the expected version, the removal operation is ignored, not mutation is performed.
+    ///
+    fn remove_worker_from_active_connection(
+        &mut self,
+        remote_peer_addr: SocketAddr,
+        remote_peer_identity: Pubkey,
+        expected_connection_version: u64,
+    ) {
+        if let Some(active_conn) = self.connection_map.get_mut(&remote_peer_addr) {
+            if active_conn.connection_version != expected_connection_version {
+                // This means the connection has been re-established since the worker was created.
+                // So we don't need to remove the multiplexed peer from this connection.
+                tracing::warn!(
+                    "Skipping removal of remote peer: {} from active connection at address: {} due to connection version mismatch, expected: {}, actual: {}",
+                    remote_peer_identity,
+                    remote_peer_addr,
+                    expected_connection_version,
+                    active_conn.connection_version,
+                );
+                return;
+            }
+            active_conn
+                .multiplexed_remote_peer_identity_with_stake
+                .remove(&remote_peer_identity);
+
+            let connection_eviction = ConnectionEviction {
+                remote_peer_addr,
+                connection_version: expected_connection_version,
+            };
+            let is_connection_mark_for_eviction = self
+                .pending_connection_eviction_set
+                .contains(&connection_eviction);
+            let has_no_worker = active_conn
+                .multiplexed_remote_peer_identity_with_stake
+                .is_empty();
+            if has_no_worker && is_connection_mark_for_eviction {
+                self.connection_map.remove(&remote_peer_addr);
+                self.pending_connection_eviction_set
+                    .remove(&connection_eviction);
+                self.unblock_eviction_waiting_connection();
+            }
+        }
+    }
+
+    ///
     /// One of the transaction sender worker has completed its work or failed.
     ///
     fn handle_worker_result(&mut self, result: Result<(Id, TxSenderWorkerCompleted), JoinError>) {
@@ -1665,7 +1789,7 @@ where
                     .remove(&remote_peer_identity);
                 self.remote_peer_addr_watcher.forget(remote_peer_identity);
 
-                let is_evicted_conn = self.being_evicted_peers.remove(&remote_peer_identity);
+                let is_being_evicted = self.being_evicted_peers.remove(&remote_peer_identity);
                 let worker_tx = self
                     .tx_worker_handle_map
                     .remove(&remote_peer_identity)
@@ -1679,16 +1803,11 @@ where
                         active_conn_version == worker_conn_version,
                         "Connection version mismatch for remote peer: {remote_peer_identity}, active: {active_conn_version}, worker: {worker_conn_version}",
                     );
-                    active_conn
-                        .multiplexed_remote_peer_identity_vec
-                        .remove(&remote_peer_identity);
-                    // The last worker using this connection has completed, we can remove the connection if it was marked for eviction.
-                    if active_conn.multiplexed_remote_peer_identity_vec.is_empty()
-                        && is_evicted_conn
-                    {
-                        self.connection_map.remove(&worker_tx.remote_peer_addr);
-                        self.unblock_eviction_waiting_connection();
-                    }
+                    self.remove_worker_from_active_connection(
+                        worker_tx.remote_peer_addr,
+                        remote_peer_identity,
+                        worker_conn_version,
+                    );
                 }
                 self.last_peer_activity.remove(&remote_peer_identity);
                 drop(worker_tx);
@@ -1698,7 +1817,7 @@ where
                     remote_peer_identity,
                     worker_completed.err,
                     worker_completed.canceled,
-                    is_evicted_conn
+                    is_being_evicted
                 );
 
                 // It's possible that the worker failed while having pending transactions.
@@ -1734,7 +1853,7 @@ where
                 if is_peer_unreachable {
                     // If the peer is unreachable, we drop all queued transactions for it.
                     self.unreachable_peer(remote_peer_identity);
-                } else if is_evicted_conn {
+                } else if is_being_evicted {
                     // If the worker was schedule for eviction, we simply drop all queued transactions
                     // because evicted workers are not expected to reconnect soon since they have been
                     // chosen to be eviction strategy. We don't want to be stuck in a loop
@@ -2484,6 +2603,7 @@ impl TpuSenderDriverSpawner {
             connection_map: Default::default(),
             connection_version: 0,
             endpoint_sequence: 0,
+            pending_connection_eviction_set: Default::default(),
         };
 
         let jh = driver_rt.spawn(driver.run());

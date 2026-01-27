@@ -17,7 +17,7 @@ use {
         num::{NonZero, NonZeroUsize},
         str::FromStr,
         sync::{Arc, Mutex, RwLock},
-        time::Duration,
+        time::{Duration, Instant},
     },
     testkit::{build_random_endpoint, generate_random_local_addr},
     tokio::{
@@ -28,9 +28,10 @@ use {
     yellowstone_jet_tpu_client::{
         config::TpuSenderConfig,
         core::{
-            IgnorantLeaderPredictor, LeaderTpuInfoService, Nothing, StakeBasedEvictionStrategy,
-            TpuSenderDriverSpawner, TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn,
-            TxDropReason, UpcomingLeaderPredictor, ValidatorStakeInfoService,
+            ConnectionEvictionStrategy, IgnorantLeaderPredictor, LeaderTpuInfoService, Nothing,
+            StakeBasedEvictionStrategy, StakeSortedPeerSet, TpuSenderDriverSpawner,
+            TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn, TxDropReason,
+            UpcomingLeaderPredictor, ValidatorStakeInfoService,
         },
     },
 };
@@ -995,23 +996,33 @@ async fn it_should_support_multiplexed_connection() {
     // This test ensures that the gateway can handle such a scenario by
     // ensuring that transactions sent to different remote peers sharing the same connection
 
-    let _ = setup_tracing_test_many(vec![module_path!()]);
+    let _ = setup_tracing_test_many(vec![
+        yellowstone_jet_tpu_client::core::module_path_for_test(),
+        module_path!()
+    ]);
 
-    let rx_server_addr = generate_random_local_addr();
-    let shared_cert_identity = Keypair::new();
+    // NOTE: IF YOU WANT TO SEND TRANSACTION TO DIFFERENT REMOTE_PEER_IDENTITY,
+    // YOU MUST REGISTER IN FAKE_TPU_INFO_SERVICE, SO IS IN THE MOCKED STAKE INFO MAP
+    let rx_server_addr1 = generate_random_local_addr();
+    let rx_server_addr2 = generate_random_local_addr();
+    let shared_cert_identity1 = Keypair::new();
+    let shared_cert_identity2 = Keypair::new();
     let remote_peer_identity1 = Keypair::new();
     let remote_peer_identity2 = Keypair::new();
+    let remote_peer_identity3 = Keypair::new();
 
     let tpu_sender_identity = Keypair::new();
     let stake_info_map = MockStakeInfoMap::constant([
         (remote_peer_identity1.pubkey(), 1000),
         (remote_peer_identity2.pubkey(), 1000),
+        (remote_peer_identity3.pubkey(), 1000),
     ]);
 
     // Make the two remote peers share the same address
     let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter([
-        (remote_peer_identity1.pubkey(), rx_server_addr),
-        (remote_peer_identity2.pubkey(), rx_server_addr),
+        (remote_peer_identity1.pubkey(), rx_server_addr1),
+        (remote_peer_identity2.pubkey(), rx_server_addr1),
+        (remote_peer_identity3.pubkey(), rx_server_addr2),
     ]);
 
     let tpu_sender_spawner = TpuSenderDriverSpawner {
@@ -1027,6 +1038,43 @@ async fn it_should_support_multiplexed_connection() {
         ..Default::default()
     };
 
+    #[derive(Default)]
+    struct SpyEvictionStrategy {
+        calls: Arc<RwLock<usize>>,
+        wrapped: StakeBasedEvictionStrategy,
+    }
+    impl Clone for SpyEvictionStrategy {
+        fn clone(&self) -> Self {
+            Self {
+                calls: Arc::clone(&self.calls),
+                wrapped: StakeBasedEvictionStrategy::default(),
+            }
+        }
+    }
+
+    impl ConnectionEvictionStrategy for SpyEvictionStrategy {
+        fn plan_eviction(
+            &self,
+            now: Instant,
+            ss_identies: &StakeSortedPeerSet,
+            usage_table: &HashMap<Pubkey, Instant>,
+            evicting_masq: &HashSet<Pubkey>,
+            plan_ahead_size: usize,
+        ) -> Vec<Pubkey> {
+            let mut guard = self.calls.write().expect("write lock");
+            *guard += 1;
+            drop(guard);
+            self.wrapped.plan_eviction(
+                now,
+                ss_identies,
+                usage_table,
+                evicting_masq,
+                plan_ahead_size,
+            )
+        }
+    }
+
+    let spy_eviction_strategy = SpyEvictionStrategy::default();
     let TpuSenderSessionContext {
         mut identity_updater,
         driver_tx_sink: transaction_sink,
@@ -1034,16 +1082,22 @@ async fn it_should_support_multiplexed_connection() {
     } = tpu_sender_spawner.spawn(
         tpu_sender_identity.insecure_clone(),
         tpu_sender_config,
-        Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(spy_eviction_strategy.clone()),
         Arc::new(IgnorantLeaderPredictor),
         Some(callback_tx),
     );
 
     const MAX_TX: u64 = 5;
 
-    let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
-        shared_cert_identity.insecure_clone(),
-        rx_server_addr,
+    let (mut mocked_remote_validator_spy_rx1, _rx_server_handle) = MockedRemoteValidator::spawn(
+        shared_cert_identity1.insecure_clone(),
+        rx_server_addr1,
+        Default::default(),
+    );
+
+    let (mut mocked_remote_validator_spy_rx2, _rx_server_handle2) = MockedRemoteValidator::spawn(
+        shared_cert_identity2.insecure_clone(),
+        rx_server_addr2,
         Default::default(),
     );
 
@@ -1072,7 +1126,7 @@ async fn it_should_support_multiplexed_connection() {
 
     let mut actual_tx_send = vec![];
     let mut actual_spy_req = vec![];
-    let mut connection_id_set = HashSet::new();
+    let mut connection_id_set1 = HashSet::new();
     for i in 0..MAX_TX {
         tracing::trace!("Waiting for tx response {i}");
         let TpuSenderResponse::TxSent(actual_resp) =
@@ -1082,15 +1136,15 @@ async fn it_should_support_multiplexed_connection() {
         };
         tracing::trace!("received tx response {i} -- {}", actual_resp.tx_sig);
         actual_tx_send.push(actual_resp);
-        let spy_request = client_rx.recv().await.expect("recv");
-        connection_id_set.insert(spy_request.connection_id);
+        let spy_request = mocked_remote_validator_spy_rx1.recv().await.expect("recv");
+        connection_id_set1.insert(spy_request.connection_id);
         let data = String::from_utf8_lossy(&spy_request.data);
         let sig = Signature::from_str(&data).expect("parse signature");
         actual_spy_req.push(sig);
     }
 
     assert!(
-        connection_id_set.len() == 1,
+        connection_id_set1.len() == 1,
         "Expected all tx to use the same connection id"
     );
 
@@ -1110,7 +1164,7 @@ async fn it_should_support_multiplexed_connection() {
     }
 
     // Test updating the TPU identity still works
-
+    tracing::trace!("Testing identity update on multiplexed connection");
     let tpu_sender_identity2 = Keypair::new();
 
     identity_updater
@@ -1136,8 +1190,8 @@ async fn it_should_support_multiplexed_connection() {
         .await
         .expect("send tx");
 
-    let spy_request1 = client_rx.recv().await.expect("recv");
-    let spy_request2 = client_rx.recv().await.expect("recv");
+    let spy_request1 = mocked_remote_validator_spy_rx1.recv().await.expect("recv");
+    let spy_request2 = mocked_remote_validator_spy_rx1.recv().await.expect("recv");
 
     let mut actual_spy_data_collected = [
         String::from_utf8(spy_request1.data.clone()).expect("utf8"),
@@ -1145,6 +1199,11 @@ async fn it_should_support_multiplexed_connection() {
     ];
     actual_spy_data_collected.sort_unstable();
 
+    assert_ne!(
+        spy_request1.connection_id,
+        connection_id_set1.iter().next().unwrap().to_owned(),
+        "Connection id should change after identity update"
+    );
     assert_eq!(
         spy_request1.connection_id, spy_request2.connection_id,
         "Should use the same connection id for both remote peers sharing the same address"
@@ -1154,4 +1213,28 @@ async fn it_should_support_multiplexed_connection() {
 
     assert_eq!(actual_spy_data_collected[0], "helloworld1");
     assert_eq!(actual_spy_data_collected[1], "helloworld2");
+
+    // Test eviction still works -- the connection
+    tracing::trace!("Testing eviction on multiplexed connection");
+
+    let txn_sig = Signature::new_unique();
+    let txn_remote_peer3 = TpuSenderTxn::from_owned(
+        txn_sig,
+        remote_peer_identity3.pubkey(),
+        "helloworld3".as_bytes().to_vec(),
+    );
+    transaction_sink
+        .send(txn_remote_peer3)
+        .await
+        .expect("send tx");
+    tracing::trace!("Sent txn {txn_sig} to remote peer 3");
+    let actual = mocked_remote_validator_spy_rx2.recv().await.unwrap();
+    let data = String::from_utf8_lossy(&actual.data);
+    assert_eq!(data, "helloworld3");
+    assert_eq!(actual.from, tpu_sender_identity2.pubkey());
+    assert_eq!(
+        spy_eviction_strategy.calls.read().unwrap().clone(),
+        1,
+        "Eviction strategy should be called at least once"
+    );
 }
