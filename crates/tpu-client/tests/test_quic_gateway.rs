@@ -1,7 +1,9 @@
 mod testkit;
 
 use {
-    crate::testkit::{build_validator_quic_tpu_endpoint, find_available_port},
+    crate::testkit::{
+        build_validator_quic_tpu_endpoint, find_available_port, setup_tracing_test_many,
+    },
     bytes::Bytes,
     quinn::{ConnectionError, VarInt},
     solana_keypair::Keypair,
@@ -10,9 +12,10 @@ use {
     solana_signer::Signer,
     std::{
         array,
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         net::SocketAddr,
         num::{NonZero, NonZeroUsize},
+        str::FromStr,
         sync::{Arc, Mutex, RwLock},
         time::Duration,
     },
@@ -984,4 +987,171 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
     }
 
     assert!(fake_predictor.get_calls() >= 1);
+}
+
+#[tokio::test]
+async fn it_should_support_multiplexed_connection() {
+    // Multiple remote peer validators may share the same socket address.
+    // This test ensures that the gateway can handle such a scenario by
+    // ensuring that transactions sent to different remote peers sharing the same connection
+
+    let _ = setup_tracing_test_many(vec![module_path!()]);
+
+    let rx_server_addr = generate_random_local_addr();
+    let shared_cert_identity = Keypair::new();
+    let remote_peer_identity1 = Keypair::new();
+    let remote_peer_identity2 = Keypair::new();
+
+    let tpu_sender_identity = Keypair::new();
+    let stake_info_map = MockStakeInfoMap::constant([
+        (remote_peer_identity1.pubkey(), 1000),
+        (remote_peer_identity2.pubkey(), 1000),
+    ]);
+
+    // Make the two remote peers share the same address
+    let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter([
+        (remote_peer_identity1.pubkey(), rx_server_addr),
+        (remote_peer_identity2.pubkey(), rx_server_addr),
+    ]);
+
+    let tpu_sender_spawner = TpuSenderDriverSpawner {
+        stake_info_map: Arc::new(stake_info_map.clone()),
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        driver_tx_channel_capacity: 100,
+    };
+
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+
+    let tpu_sender_config = TpuSenderConfig {
+        max_concurrent_connection: 1, // Force to test edge-case of multiplexed connection over a single connection
+        ..Default::default()
+    };
+
+    let TpuSenderSessionContext {
+        mut identity_updater,
+        driver_tx_sink: transaction_sink,
+        driver_join_handle: _,
+    } = tpu_sender_spawner.spawn(
+        tpu_sender_identity.insecure_clone(),
+        tpu_sender_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
+    );
+
+    const MAX_TX: u64 = 5;
+
+    let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
+        shared_cert_identity.insecure_clone(),
+        rx_server_addr,
+        Default::default(),
+    );
+
+    let mut tx_sig_vec = (0..MAX_TX)
+        .map(|_| Signature::new_unique())
+        .collect::<Vec<_>>();
+    tx_sig_vec.sort_unstable();
+
+    let remote_validator_pubkey_vec = [
+        remote_peer_identity1.pubkey(),
+        remote_peer_identity2.pubkey(),
+    ];
+    for (i, tx_sig) in tx_sig_vec.iter().enumerate() {
+        let remote_peer_identity = remote_validator_pubkey_vec
+            .get(i % remote_validator_pubkey_vec.len())
+            .cloned()
+            .unwrap();
+        let txn = TpuSenderTxn::from_owned(
+            *tx_sig,
+            remote_peer_identity,
+            tx_sig.to_string().as_bytes().to_vec(),
+        );
+        tracing::trace!("sending tx {i} {tx_sig}");
+        transaction_sink.send(txn).await.expect("send tx");
+    }
+
+    let mut actual_tx_send = vec![];
+    let mut actual_spy_req = vec![];
+    let mut connection_id_set = HashSet::new();
+    for i in 0..MAX_TX {
+        tracing::trace!("Waiting for tx response {i}");
+        let TpuSenderResponse::TxSent(actual_resp) =
+            callback_rx.recv().await.expect("recv response")
+        else {
+            panic!("Expected TpuSenderResponse::TxSent, got something else");
+        };
+        tracing::trace!("received tx response {i} -- {}", actual_resp.tx_sig);
+        actual_tx_send.push(actual_resp);
+        let spy_request = client_rx.recv().await.expect("recv");
+        connection_id_set.insert(spy_request.connection_id);
+        let data = String::from_utf8_lossy(&spy_request.data);
+        let sig = Signature::from_str(&data).expect("parse signature");
+        actual_spy_req.push(sig);
+    }
+
+    assert!(
+        connection_id_set.len() == 1,
+        "Expected all tx to use the same connection id"
+    );
+
+    actual_tx_send.sort_by_key(|resp| resp.tx_sig);
+    actual_spy_req.sort_unstable();
+
+    for i in 0..MAX_TX {
+        let expected_remote_peer = remote_validator_pubkey_vec
+            .get(i as usize % remote_validator_pubkey_vec.len())
+            .cloned()
+            .unwrap();
+        let actual_resp = &actual_tx_send[i as usize];
+        assert_eq!(actual_resp.tx_sig, tx_sig_vec[i as usize]);
+
+        assert_eq!(actual_spy_req[i as usize], tx_sig_vec[i as usize]);
+        assert_eq!(actual_resp.remote_peer_identity, expected_remote_peer,);
+    }
+
+    // Test updating the TPU identity still works
+
+    let tpu_sender_identity2 = Keypair::new();
+
+    identity_updater
+        .update_identity(tpu_sender_identity2.insecure_clone())
+        .await;
+
+    let txn_remote_peer1 = TpuSenderTxn::from_owned(
+        Signature::new_unique(),
+        remote_peer_identity1.pubkey(),
+        "helloworld1".as_bytes().to_vec(),
+    );
+    let txn_remote_peer2 = TpuSenderTxn::from_owned(
+        Signature::new_unique(),
+        remote_peer_identity2.pubkey(),
+        "helloworld2".as_bytes().to_vec(),
+    );
+    transaction_sink
+        .send(txn_remote_peer1)
+        .await
+        .expect("send tx");
+    transaction_sink
+        .send(txn_remote_peer2)
+        .await
+        .expect("send tx");
+
+    let spy_request1 = client_rx.recv().await.expect("recv");
+    let spy_request2 = client_rx.recv().await.expect("recv");
+
+    let mut actual_spy_data_collected = [
+        String::from_utf8(spy_request1.data.clone()).expect("utf8"),
+        String::from_utf8(spy_request2.data.clone()).expect("utf8"),
+    ];
+    actual_spy_data_collected.sort_unstable();
+
+    assert_eq!(
+        spy_request1.connection_id, spy_request2.connection_id,
+        "Should use the same connection id for both remote peers sharing the same address"
+    );
+    assert_eq!(spy_request1.from, tpu_sender_identity2.pubkey());
+    assert_eq!(spy_request2.from, tpu_sender_identity2.pubkey());
+
+    assert_eq!(actual_spy_data_collected[0], "helloworld1");
+    assert_eq!(actual_spy_data_collected[1], "helloworld2");
 }

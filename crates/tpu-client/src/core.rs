@@ -1260,7 +1260,7 @@ where
     }
 
     fn has_connection_capacity(&self) -> bool {
-        self.tx_worker_handle_map.len() < self.max_concurrent_connection()
+        self.connection_map.len() < self.max_concurrent_connection()
     }
 
     const fn max_concurrent_connection(&self) -> usize {

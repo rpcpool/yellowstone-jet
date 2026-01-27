@@ -8,6 +8,7 @@ use {
         net::{SocketAddr, TcpListener},
         sync::Arc,
     },
+    tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt},
     yellowstone_jet_tpu_client::core::crypto_provider,
 };
 
@@ -59,4 +60,39 @@ pub fn build_validator_quic_tpu_endpoint(kp: &Keypair, addr: SocketAddr) -> quin
     let quic_server_config = QuicServerConfig::try_from(crypto).expect("quic server config");
     let config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
     quinn::Endpoint::server(config, addr).expect("quinn server endpoint")
+}
+
+#[allow(dead_code)]
+pub fn setup_tracing_test(module: &str) -> Result<(), tracing_subscriber::util::TryInitError> {
+    let io_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(true)
+        .with_line_number(true);
+
+    let level_layer = EnvFilter::builder()
+        .with_default_directive(format!("{module}=trace").parse().unwrap())
+        .from_env_lossy();
+    tracing_subscriber::registry()
+        .with(io_layer)
+        .with(level_layer)
+        .try_init()
+}
+
+#[allow(dead_code)]
+pub fn setup_tracing_test_many(
+    modules: impl IntoIterator<Item = &'static str>,
+) -> Result<(), tracing_subscriber::util::TryInitError> {
+    let io_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(true)
+        .with_line_number(true);
+
+    let directives = modules
+        .into_iter()
+        .fold(EnvFilter::default(), |filter, module| {
+            filter.add_directive(format!("{module}=trace").parse().expect("invalid module"))
+        });
+
+    tracing_subscriber::registry()
+        .with(io_layer)
+        .with(directives)
+        .try_init()
 }
