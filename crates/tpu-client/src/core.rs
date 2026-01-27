@@ -37,6 +37,7 @@
 //! ```
 //!
 //!
+
 #[cfg(feature = "prometheus")]
 use crate::prom;
 use {
@@ -319,6 +320,8 @@ pub(crate) struct TpuSenderDriver<CB> {
     /// Sets of pending connection eviction.
     ///
     pending_connection_eviction_set: HashSet<ConnectionEviction>,
+
+    active_staked_sorted_remote_peer_addr: StakedSortedSet<SocketAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -923,18 +926,85 @@ pub trait ConnectionEvictionStrategy {
         evicting_masq: &HashSet<Pubkey>,
         plan_ahead_size: usize,
     ) -> Vec<Pubkey>;
+
+    #[allow(unused_variables)]
+    fn plan_eviction_with_addr_map(
+        &self,
+        now: Instant,
+        ss_identies: &StakeSortedPeerSet,
+        usage_table: &HashMap<Pubkey, Instant>,
+        already_evicting: &HashSet<Pubkey>,
+        plan_ahead_size: usize,
+        remote_peer_address_map: &RemotePeerAddrMap<'_>,
+    ) -> Vec<Pubkey> {
+        self.plan_eviction(
+            now,
+            ss_identies,
+            usage_table,
+            already_evicting,
+            plan_ahead_size,
+        )
+    }
 }
+
+pub struct RemotePeerAddrMap<'a> {
+    remote_peer_address: &'a HashMap<Pubkey, TxWorkerSenderHandle>,
+    connection_map: &'a HashMap<SocketAddr, ActiveConnection>,
+    staked_sorted_address_set: &'a StakedSortedSet<SocketAddr>,
+}
+
+pub struct StakedSortedAddress {
+    pub addr: SocketAddr,
+    pub total_stake: u64,
+}
+
+impl RemotePeerAddrMap<'_> {
+    pub fn get_addr_of(&self, peer: &Pubkey) -> Option<SocketAddr> {
+        self.remote_peer_address
+            .get(peer)
+            .map(|handle| handle.remote_peer_addr)
+    }
+
+    pub fn get_connected_stake_at_addr(&self, addr: &SocketAddr) -> Option<u64> {
+        self.connection_map.get(addr).map(|active_conn| {
+            active_conn
+                .multiplexed_remote_peer_identity_with_stake
+                .values()
+                .sum()
+        })
+    }
+
+    // pub fn get_multiplexed_peers_at_addr_with_stake(&self, addr: &SocketAddr) -> Option<impl Iterator<Item = (&Pubkey, &u64)>> {
+    //     self.connection_map
+    //         .get(addr)
+    //         .map(|active_conn| active_conn.multiplexed_remote_peer_identity_with_stake.iter())
+    // }
+}
+
+pub type StakeSortedPeerSet = StakedSortedSet<Pubkey>;
 
 ///
 /// A set of remote peer identities sorted by their stake value.
 ///
-#[derive(Debug, Default)]
-pub struct StakeSortedPeerSet {
-    peer_stake_map: HashMap<Pubkey, u64 /* stake */>,
-    sorted_map: BTreeMap<u64 /* stake */, HashSet<Pubkey>>,
+#[derive(Debug)]
+pub struct StakedSortedSet<V> {
+    peer_stake_map: HashMap<V, u64 /* stake */>,
+    sorted_map: BTreeMap<u64 /* stake */, HashSet<V>>,
 }
 
-impl StakeSortedPeerSet {
+impl<V> Default for StakedSortedSet<V> {
+    fn default() -> Self {
+        Self {
+            peer_stake_map: Default::default(),
+            sorted_map: Default::default(),
+        }
+    }
+}
+
+impl<V> StakedSortedSet<V>
+where
+    V: Clone + Eq + std::hash::Hash,
+{
     ///
     /// Removes a peer from the set.
     ///
@@ -942,7 +1012,7 @@ impl StakeSortedPeerSet {
     ///
     /// `true` if the peer was present and removed, `false` otherwise.
     ///
-    fn remove(&mut self, peer: &Pubkey) -> bool {
+    pub fn remove(&mut self, peer: &V) -> bool {
         if let Some(old_stake) = self.peer_stake_map.remove(peer) {
             let mut is_entry_empty = false;
             if let Some(peers) = self.sorted_map.get_mut(&old_stake) {
@@ -967,20 +1037,23 @@ impl StakeSortedPeerSet {
     ///
     /// `true` if the peer was already present and updated, `false` if it was newly inserted.
     ///
-    fn insert(&mut self, peer: Pubkey, stake: u64) -> bool {
+    pub fn insert(&mut self, peer: V, stake: u64) -> bool {
         let already_present = self.remove(&peer);
-        self.peer_stake_map.insert(peer, stake);
-        self.sorted_map.entry(stake).or_default().insert(peer);
+        self.peer_stake_map.insert(peer.clone(), stake);
+        self.sorted_map
+            .entry(stake)
+            .or_default()
+            .insert(peer.clone());
         already_present
     }
 
     ///
     /// Iterates over the set in ascending order of stake.
     ///
-    pub fn iter(&self) -> impl Iterator<Item = (u64, Pubkey)> {
+    pub fn iter(&self) -> impl Iterator<Item = (u64, V)> {
         self.sorted_map
             .iter()
-            .flat_map(|(stake, peers)| peers.iter().map(|peer| (*stake, *peer)))
+            .flat_map(|(stake, peers)| peers.iter().map(|peer| (*stake, peer.clone())))
     }
 
     ///
@@ -1304,12 +1377,19 @@ where
         if eviction_count_required == 0 {
             return;
         }
-        let mut eviction_plan = self.eviction_strategy.plan_eviction(
+        let addr_map = RemotePeerAddrMap {
+            remote_peer_address: &self.tx_worker_handle_map,
+            connection_map: &self.connection_map,
+            staked_sorted_address_set: &self.active_staked_sorted_remote_peer_addr,
+        };
+
+        let mut eviction_plan = self.eviction_strategy.plan_eviction_with_addr_map(
             Instant::now(),
             &self.active_staked_sorted_remote_peer,
             &self.last_peer_activity,
             &self.being_evicted_peers,
             eviction_count_required,
+            &addr_map,
         );
         if !eviction_plan.is_empty() {
             tracing::info!("Planned {} evictions", eviction_plan.len());
@@ -1442,6 +1522,16 @@ where
                 .is_none(),
             "duplicate remote peer identity in active connection"
         );
+        let total_remote_addr_stake: u64 = active_conn
+            .multiplexed_remote_peer_identity_with_stake
+            .values()
+            .sum();
+        self.active_staked_sorted_remote_peer_addr
+            .insert(remote_peer_addr, total_remote_addr_stake);
+        self.active_staked_sorted_remote_peer
+            .insert(remote_peer_identity, remote_peer_stake);
+        self.remote_peer_addr_watcher
+            .register_watch(remote_peer_identity, remote_peer_addr);
         tracing::debug!("Installed tx worker for remote peer: {remote_peer_identity}");
     }
 
@@ -1509,16 +1599,6 @@ where
                             .insert(remote_peer_address, active_connection);
                         for remote_peer_identity in multiplexed_remote_peer_identity_vec {
                             tracing::debug!("Connected to remote peer: {:?}", remote_peer_identity);
-                            let remote_peer_stake = self
-                                .stake_info_map
-                                .get_stake_info(&remote_peer_identity)
-                                .unwrap_or(0);
-                            self.active_staked_sorted_remote_peer
-                                .insert(remote_peer_identity, remote_peer_stake);
-
-                            self.remote_peer_addr_watcher
-                                .register_watch(remote_peer_identity, remote_peer_address);
-
                             self.install_worker(remote_peer_identity, remote_peer_address);
                         }
                     }
@@ -1764,11 +1844,22 @@ where
             let has_no_worker = active_conn
                 .multiplexed_remote_peer_identity_with_stake
                 .is_empty();
+
+            let new_stake_for_addr: u64 = active_conn
+                .multiplexed_remote_peer_identity_with_stake
+                .values()
+                .sum();
+
+            self.active_staked_sorted_remote_peer_addr
+                .insert(remote_peer_addr, new_stake_for_addr);
+
             if has_no_worker && is_connection_mark_for_eviction {
                 self.connection_map.remove(&remote_peer_addr);
                 self.pending_connection_eviction_set
                     .remove(&connection_eviction);
                 self.unblock_eviction_waiting_connection();
+                self.active_staked_sorted_remote_peer_addr
+                    .remove(&remote_peer_addr);
             }
         }
     }
@@ -1785,8 +1876,20 @@ where
                     .tx_worker_task_meta_map
                     .remove(&id)
                     .expect("tx worker meta");
+
+                // When we remove the worker, we also need to update the various stake maps we have cached so far.
+                // There is the active_staked_sorted_remote_peer and active_staked_sorted_remote_peer_addr
+                // The active_staked_sorted_remote_peer_addr is updated in `remove_worker_from_active_connection`
+                self.active_staked_sorted_remote_peer
+                    .peer_stake_map
+                    .get(&remote_peer_identity)
+                    .copied()
+                    .unwrap_or(0);
+
+                // We remove the stake from the remote peer address map
                 self.active_staked_sorted_remote_peer
                     .remove(&remote_peer_identity);
+
                 self.remote_peer_addr_watcher.forget(remote_peer_identity);
 
                 let is_being_evicted = self.being_evicted_peers.remove(&remote_peer_identity);
@@ -1803,6 +1906,7 @@ where
                         active_conn_version == worker_conn_version,
                         "Connection version mismatch for remote peer: {remote_peer_identity}, active: {active_conn_version}, worker: {worker_conn_version}",
                     );
+
                     self.remove_worker_from_active_connection(
                         worker_tx.remote_peer_addr,
                         remote_peer_identity,
@@ -2604,6 +2708,7 @@ impl TpuSenderDriverSpawner {
             connection_version: 0,
             endpoint_sequence: 0,
             pending_connection_eviction_set: Default::default(),
+            active_staked_sorted_remote_peer_addr: Default::default(),
         };
 
         let jh = driver_rt.spawn(driver.run());
@@ -2728,6 +2833,7 @@ pub const fn module_path_for_test() -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod test {
     use {
         super::{
@@ -2795,6 +2901,7 @@ mod test {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod stake_based_eviction_strategy_test {
     use {
         super::{ConnectionEvictionStrategy, StakeSortedPeerSet},

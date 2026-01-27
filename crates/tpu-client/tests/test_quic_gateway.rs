@@ -998,7 +998,7 @@ async fn it_should_support_multiplexed_connection() {
 
     let _ = setup_tracing_test_many(vec![
         yellowstone_jet_tpu_client::core::module_path_for_test(),
-        module_path!()
+        module_path!(),
     ]);
 
     // NOTE: IF YOU WANT TO SEND TRANSACTION TO DIFFERENT REMOTE_PEER_IDENTITY,
