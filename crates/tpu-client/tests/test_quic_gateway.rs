@@ -1,9 +1,7 @@
 mod testkit;
 
 use {
-    crate::testkit::{
-        build_validator_quic_tpu_endpoint, find_available_port, setup_tracing_test_many,
-    },
+    crate::testkit::{build_validator_quic_tpu_endpoint, find_available_port},
     bytes::Bytes,
     quinn::{ConnectionError, VarInt},
     solana_keypair::Keypair,
@@ -644,8 +642,11 @@ async fn it_should_evict_connection() {
         "helloworld".as_bytes().to_vec(),
     );
     transaction_sink.send(txn).await.expect("send tx");
-
+    tracing::trace!("Sent tx to remote_validator_identity1");
     let actual_remote_validator1 = stream_map.next().await.expect("next").0;
+
+    tracing::trace!("Received tx from remote_validator_identity1");
+
     assert_eq!(
         actual_remote_validator1,
         remote_validator_identity1.pubkey()
@@ -658,13 +659,15 @@ async fn it_should_evict_connection() {
         "helloworld2".as_bytes().to_vec(),
     );
     transaction_sink.send(txn2).await.expect("send tx");
-
+    tracing::trace!("Sent tx to remote_validator_identity2");
     let conn_end = validator_conn_spy1.recv().await.expect("recv");
+    tracing::trace!("Received connection end notification for remote_validator_identity1");
 
     assert!(conn_end.result.is_err(), "connection should be evicted");
     assert_eq!(conn_end.remote_pubkey, gateway_kp.pubkey());
 
     let actual_remote_validator2 = stream_map.next().await.expect("next").0;
+    tracing::trace!("Received tx from remote_validator_identity2");
     assert_eq!(
         actual_remote_validator2,
         remote_validator_identity2.pubkey()
@@ -677,7 +680,9 @@ async fn it_should_evict_connection() {
         "helloworld3".as_bytes().to_vec(),
     );
     transaction_sink.send(txn3).await.expect("send tx");
+    tracing::trace!("Sent tx to remote_validator_identity1 again");
     let actual_remote_validator3 = stream_map.next().await.expect("next").0;
+    tracing::trace!("Received tx from remote_validator_identity1 again");
     assert_eq!(
         actual_remote_validator3,
         remote_validator_identity1.pubkey()
@@ -837,6 +842,7 @@ async fn it_should_detect_remote_peer_address_change() {
 
     fake_tpu_info_service.update_addr(rx_server_identity.pubkey(), new_rx_server_addr);
 
+    tracing::trace!("Updated remote peer address in the TPU info service");
     // rx_server_handle2.await.expect("rx server handle");
     // Wait for the connection to be evicted
     let conn_ended = conn_spy_rx1.recv().await.expect("recv");
@@ -995,11 +1001,6 @@ async fn it_should_support_multiplexed_connection() {
     // Multiple remote peer validators may share the same socket address.
     // This test ensures that the gateway can handle such a scenario by
     // ensuring that transactions sent to different remote peers sharing the same connection
-
-    let _ = setup_tracing_test_many(vec![
-        yellowstone_jet_tpu_client::core::module_path_for_test(),
-        module_path!(),
-    ]);
 
     // NOTE: IF YOU WANT TO SEND TRANSACTION TO DIFFERENT REMOTE_PEER_IDENTITY,
     // YOU MUST REGISTER IN FAKE_TPU_INFO_SERVICE, SO IS IN THE MOCKED STAKE INFO MAP

@@ -58,6 +58,7 @@ pub fn build_validator_quic_tpu_endpoint(kp: &Keypair, addr: SocketAddr) -> quin
     crypto.alpn_protocols = vec![ALPN_TPU_PROTOCOL_ID.to_vec()];
 
     let quic_server_config = QuicServerConfig::try_from(crypto).expect("quic server config");
+
     let config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
     quinn::Endpoint::server(config, addr).expect("quinn server endpoint")
 }

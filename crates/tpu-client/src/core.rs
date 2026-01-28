@@ -44,7 +44,7 @@ use {
     crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
     bytes::Bytes,
     derive_more::Display,
-    futures::{SinkExt, task::AtomicWaker},
+    futures::task::AtomicWaker,
     quinn::{
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
         WriteError, crypto::rustls::QuicClientConfig,
@@ -1067,16 +1067,19 @@ impl RemotePeerAddrMap<'_> {
     pub fn staked_sorted_remote_peer_groups(
         &self,
     ) -> impl Iterator<Item = MultiplexedPeerGroup<'_>> + '_ {
+        let iter = Box::new(self.staked_sorted_address_set.iter());
         struct MyIterator<'a> {
-            staked_sorted_addr: &'a StakedSortedSet<SocketAddr>,
+            iter: Box<dyn Iterator<Item = (u64, SocketAddr)> + 'a>,
             connection_map: &'a HashMap<SocketAddr, ActiveConnection>,
         }
 
         impl<'a> Iterator for MyIterator<'a> {
             type Item = MultiplexedPeerGroup<'a>;
 
+            #[allow(clippy::while_let_on_iterator)]
             fn next(&mut self) -> Option<Self::Item> {
-                while let Some((_, addr)) = self.staked_sorted_addr.iter().next() {
+                while let Some((_, addr)) = self.iter.next() {
+                    tracing::trace!("Yielding multiplexed peer group at address: {}", addr);
                     if let Some(active_conn) = self.connection_map.get(&addr) {
                         return Some(MultiplexedPeerGroup {
                             socket_addr: addr,
@@ -1089,7 +1092,7 @@ impl RemotePeerAddrMap<'_> {
         }
 
         MyIterator {
-            staked_sorted_addr: self.staked_sorted_address_set,
+            iter,
             connection_map: self.connection_map,
         }
     }
@@ -1293,7 +1296,7 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
                     proposed_eviction.push(*peer);
                 }
             });
-
+        tracing::trace!("Planned eviction peers len: {:?}", proposed_eviction.len());
         if proposed_eviction.is_empty() {
             // Or else we don't care, just evict the lowest-staked peer group.
             remote_peer_address_map
@@ -1480,6 +1483,10 @@ where
                     remote_peer_addr,
                     notify: Arc::clone(&notify),
                 };
+                tracing::trace!(
+                    "Remote peer: {} connection attempt blocked, waiting for eviction",
+                    remote_peer_identity
+                );
                 self.connecting_blocked_by_eviction_list
                     .push_back(waiting_eviction);
                 Some(notify)
@@ -1609,8 +1616,13 @@ where
             .saturating_sub(self.being_evicted_peers.len());
 
         if eviction_count_required == 0 {
+            tracing::trace!("No eviction required at this time");
             return;
         }
+        tracing::info!(
+            "Eviction required for {} connections",
+            eviction_count_required
+        );
         let addr_map = RemotePeerAddrMap {
             remote_peer_address: &self.tx_worker_handle_map,
             connection_map: &self.connection_map,
@@ -1625,6 +1637,7 @@ where
             eviction_count_required,
             &addr_map,
         );
+        tracing::trace!("Eviction plan len {}", eviction_plan.len());
         if !eviction_plan.is_empty() {
             tracing::info!("Planned {} evictions", eviction_plan.len());
 
@@ -1681,6 +1694,10 @@ where
             }
         }
 
+        tracing::trace!(
+            "Evicting {} remote peer connections",
+            cancel_handles_vec.len()
+        );
         for cancel_handle in cancel_handles_vec {
             cancel_handle.notify_one();
         }
@@ -2506,6 +2523,14 @@ where
                             );
                             // Update the worker's remote address.
                             handle.cancel_notify.notify_one();
+                            let connection_version = handle.connection_version;
+                            let connection_eviction = ConnectionEviction {
+                                remote_peer_addr: handle.remote_peer_addr,
+                                connection_version,
+                            };
+                            self.pending_connection_eviction_set
+                                .insert(connection_eviction);
+
                             #[cfg(feature = "prometheus")]
                             {
                                 prom::incr_quic_gw_remote_peer_addr_changes_detected();
@@ -2515,6 +2540,13 @@ where
                     None => {
                         // If we don't have a new address, we need to drop the worker.
                         handle.cancel_notify.notify_one();
+                        let connection_version = handle.connection_version;
+                        let connection_eviction = ConnectionEviction {
+                            remote_peer_addr: handle.remote_peer_addr,
+                            connection_version,
+                        };
+                        self.pending_connection_eviction_set
+                            .insert(connection_eviction);
                         #[cfg(feature = "prometheus")]
                         {
                             prom::incr_quic_gw_remote_peer_addr_changes_detected();
@@ -2652,6 +2684,9 @@ impl RemotePeerAddrWatcher {
         tpu_port_kind: TpuPortKind,
         leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     ) -> Self {
+        tracing::trace!(
+            "Spawning remote peer address watcher with refresh interval: {refresh_interval:?}"
+        );
         let shared = Default::default();
         let (cnc_tx, cnc_rx) = mpsc::unbounded_channel();
         let notify = Arc::new(Notify::new());
