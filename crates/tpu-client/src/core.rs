@@ -44,7 +44,7 @@ use {
     crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
     bytes::Bytes,
     derive_more::Display,
-    futures::task::AtomicWaker,
+    futures::{SinkExt, task::AtomicWaker},
     quinn::{
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
         WriteError, crypto::rustls::QuicClientConfig,
@@ -901,7 +901,7 @@ pub trait ConnectionEvictionStrategy {
     ///
     /// Plan up to `plan_ahead_size` [`quinn::Connection`] to evicts.
     ///
-    /// Arguments:
+    /// # Arguments
     ///
     /// `now`: the current time, can be used by the strategy to apply grace period if it supports it.
     /// `ss_identites`: a sorted set of remote pubkeys currently connected to.
@@ -927,6 +927,34 @@ pub trait ConnectionEvictionStrategy {
         plan_ahead_size: usize,
     ) -> Vec<Pubkey>;
 
+    ///
+    /// Plan up to `plan_ahead_size` [`quinn::Connection`] to evicts, with additional context from remote peer address map.
+    ///
+    /// This default implementation simply calls [`Self::plan_eviction`].
+    ///
+    /// Strategies that need additional context from remote peer address map should override this method.
+    ///
+    /// # Arguments
+    ///
+    /// `now`: the current time, can be used by the strategy to apply grace period if it supports it.
+    /// `ss_identies`: a sorted set of remote pubkeys currently connected to.
+    /// `usage_table`: A lookup table from remote peer identity to last time a transaction was routed to.
+    /// `evicting_masq` : a set of pubkey already schedule for evicting, may overlap with `ss_identities`.
+    /// The resulted plan should not include any of `already_evicting`.
+    /// `plan_ahead_size` : how far ahead should the strategy plan ahead future evictions.
+    /// `remote_peer_address_map`: A [`RemotePeerAddrMap`] that provides information about remote peer addresses and their connections.
+    ///
+    /// # Returns
+    ///
+    /// A list of remote peer identity to evict in order of evicting priority.
+    ///
+    /// # Multiplexing Note
+    ///
+    /// Multiple remote peer identities may share the same socket address.
+    /// Evicting one remote peer identity will also terminate the connection for all other the remote peer identities sharing the same socket address.
+    ///
+    /// See [`StakeBasedEvictionStrategy`] for an example of eviction strategy that uses this method.
+    ///
     #[allow(unused_variables)]
     fn plan_eviction_with_addr_map(
         &self,
@@ -947,24 +975,71 @@ pub trait ConnectionEvictionStrategy {
     }
 }
 
+///
+/// A map that provides information about remote peer addresses and their connections.
+///
+/// # Note
+///
+/// This struct is used to provide additional context to eviction strategies that need to know.
+/// You can get the address of a peer, the connected stake at an address, and iterate over staked sorted remote peer groups.
+///
 pub struct RemotePeerAddrMap<'a> {
     remote_peer_address: &'a HashMap<Pubkey, TxWorkerSenderHandle>,
     connection_map: &'a HashMap<SocketAddr, ActiveConnection>,
     staked_sorted_address_set: &'a StakedSortedSet<SocketAddr>,
 }
 
-pub struct StakedSortedAddress {
-    pub addr: SocketAddr,
-    pub total_stake: u64,
+///
+/// A group of remote peer identities multiplexed over the same socket address.
+///
+/// # Note
+///
+/// Multiple remote peer identities may share the same socket address.
+/// This struct represents such a group, along with their associated stake values.
+///
+pub struct MultiplexedPeerGroup<'a> {
+    pub socket_addr: SocketAddr,
+    group: &'a HashMap<Pubkey, u64>,
+}
+
+impl MultiplexedPeerGroup<'_> {
+    ///
+    /// Gets the total stake of all remote peer identities in the group.
+    ///
+    pub fn total_stake(&self) -> u64 {
+        self.group.values().sum()
+    }
+
+    ///
+    /// Yields iterator over the remote peer identities and their stake in the group.
+    ///
+    pub fn iter(&self) -> impl Iterator<Item = (&Pubkey, &u64)> {
+        self.group.iter()
+    }
 }
 
 impl RemotePeerAddrMap<'_> {
+    ///
+    /// Gets the socket address of a given remote peer identity.
+    ///
+    /// # Multiplexing Note
+    ///
+    /// Multiple remote peer identities may share the same socket address.
+    ///
     pub fn get_addr_of(&self, peer: &Pubkey) -> Option<SocketAddr> {
         self.remote_peer_address
             .get(peer)
             .map(|handle| handle.remote_peer_addr)
     }
 
+    ///
+    /// Gets the total connected stake at a given socket address.
+    ///
+    /// # Multiplexing Note
+    ///
+    /// Multiple remote peer identities may share the same socket address.
+    /// The total connected stake is the sum of the stake of all remote peer identities
+    ///
     pub fn get_connected_stake_at_addr(&self, addr: &SocketAddr) -> Option<u64> {
         self.connection_map.get(addr).map(|active_conn| {
             active_conn
@@ -974,11 +1049,50 @@ impl RemotePeerAddrMap<'_> {
         })
     }
 
-    // pub fn get_multiplexed_peers_at_addr_with_stake(&self, addr: &SocketAddr) -> Option<impl Iterator<Item = (&Pubkey, &u64)>> {
-    //     self.connection_map
-    //         .get(addr)
-    //         .map(|active_conn| active_conn.multiplexed_remote_peer_identity_with_stake.iter())
-    // }
+    ///
+    /// Yields instance of [`MultiplexedPeerGroup`] in order of ascending stake.
+    ///
+    /// A [`MultiplexedPeerGroup`] represents a group of remote peer identities multiplexed over the same socket address.
+    ///
+    /// The stake of each group is the sum of the stake of all remote peer identities in the group.
+    ///
+    /// # Eviction Strategy Usage
+    ///
+    /// This function can be used by eviction strategies to make informed decisions based on the stake distribution across different remote peer groups.
+    /// Because multiple remote peer may share the same socket address, evicting one remote peer identity will also terminate the connection for all other
+    /// remote peer identities sharing the same socket address.
+    ///
+    /// If a remote connection host peers with various stake levels, evicting the lowest staked peer may not be optimal.
+    ///
+    pub fn staked_sorted_remote_peer_groups(
+        &self,
+    ) -> impl Iterator<Item = MultiplexedPeerGroup<'_>> + '_ {
+        struct MyIterator<'a> {
+            staked_sorted_addr: &'a StakedSortedSet<SocketAddr>,
+            connection_map: &'a HashMap<SocketAddr, ActiveConnection>,
+        }
+
+        impl<'a> Iterator for MyIterator<'a> {
+            type Item = MultiplexedPeerGroup<'a>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                while let Some((_, addr)) = self.staked_sorted_addr.iter().next() {
+                    if let Some(active_conn) = self.connection_map.get(&addr) {
+                        return Some(MultiplexedPeerGroup {
+                            socket_addr: addr,
+                            group: &active_conn.multiplexed_remote_peer_identity_with_stake,
+                        });
+                    }
+                }
+                None
+            }
+        }
+
+        MyIterator {
+            staked_sorted_addr: self.staked_sorted_address_set,
+            connection_map: self.connection_map,
+        }
+    }
 }
 
 pub type StakeSortedPeerSet = StakedSortedSet<Pubkey>;
@@ -1047,6 +1161,10 @@ where
         already_present
     }
 
+    pub fn get(&self, peer: &V) -> Option<u64> {
+        self.peer_stake_map.get(peer).copied()
+    }
+
     ///
     /// Iterates over the set in ascending order of stake.
     ///
@@ -1067,6 +1185,21 @@ where
 ///
 /// An eviction strategy that evicts the lowest staked remote peer first,
 /// unless it has been used recently.
+///
+/// # Mutiplexing Note
+///
+/// Because multiple remote peer identities may share the same socket address,
+/// evicting one remote peer identity will also terminate the connection for all other
+/// remote peer identities sharing the same socket address.
+///
+/// This strategy takes that into account by evicting groups of remote peer identities
+/// multiplexed over the same socket address.
+///
+/// Because of this its recommended to use [`ConnectionEvictionStrategy::plan_eviction_with_addr_map`]
+///
+/// # Grace Period
+///
+/// This strategy applies a grace period to avoid evicting remote peers that have been used recently.
 ///
 #[derive(Debug)]
 pub struct StakeBasedEvictionStrategy {
@@ -1124,14 +1257,86 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
             plan
         }
     }
+
+    ///
+    /// Plan up to `plan_ahead_size` [`quinn::Connection`] to evicts, with additional context from remote peer address map.
+    ///
+    fn plan_eviction_with_addr_map(
+        &self,
+        now: Instant,
+        _ss_identies: &StakeSortedPeerSet,
+        usage_table: &HashMap<Pubkey, Instant>,
+        already_evicting: &HashSet<Pubkey>,
+        plan_ahead_size: usize,
+        remote_peer_address_map: &RemotePeerAddrMap<'_>,
+    ) -> Vec<Pubkey> {
+        let mut proposed_eviction = Vec::with_capacity(plan_ahead_size);
+
+        remote_peer_address_map
+            .staked_sorted_remote_peer_groups()
+            .filter_map(|group| {
+                for (peer, _peer_stake) in group.iter() {
+                    if already_evicting.contains(peer) {
+                        return None;
+                    }
+                    let last_usage = usage_table.get(peer).expect("missing last activity");
+                    let elapsed = now.saturating_duration_since(*last_usage);
+                    if elapsed < self.peer_idle_eviction_grace_period {
+                        return None;
+                    }
+                }
+                Some(group)
+            })
+            .take(plan_ahead_size)
+            .for_each(|group| {
+                for (peer, _peer_stake) in group.iter() {
+                    proposed_eviction.push(*peer);
+                }
+            });
+
+        if proposed_eviction.is_empty() {
+            // Or else we don't care, just evict the lowest-staked peer group.
+            remote_peer_address_map
+                .staked_sorted_remote_peer_groups()
+                .filter_map(|group| {
+                    for (peer, _peer_stake) in group.iter() {
+                        if already_evicting.contains(peer) {
+                            return None;
+                        }
+                    }
+                    Some(group)
+                })
+                .take(plan_ahead_size)
+                .for_each(|group| {
+                    for (peer, _peer_stake) in group.iter() {
+                        proposed_eviction.push(*peer);
+                    }
+                });
+        }
+        proposed_eviction
+    }
 }
 
+///
+/// Source of spawning a connection task.
+///
+/// Spawning a connection task can be triggered by different events.
+/// This enum helps for debugging of logging purposes.
+///
+/// See [`TpuSenderDriver::spawn_connecting`] for more information.
 #[derive(Debug)]
 enum SpawnSource {
+    /// A new transaction arrived for a remote peer without a worker.
     NewTransaction,
+    /// Connection spawned because the underlying driver's identity used to sign certicated was updated.
     UpdateIdentity,
+    ///
+    /// Connection spawned because a prediction that a remote peer will be needed soon.
+    ///
     Prediction,
+    /// Connection spawned as part of re-attempting failed connections.
     Reattempt,
+    /// Connection spawned as part of rescuing queued transactions for a remote peer's worker.
     Rescue,
 }
 
@@ -1178,9 +1383,30 @@ where
     ///
     /// this is called when a transaction is received for a remote peer which does not have a worker installed yet.
     ///
-    /// If there is already a connecting task for the same remote peer address, the remote peer identity will be multiplexed
-    /// and share the same underlying connection.
-    /// Since two leaders cannot be leader at the same time, this is safe to do.
+    /// # Multiplexing Note
+    ///
+    /// Multiple remote peer identities may share the same socket address.
+    ///
+    /// This method will multiplex remote peer identities over the same connection if there is already a connecting task
+    /// for the same remote peer address.
+    ///
+    /// If a [`quinn::Connection`] already exists for the  TPU address of the provided `remote_peer_identity`,
+    /// this method will directly call [`TpuSenderDriver::install_worker`] for the remote peer identity using the existing connection
+    /// and add it to the multiplexed remote peer identities of the connection.
+    ///
+    /// ## Fragmentation edge-case caused by multiplexing
+    ///
+    /// Since multiple [`QuicTxSenderWorker`] may share the same [`quinn::Connection`], we have to ensure that
+    /// each worker sends transactions sequentially over the connection, not concurrently.
+    ///
+    /// Since there is only one leader at a time in Solana, it's expected that most of the time only one remote peer identity
+    /// will be active on a connection, thus fragmentation should not exists.
+    ///
+    /// The only occurence of fragmentation would be during leader transitions over two validators sharing the same TPU address.
+    /// In this case, both remote peer identities may have pending transactions to send over the same connection during the last half of a slot.
+    /// NOTE: This very edge-case will be fixed in the future.
+    ///
+    /// Lastly, most validators will not multiplex multiple identities over the same address, thus fragmentation should be non-existent in practice.
     ///
     fn spawn_connecting(
         &mut self,
@@ -1231,6 +1457,7 @@ where
         };
 
         if self.connection_map.contains_key(&remote_peer_addr) {
+            // We already have an active connection for the remote peer address
             tracing::info!(
                 "Re-using existing active connection to remote peer address: {} for remote peer identity: {}",
                 remote_peer_addr,
@@ -1247,6 +1474,7 @@ where
         // Otherwise, the connecting attempt may fail to bind a local port.
         let maybe_wait_for_eviction =
             if !self.has_connection_capacity() && maybe_existing_connecting_task.is_none() {
+                // We need to evict a connection before we can proceed.
                 let notify = Arc::new(Notify::new());
                 let waiting_eviction = WaitingEviction {
                     remote_peer_addr,
@@ -1256,11 +1484,14 @@ where
                     .push_back(waiting_eviction);
                 Some(notify)
             } else {
+                // There is room for new connections, no need to wait for eviction.
                 None
             };
 
         match maybe_existing_connecting_task {
             Some(existing_task_id) => {
+                // There is already a connecting task for the same remote peer address.
+                // Due to multiplexing, we can re-use the existing connecting task.
                 tracing::info!(
                     "Re-using existing connecting task to remote peer address: {} for remote peer identity: {}",
                     remote_peer_addr,
@@ -1272,6 +1503,8 @@ where
                     .expect("missing connecting meta for existing task");
                 meta.multiplexed_remote_peer_identity_vec
                     .push(remote_peer_identity);
+
+                // Just add yourself to the connecting remote peers map.
                 let old = self
                     .connecting_remote_peers
                     .insert(remote_peer_identity, *existing_task_id);
@@ -1281,6 +1514,7 @@ where
                 );
             }
             None => {
+                // No existing connecting task for the remote peer address, spawn a new one.
                 let endpoint_idx = self.next_endpoint_idx();
                 let cert = Arc::clone(&self.client_certificate);
                 let max_idle_timeout = self.config.max_idle_timeout;
@@ -1455,6 +1689,19 @@ where
     ///
     /// Installs a transaction sender worker for a remote peer with the given connection.
     ///
+    /// # Arguments
+    ///
+    /// - `remote_peer_identity`: The public key of the remote peer.
+    /// - `remote_peer_addr`: The socket address of the remote peer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there is no active connection for the given remote peer address.
+    /// This function assumes that a connection has already been established for the remote peer address.
+    ///
+    /// See [`TpuSenderDriver::spawn_connecting`] for connection establishment
+    /// and see [`TpuSenderDriver::handle_connecting_result`] for handling connection results.
+    ///
     fn install_worker(&mut self, remote_peer_identity: Pubkey, remote_peer_addr: SocketAddr) {
         let (tx, rx) = mpsc::channel(self.config.transaction_sender_worker_channel_capacity);
 
@@ -1540,6 +1787,9 @@ where
     ///
     /// Reattempts the connection if it fails, up to the maximum number of attempts, unless the peer is unreachable.
     ///
+    /// If the connection is successful, this function call [`TpuSenderDriver::install_worker`] to set up a transaction sender worker for each
+    /// multiplexed remote peer identity over the connection.
+    ///
     fn handle_connecting_result(
         &mut self,
         result: Result<(task::Id, Result<Connection, ConnectingError>), JoinError>,
@@ -1621,6 +1871,12 @@ where
                             ConnectingError::ConnectionError(_)
                                 if connection_attempt < self.config.max_connection_attempts =>
                             {
+                                // HERE'S THE CODE THE HANDLE RETRY LOGIC.
+                                // NOTE: THE RETRY COUNT IS NOT INSIDE A SPECIFIC REGISTER OR MAP,
+                                // IT'S STATELESS MEANING THE RETRY COUNT IS DETERMINED BY THE NUMBER OF ATTEMPTS STORED ON EACH CONNECTING TASK.
+                                // EACH REATTEMPT SPAWNS A NEW CONNECTING TASK WITH ATTEMPT COUNT EQUALS TO PREVIOUS ATTEMPT COUNT + 1.
+                                // AFTER REACHING MAX ATTEMPTS, THE DEAULT MATCH BRANCH WILL HANDLE THE FAILURE CALLED "whatever".
+
                                 tracing::warn!(
                                     "Connection attempt {} to remote peer: {multiplexed_remote_peer_identity_vec:?} failed, retrying...",
                                     connection_attempt
@@ -1693,6 +1949,19 @@ where
         }
     }
 
+    ///
+    /// Generates the next connection version number.
+    ///
+    /// We use connection versioning to track connection re-establishments.
+    ///
+    /// This is more a sanity check than anything else and not part of any core business logic.
+    ///
+    /// Why we are doing connection version tracking? Because this tpu sender driver is like a complex state-machine with alot of moving parts.
+    /// Connections can be re-established, workers can be spawned and evicted, all happening concurrently.
+    /// Making sure that a worker is using the correct connection is important to avoid subtle bugs.
+    /// So we use connection versioning to `assert!` that we didn't create any orphan worker or orphan connection in the code.
+    ///
+    ///
     fn next_connection_version(&mut self) -> u64 {
         let ret = self.connection_version;
         self.connection_version += 1;
@@ -1701,6 +1970,7 @@ where
 
     ///
     /// Round-robin endpoint selection
+    ///
     fn next_endpoint_idx(&mut self) -> usize {
         let ret = self.endpoint_sequence;
         self.endpoint_sequence = (self.endpoint_sequence + 1) % self.endpoints.len();
@@ -1786,6 +2056,10 @@ where
         }
     }
 
+    ///
+    /// Unblocks a connection attempt that was waiting for eviction to complete.
+    /// We do this blocking to avoid connection capacity exhaustion.
+    /// Since we have a maximum number of concurrent connections that can be configured by the user.
     fn unblock_eviction_waiting_connection(&mut self) {
         let Some(WaitingEviction {
             remote_peer_addr,
@@ -2036,6 +2310,25 @@ where
 
     ///
     /// Updates the driver identity and reconnects to all remote peers with the new identity.
+    ///
+    /// # DANGER
+    ///
+    /// This function is super important to get right. Changing the identity of the driver
+    /// means that all existing connections are invalidated and must be re-established.
+    ///
+    /// It also means we need to properly clean up all existing state associated with the old identity and prior connections.
+    ///
+    /// # Steps performed
+    ///
+    /// 1. Schedule a graceful drop of all transaction workers.
+    /// 2. Clear the connection map.
+    /// 3. Store inflight connecting task metadata, in order to replay them later.
+    /// 4. Abort and detach all inflight connecting tasks.
+    /// 5. Clear all connecting remote peers and their addresses.
+    /// 6. Clear the connecting blocked by eviction list.
+    /// 7. Update the identity and client certificate.
+    /// 8. Replay all connecting tasks with the new identity and connecting meta stored at step #3.
+    ///  
     ///
     fn update_identity(&mut self, update_identity_cmd: UpdateIdentityCommand) {
         let UpdateIdentityCommand {
