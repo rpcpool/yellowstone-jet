@@ -1485,6 +1485,13 @@ where
             }
             self.install_worker(remote_peer_identity, remote_peer_addr);
             return;
+        } else {
+            #[cfg(feature = "prometheus")]
+            {
+                if debug_source == SpawnSource::NewTransaction {
+                    prom::incr_quic_gw_tx_connection_cache_miss_cnt();
+                }
+            }
         }
 
         #[cfg(feature = "prometheus")]
