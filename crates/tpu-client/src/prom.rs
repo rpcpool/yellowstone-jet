@@ -52,10 +52,6 @@ lazy_static::lazy_static! {
         "quic_gw_connection_failure", "Number of failed connections to remote peer validators"
     ).unwrap();
 
-    static ref QUIC_GW_ACTIVE_CONNECTION_GAUGE: IntGauge = IntGauge::new(
-        "quic_gw_active_connection", "Number of active connections to remote peer validators"
-    ).unwrap();
-
     static ref QUIC_GW_TOTAL_CONNECTION_EVICTIONS_CNT: IntCounter = IntCounter::new(
         "quic_gw_total_connection_evictions", "Total number of evicted connections to remote peer validators since the start of the service"
     ).unwrap();
@@ -69,10 +65,6 @@ lazy_static::lazy_static! {
         &["leader"]
     ).unwrap();
 
-    static ref QUIC_GW_ONGOING_EVICTIONS_GAUGE: IntGauge = IntGauge::new(
-        "quic_gw_ongoing_evictions", "Number of ongoing evictions of connections to remote peer validators"
-    ).unwrap();
-
     static ref QUIC_GW_TX_CONNECTION_CACHE_HIT_CNT: IntCounter = IntCounter::new(
         "quic_gw_tx_connection_cache_hit", "Number of hits transaction got forward to an existing connection to remote peer validators"
     ).unwrap();
@@ -81,8 +73,8 @@ lazy_static::lazy_static! {
         "quic_gw_tx_connection_cache_miss", "Number of misses transaction got forward to a new connection to remote peer validators"
     ).unwrap();
 
-    static ref QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE: IntGauge = IntGauge::new(
-        "quic_gw_tx_blocked_by_connecting", "Number of transactions waiting for remote peer connection to be established"
+    static ref TXN_BLOCKED_BY_CONNECTION: IntGauge = IntGauge::new(
+        "jet_tpu_txn_blocked_by_connecting", "Number of transactions waiting for remote peer connection to be established"
     ).unwrap();
 
     static ref QUIC_GW_CONNECTION_TIME_HIST: Histogram = Histogram::with_opts(
@@ -138,6 +130,42 @@ lazy_static::lazy_static! {
         &["remote_peer"]
     ).unwrap();
 
+    static ref ACTIVE_QUIC_CONNECTIONS: IntGauge = IntGauge::new(
+        "jet_tpu_sender_active_quic_connection",
+        "Number of active QUIC connections"
+    ).unwrap();
+
+    static ref ACTIVE_QUIC_TX_SENDERS: IntGauge = IntGauge::new(
+        "jet_tpu_sender_active_quic_tx_senders",
+        "Number of active QUIC transaction senders"
+    ).unwrap();
+
+    static ref NUM_CONN_TO_EVICT: IntGauge = IntGauge::new(
+        "jet_tpu_num_conn_to_evict",
+        "Number of connections waiting to be evicted"
+    ).unwrap();
+
+    static ref TXN_WORKER_PRE_INSTALL_MISS: IntCounter = IntCounter::new(
+        "jet_tpu_txn_worker_pre_install_miss",
+        "Number of times a transaction worker was not pre-installed for a remote peer"
+    ).unwrap();
+
+}
+
+pub fn incr_txn_worker_pre_installed_miss() {
+    TXN_WORKER_PRE_INSTALL_MISS.inc();
+}
+
+pub fn set_num_conn_to_evict(count: usize) {
+    NUM_CONN_TO_EVICT.set(count as i64);
+}
+
+pub fn set_active_quic_tx_senders(count: usize) {
+    ACTIVE_QUIC_TX_SENDERS.set(count as i64);
+}
+
+pub fn set_active_quic_connections(count: usize) {
+    ACTIVE_QUIC_CONNECTIONS.set(count as i64);
 }
 
 pub fn incr_quic_gw_tx_relayed_to_worker(remote_peer: Pubkey) {
@@ -174,18 +202,13 @@ pub fn observe_quic_gw_connection_time(duration: Duration) {
     QUIC_GW_CONNECTION_TIME_HIST.observe(duration.as_millis() as f64);
 }
 
-pub fn set_quic_gw_tx_blocked_by_connecting_cnt(blocked: usize) {
-    QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE.set(blocked as i64);
+pub fn set_txn_blocked_by_connection(blocked: usize) {
+    TXN_BLOCKED_BY_CONNECTION.set(blocked as i64);
 }
 pub fn set_quic_gw_connecting_cnt(connecting: usize) {
     QUIC_GW_CONNECTING_GAUGE.set(connecting as i64);
 }
-pub fn set_quic_gw_ongoing_evictions_cnt(ongoing: usize) {
-    QUIC_GW_ONGOING_EVICTIONS_GAUGE.set(ongoing as i64);
-}
-pub fn set_quic_gw_active_connection_cnt(active: usize) {
-    QUIC_GW_ACTIVE_CONNECTION_GAUGE.set(active as i64);
-}
+
 pub fn incr_quic_gw_connection_failure_cnt() {
     QUIC_GW_CONNECTION_FAILURE_CNT.inc();
 }
@@ -224,8 +247,6 @@ pub fn set_leader_mtu(leader: Pubkey, mtu: u16) {
 }
 
 pub fn register_metrics(reg: &Registry) {
-    reg.register(Box::new(QUIC_GW_ACTIVE_CONNECTION_GAUGE.clone()))
-        .unwrap();
     reg.register(Box::new(QUIC_GW_CONNECTION_CLOSE_CNT.clone()))
         .unwrap();
     reg.register(Box::new(QUIC_GW_CONNECTION_FAILURE_CNT.clone()))
@@ -236,9 +257,7 @@ pub fn register_metrics(reg: &Registry) {
         .unwrap();
     reg.register(Box::new(QUIC_GW_TOTAL_CONNECTION_EVICTIONS_CNT.clone()))
         .unwrap();
-    reg.register(Box::new(QUIC_GW_ONGOING_EVICTIONS_GAUGE.clone()))
-        .unwrap();
-    reg.register(Box::new(QUIC_GW_TX_BLOCKED_BY_CONNECTING_GAUGE.clone()))
+    reg.register(Box::new(TXN_BLOCKED_BY_CONNECTION.clone()))
         .unwrap();
     reg.register(Box::new(QUIC_GW_TX_CONNECTION_CACHE_HIT_CNT.clone()))
         .unwrap();
@@ -267,6 +286,13 @@ pub fn register_metrics(reg: &Registry) {
     reg.register(Box::new(SEND_TRANSACTION_E2E_LATENCY.clone()))
         .unwrap();
     reg.register(Box::new(QUIC_SEND_ATTEMPTS.clone())).unwrap();
+    reg.register(Box::new(ACTIVE_QUIC_CONNECTIONS.clone()))
+        .unwrap();
+    reg.register(Box::new(ACTIVE_QUIC_TX_SENDERS.clone()))
+        .unwrap();
+    reg.register(Box::new(NUM_CONN_TO_EVICT.clone())).unwrap();
+    reg.register(Box::new(TXN_WORKER_PRE_INSTALL_MISS.clone()))
+        .unwrap();
 }
 
 pub fn inc_quic_gw_unreachable_peer_count(leader: Pubkey) {
