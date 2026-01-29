@@ -7019,7 +7019,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet"
-version = "14.9.1"
+version = "14.9.2-rc1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7110,7 +7110,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet-tpu-client"
-version = "0.2.0"
+version = "0.2.1-rc1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
