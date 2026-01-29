@@ -1332,7 +1332,7 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
 /// This enum helps for debugging of logging purposes.
 ///
 /// See [`TpuSenderDriver::spawn_connecting`] for more information.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpawnSource {
     /// A new transaction arrived for a remote peer without a worker.
     NewTransaction,
@@ -1426,6 +1426,12 @@ where
             .connecting_remote_peers
             .contains_key(&remote_peer_identity)
         {
+            #[cfg(feature = "prometheus")]
+            {
+                if debug_source == SpawnSource::NewTransaction {
+                    prom::incr_quic_gw_tx_connection_cache_miss_cnt();
+                }
+            }
             tracing::warn!(
                 "Skipping connection attempt to remote peer: {} since it is already connecting",
                 remote_peer_identity
@@ -1471,8 +1477,21 @@ where
                 remote_peer_addr,
                 remote_peer_identity
             );
+            #[cfg(feature = "prometheus")]
+            {
+                if debug_source == SpawnSource::NewTransaction {
+                    prom::incr_quic_gw_tx_connection_cache_hit_cnt();
+                }
+            }
             self.install_worker(remote_peer_identity, remote_peer_addr);
             return;
+        }
+
+        #[cfg(feature = "prometheus")]
+        {
+            if debug_source == SpawnSource::NewTransaction {
+                prom::incr_quic_gw_tx_connection_cache_miss_cnt();
+            }
         }
 
         let maybe_existing_connecting_task =
@@ -2055,10 +2074,6 @@ where
                 },
             }
         } else {
-            #[cfg(feature = "prometheus")]
-            {
-                prom::incr_quic_gw_tx_connection_cache_miss_cnt();
-            }
             // We don't have any active transaction sender worker for the remote peer,
             // we need to queue the transaction and try to spawn a new connection.
             self.tx_queues
@@ -2068,13 +2083,8 @@ where
             tracing::trace!("queuing tx: {:?}", tx_id);
 
             // Check if we are not already connecting to this remote peer.
-            if !self
-                .connecting_remote_peers
-                .contains_key(&remote_peer_identity)
-            {
-                // If the remote peer is already being connected, just queue the tx.
-                self.spawn_connecting(remote_peer_identity, 1, SpawnSource::NewTransaction);
-            }
+            // If the remote peer is already being connected, just queue the tx.
+            self.spawn_connecting(remote_peer_identity, 1, SpawnSource::NewTransaction);
         }
     }
 

@@ -257,7 +257,7 @@ impl TpuSenderConfig {
 /// Talking with Anza, we should not open more than 5 endpoints to host QUIC connections.
 pub const DEFAULT_QUIC_DRIVER_ENDPOINT_COUNT: NonZeroUsize =
     NonZeroUsize::new(5).expect("default endpoint count must be non-zero");
-pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
+pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(4);
 pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
 pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
