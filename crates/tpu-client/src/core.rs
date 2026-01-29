@@ -984,9 +984,26 @@ pub trait ConnectionEvictionStrategy {
 /// You can get the address of a peer, the connected stake at an address, and iterate over staked sorted remote peer groups.
 ///
 pub struct RemotePeerAddrMap<'a> {
-    remote_peer_address: &'a HashMap<Pubkey, TxWorkerSenderHandle>,
-    connection_map: &'a HashMap<SocketAddr, ActiveConnection>,
+    connection_map: ConnectionMap<'a>,
     staked_sorted_address_set: &'a StakedSortedSet<SocketAddr>,
+}
+
+enum ConnectionMap<'a> {
+    Quinn(&'a HashMap<SocketAddr, ActiveConnection>),
+    // Only use for test
+    #[allow(dead_code)]
+    Test(&'a HashMap<SocketAddr, HashMap<Pubkey, u64>>),
+}
+
+impl ConnectionMap<'_> {
+    fn get_peer_stake_mapping(&self, addr: &SocketAddr) -> Option<&HashMap<Pubkey, u64>> {
+        match self {
+            ConnectionMap::Quinn(map) => map
+                .get(addr)
+                .map(|active_conn| &active_conn.multiplexed_remote_peer_identity_with_stake),
+            ConnectionMap::Test(map) => map.get(addr),
+        }
+    }
 }
 
 ///
@@ -1020,19 +1037,6 @@ impl MultiplexedPeerGroup<'_> {
 
 impl RemotePeerAddrMap<'_> {
     ///
-    /// Gets the socket address of a given remote peer identity.
-    ///
-    /// # Multiplexing Note
-    ///
-    /// Multiple remote peer identities may share the same socket address.
-    ///
-    pub fn get_addr_of(&self, peer: &Pubkey) -> Option<SocketAddr> {
-        self.remote_peer_address
-            .get(peer)
-            .map(|handle| handle.remote_peer_addr)
-    }
-
-    ///
     /// Gets the total connected stake at a given socket address.
     ///
     /// # Multiplexing Note
@@ -1041,12 +1045,9 @@ impl RemotePeerAddrMap<'_> {
     /// The total connected stake is the sum of the stake of all remote peer identities
     ///
     pub fn get_connected_stake_at_addr(&self, addr: &SocketAddr) -> Option<u64> {
-        self.connection_map.get(addr).map(|active_conn| {
-            active_conn
-                .multiplexed_remote_peer_identity_with_stake
-                .values()
-                .sum()
-        })
+        self.connection_map
+            .get_peer_stake_mapping(addr)
+            .map(|peer_stake_map| peer_stake_map.values().sum())
     }
 
     ///
@@ -1070,7 +1071,7 @@ impl RemotePeerAddrMap<'_> {
         let iter = Box::new(self.staked_sorted_address_set.iter());
         struct MyIterator<'a> {
             iter: Box<dyn Iterator<Item = (u64, SocketAddr)> + 'a>,
-            connection_map: &'a HashMap<SocketAddr, ActiveConnection>,
+            connection_map: &'a ConnectionMap<'a>,
         }
 
         impl<'a> Iterator for MyIterator<'a> {
@@ -1080,20 +1081,20 @@ impl RemotePeerAddrMap<'_> {
             fn next(&mut self) -> Option<Self::Item> {
                 while let Some((_, addr)) = self.iter.next() {
                     tracing::trace!("Yielding multiplexed peer group at address: {}", addr);
-                    if let Some(active_conn) = self.connection_map.get(&addr) {
+                    if let Some(peer_stake_map) = self.connection_map.get_peer_stake_mapping(&addr)
+                    {
                         return Some(MultiplexedPeerGroup {
                             socket_addr: addr,
-                            group: &active_conn.multiplexed_remote_peer_identity_with_stake,
+                            group: peer_stake_map,
                         });
                     }
                 }
                 None
             }
         }
-
         MyIterator {
             iter,
-            connection_map: self.connection_map,
+            connection_map: &self.connection_map,
         }
     }
 }
@@ -1240,7 +1241,9 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
             .iter()
             .filter(|(_, peer)| !already_evicting.contains(peer))
             .filter(|(_, peer)| {
-                let last_usage = usage_table.get(peer).expect("missing last activity");
+                let Some(last_usage) = usage_table.get(peer) else {
+                    return true;
+                };
                 let elapsed = now.saturating_duration_since(*last_usage);
                 elapsed >= self.peer_idle_eviction_grace_period
             })
@@ -1282,7 +1285,9 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
                     if already_evicting.contains(peer) {
                         return None;
                     }
-                    let last_usage = usage_table.get(peer).expect("missing last activity");
+                    let Some(last_usage) = usage_table.get(peer) else {
+                        continue;
+                    };
                     let elapsed = now.saturating_duration_since(*last_usage);
                     if elapsed < self.peer_idle_eviction_grace_period {
                         return None;
@@ -1623,9 +1628,9 @@ where
             "Eviction required for {} connections",
             eviction_count_required
         );
+        let connection_map = ConnectionMap::Quinn(&self.connection_map);
         let addr_map = RemotePeerAddrMap {
-            remote_peer_address: &self.tx_worker_handle_map,
-            connection_map: &self.connection_map,
+            connection_map,
             staked_sorted_address_set: &self.active_staked_sorted_remote_peer_addr,
         };
 
@@ -3233,8 +3238,13 @@ mod test {
 mod stake_based_eviction_strategy_test {
     use {
         super::{ConnectionEvictionStrategy, StakeSortedPeerSet},
+        crate::core::{ConnectionMap, RemotePeerAddrMap, StakedSortedSet},
         solana_pubkey::Pubkey,
-        std::time::{Duration, Instant},
+        std::{
+            collections::HashMap,
+            net::SocketAddr,
+            time::{Duration, Instant},
+        },
     };
 
     #[test]
@@ -3346,6 +3356,118 @@ mod stake_based_eviction_strategy_test {
         // It should propose to evict the lowest staked peer
         assert_eq!(eviction_plan.len(), 1);
         assert!(eviction_plan.contains(&peer3));
+    }
+
+    #[test]
+    fn it_should_pick_lowest_multiplexed_staked() {
+        let addr1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+
+        let peer1 = Pubkey::new_unique();
+        let peer2 = Pubkey::new_unique();
+        let peer3 = Pubkey::new_unique();
+
+        let multiplexed_gr1 = HashMap::from_iter([(peer1, 1), (peer2, 1000)]);
+        let multiplexed_gr2 = HashMap::from_iter([(peer3, 500)]);
+
+        let connection_map =
+            HashMap::from_iter([(addr1, multiplexed_gr1), (addr2, multiplexed_gr2)]);
+
+        let mut staked_sorted_address_set = StakedSortedSet::default();
+        staked_sorted_address_set.insert(addr1, 1001); // 1 + 1000
+        staked_sorted_address_set.insert(addr2, 500);
+        let connection_map = ConnectionMap::Test(&connection_map);
+        let remote_addr_map = RemotePeerAddrMap {
+            connection_map,
+            staked_sorted_address_set: &staked_sorted_address_set,
+        };
+
+        let strategy = super::StakeBasedEvictionStrategy {
+            // We put no grace period for this test.
+            peer_idle_eviction_grace_period: Duration::ZERO,
+        };
+
+        let active_staked_sorted_remote_peer = StakeSortedPeerSet::default();
+        let last_peer_activity = std::collections::HashMap::new();
+
+        let now = Instant::now();
+        let actual = strategy.plan_eviction_with_addr_map(
+            now,
+            &active_staked_sorted_remote_peer,
+            &last_peer_activity,
+            &Default::default(), // max connections to evict
+            1,
+            &remote_addr_map,
+        );
+
+        // It should propose to evict the lowest multiplexed staked address (addr2)
+        assert_eq!(actual.len(), 1);
+        assert!(actual.contains(&peer3));
+    }
+}
+
+#[cfg(test)]
+mod test_remote_peer_addr_map {
+
+    use {
+        super::RemotePeerAddrMap,
+        crate::core::{ConnectionMap, StakedSortedSet},
+        solana_pubkey::Pubkey,
+        std::{collections::HashMap, net::SocketAddr},
+    };
+
+    #[test]
+    fn test_empty_map() {
+        let connection_map = HashMap::<SocketAddr, HashMap<Pubkey, u64>>::new();
+        let connection_map = ConnectionMap::Test(&connection_map);
+        let staked_sorted_address_set = StakedSortedSet::default();
+        let remote_addr_map = RemotePeerAddrMap {
+            connection_map,
+            staked_sorted_address_set: &staked_sorted_address_set,
+        };
+        let actual = remote_addr_map.staked_sorted_remote_peer_groups().count();
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn test_remote_peer_addr_map_sort_order() {
+        let addr1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+
+        let peer1 = Pubkey::new_unique();
+        let peer2 = Pubkey::new_unique();
+        let peer3 = Pubkey::new_unique();
+
+        let multiplexed_gr1 = HashMap::from_iter([(peer1, 1), (peer2, 1000)]);
+        let multiplexed_gr2 = HashMap::from_iter([(peer3, 500)]);
+
+        let connection_map =
+            HashMap::from_iter([(addr1, multiplexed_gr1), (addr2, multiplexed_gr2)]);
+
+        let mut staked_sorted_address_set = StakedSortedSet::default();
+        staked_sorted_address_set.insert(addr1, 1001); // 1 + 1000
+        staked_sorted_address_set.insert(addr2, 500);
+        let connection_map = ConnectionMap::Test(&connection_map);
+        let remote_addr_map = RemotePeerAddrMap {
+            connection_map,
+            staked_sorted_address_set: &staked_sorted_address_set,
+        };
+
+        let actual_multiplexed_stake = remote_addr_map.get_connected_stake_at_addr(&addr1).unwrap();
+        let actual_multiplexed_stake2 =
+            remote_addr_map.get_connected_stake_at_addr(&addr2).unwrap();
+
+        assert_eq!(actual_multiplexed_stake, 1001);
+        assert_eq!(actual_multiplexed_stake2, 500);
+
+        // See if the sort is correct
+        let actual_sorted_address = remote_addr_map
+            .staked_sorted_remote_peer_groups()
+            .map(|group| group.socket_addr)
+            .collect::<Vec<_>>();
+
+        let expected_sorted_address = vec![addr2, addr1]; // addr2 has less stake than addr1
+        assert_eq!(actual_sorted_address, expected_sorted_address);
     }
 }
 
