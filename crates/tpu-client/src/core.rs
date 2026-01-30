@@ -433,6 +433,10 @@ impl ConnectionEvictionSet {
         self.set.len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+
     fn clear(&mut self) {
         self.set.clear();
         self.socket_addr_set.clear();
@@ -1813,7 +1817,7 @@ where
             &addr_map,
         );
         tracing::trace!("Eviction plan len {}", eviction_plan.len());
-        if eviction_plan.is_empty() {
+        if eviction_plan.is_empty() && self.pending_connection_eviction_set.is_empty() {
             // If the evictin plan is empty, pick the connection with the least amount of a active stake
             let min_staked_active_conn = self.connection_map.values().min_by_key(|active_conn| {
                 active_conn
@@ -2134,6 +2138,10 @@ where
                     .remove(&remote_peer_address);
                 for remote_peer_identity in multiplexed_remote_peer_identity_vec {
                     let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
+                    self.drop_peer_queued_tx(
+                        remote_peer_identity,
+                        TxDropReason::RemotePeerUnreachable,
+                    );
                     tracing::error!(
                         "Join error during connecting to {remote_peer_identity:?}: {:?}",
                         join_err
