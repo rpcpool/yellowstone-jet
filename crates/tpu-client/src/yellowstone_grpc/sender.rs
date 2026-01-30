@@ -1,6 +1,6 @@
 use {
     crate::{
-        config::TpuSenderConfig,
+        config::{TpuPortKind, TpuSenderConfig},
         core::{
             Nothing, StakeBasedEvictionStrategy, TpuSenderResponse, TpuSenderResponseCallback,
             TpuSenderTxn,
@@ -282,8 +282,22 @@ pub enum CreateTpuSenderError {
 #[derive(Clone)]
 pub struct YellowstoneTpuSender {
     base_tpu_sender: TpuSender,
+    ///
+    /// If true, coalesce multiple sends to the same remote tpu socket address into a single send.
+    ///
+    /// Default is true.
+    ///
+    /// # Multplexing Note
+    ///
+    /// Some validators in the network may share the same TPU address because they may have TPU proxy in front of them.
+    /// In this case, sending multiple transactions to different validators sharing the same address may be redundant.
+    /// By enabling this option, the sender will coalesce multiple sends to the same address into a single send, reducing network overhead.
+    ///
+    coalesce_send_many_tpu_port_collision: bool,
     atomic_slot_tracker: Arc<AtomicSlotTracker>,
     leader_schedule: ManagedLeaderSchedule,
+    leader_tpu_info: Arc<dyn crate::core::LeaderTpuInfoService + Send + Sync>,
+    tpu_port_kind: TpuPortKind,
 }
 
 ///
@@ -469,8 +483,22 @@ impl YellowstoneTpuSender {
         }
 
         let wire_txn = Bytes::from_owner(txn);
+        let mut dest_addr_vec = Vec::with_capacity(dests.len());
 
         for dest in dests {
+            if let Some(addr) = self
+                .leader_tpu_info
+                .get_quic_dest_addr(dest, self.tpu_port_kind)
+            {
+                if self.coalesce_send_many_tpu_port_collision
+                    && dest_addr_vec
+                        .contains(&addr)
+                {
+                    // Skip duplicate address when coalescing is enabled
+                    continue;
+                }
+                dest_addr_vec.push(addr);
+            }
             let tpu_txn = TpuSenderTxn {
                 tx_sig: sig,
                 remote_peer: *dest,
@@ -566,6 +594,25 @@ impl YellowstoneTpuSender {
                 txn: wire_txn,
             }),
         }
+    }
+
+    ///
+    /// Sets whether to coalesce multiple sends to the same remote tpu socket address into a single send.
+    /// It is set to true by default as it prevents fragmentation edge cases.
+    ///
+    /// # Arguments
+    ///
+    /// * `coalesce` - If true, coalesce multiple sends to the same remote tpu socket address.
+    ///
+    ///
+    /// # Multplexing Note
+    ///
+    /// Some validators in the network may share the same TPU address because they may have TPU proxy in front of them.
+    /// In this case, sending multiple transactions to different validators sharing the same address may be redundant.
+    /// By enabling this option, the sender will coalesce multiple sends to the same address into
+    ///
+    pub fn set_coalesce_many_dest_collision(&mut self, coalesce: bool) {
+        self.coalesce_send_many_tpu_port_collision = coalesce;
     }
 
     ///
@@ -738,11 +785,13 @@ where
         slot_tracker: Arc::clone(&atomic_slot_tracker),
         managed_schedule: managed_leader_schedule.clone(),
     };
-
+    let tpu_port_kind = config.tpu.tpu_port;
+    let tpu_info_service: Arc<dyn crate::core::LeaderTpuInfoService + Send + Sync> =
+        Arc::new(tpu_info_service);
     let base_tpu_sender = create_base_tpu_client(
         config.tpu,
         initial_identity,
-        Arc::new(tpu_info_service.clone()),
+        Arc::clone(&tpu_info_service),
         Arc::new(stake_service.clone()),
         Arc::new(connection_eviction_strategy),
         Arc::new(leader_predictor),
@@ -756,7 +805,10 @@ where
     let sender = YellowstoneTpuSender {
         base_tpu_sender,
         atomic_slot_tracker,
+        coalesce_send_many_tpu_port_collision: true,
         leader_schedule: managed_leader_schedule,
+        leader_tpu_info: Arc::clone(&tpu_info_service),
+        tpu_port_kind,
     };
 
     let handles = vec![
