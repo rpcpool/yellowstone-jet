@@ -44,7 +44,7 @@ use {
     crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
     bytes::Bytes,
     derive_more::Display,
-    futures::{FutureExt, future::pending, task::AtomicWaker},
+    futures::task::AtomicWaker,
     quinn::{
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
         WriteError, crypto::rustls::QuicClientConfig,
@@ -62,6 +62,7 @@ use {
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroUsize,
+        pin::Pin,
         sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
         task::Poll,
         time::{Duration, Instant},
@@ -73,7 +74,7 @@ use {
             mpsc::{self},
         },
         task::{self, Id, JoinError, JoinHandle, JoinSet},
-        time::interval,
+        time::{Sleep, interval},
     },
 };
 
@@ -998,7 +999,6 @@ where
             if let Some(e) = self.try_process_tx_in_queue().await {
                 break Some(e);
             }
-
             tokio::select! {
                 maybe = self.incoming_rx.recv() => {
                     match maybe {
@@ -2474,6 +2474,8 @@ where
                     self.last_peer_activity
                         .insert(remote_peer_identity, Instant::now());
                     self.spawn_connecting(remote_peer_identity, 1, SpawnSource::Rescue);
+                } else {
+                    // Worker returned without error, no work to do, all done.
                 }
             }
             Err(join_err) => {
@@ -2789,12 +2791,12 @@ where
         }
     }
 
-    fn next_unused_connection_expiration(&self) -> Option<Instant> {
+    fn next_orphan_connection_expiration(&self) -> Option<Instant> {
         let oldest = self.orphan_connection_set.oldest()?;
         Some(oldest + self.config.orphan_connection_ttl)
     }
 
-    fn evict_unused_connections(&mut self) {
+    fn try_evict_unused_connections(&mut self) {
         let now = Instant::now();
         loop {
             let Some(oldest) = self.orphan_connection_set.oldest() else {
@@ -2855,6 +2857,7 @@ where
         }
         #[allow(unused_mut, dead_code)]
         let mut last_metric_update = Instant::now();
+        let mut sleep_timer: Option<Pin<Box<Sleep>>> = None;
         loop {
             self.do_eviction_if_required();
             #[cfg(feature = "prometheus")]
@@ -2866,13 +2869,22 @@ where
             }
             self.try_predict_upcoming_leaders_if_necessary();
 
-            let next_connection_expiration = self.next_unused_connection_expiration();
-            let next_connect_expiration = match next_connection_expiration {
+            let next_connection_expiration = self.next_orphan_connection_expiration();
+            match next_connection_expiration {
                 Some(expiration_instant) => {
-                    tracing::trace!("Next connection expiration at: {:?}", expiration_instant);
-                    tokio::time::sleep_until(expiration_instant.into()).boxed()
+                    let now = Instant::now();
+                    if sleep_timer.is_none() {
+                        let sleep_dur = expiration_instant.saturating_duration_since(now);
+                        // If I understand tokio correclty, the first time you poll a timer it must acquire a mutex lock.
+                        // So we box it and pin it to avoid re-creating the timer on every loop iteration since next orphan connection expiration
+                        // is unlikely to change until we evict some connections.
+                        // Also, the next orphan connection deadline can only increase overtime.
+                        sleep_timer = Some(Box::pin(tokio::time::sleep(sleep_dur)));
+                    }
                 }
-                None => pending().boxed(),
+                None => {
+                    sleep_timer = None;
+                }
             };
             tokio::select! {
                 maybe = self.tx_inlet.recv() => {
@@ -2886,8 +2898,8 @@ where
                         }
                     }
                 }
-                _ = next_connect_expiration => {
-                    self.evict_unused_connections();
+                _ = async { sleep_timer.as_mut().unwrap().await }, if sleep_timer.is_some() => {
+                    self.try_evict_unused_connections();
                 }
                 // If cnc_rx returns None, we don't care as clients can safely drop cnc sender and the runtime should keep function.
                 Some(command) = self.cnc_rx.recv() => {

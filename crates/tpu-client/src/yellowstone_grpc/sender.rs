@@ -490,10 +490,7 @@ impl YellowstoneTpuSender {
                 .leader_tpu_info
                 .get_quic_dest_addr(dest, self.tpu_port_kind)
             {
-                if self.coalesce_send_many_tpu_port_collision
-                    && dest_addr_vec
-                        .contains(&addr)
-                {
+                if self.coalesce_send_many_tpu_port_collision && dest_addr_vec.contains(&addr) {
                     // Skip duplicate address when coalescing is enabled
                     continue;
                 }

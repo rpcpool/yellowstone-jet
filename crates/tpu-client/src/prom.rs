@@ -29,8 +29,7 @@ lazy_static::lazy_static! {
         HistogramOpts::new("leader_rtt", "Leader Rounrd-trip-time")
             // 0ms to 50ms, above that it means the remote connection is really bad and will probably crash soon.
             .buckets(vec![
-                0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0,
-                15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0,
+                50.0, 100.0, 200.0, 300.0, 400.0, 500.0, 750.0, 1000.0,
             ]),
         &["leader"]
     ).unwrap();
@@ -131,12 +130,12 @@ lazy_static::lazy_static! {
     ).unwrap();
 
     static ref ACTIVE_QUIC_CONNECTIONS: IntGauge = IntGauge::new(
-        "jet_tpu_sender_active_quic_connection",
+        "jet_tpu_client_active_quic_connection",
         "Number of active QUIC connections"
     ).unwrap();
 
     static ref ACTIVE_QUIC_TX_SENDERS: IntGauge = IntGauge::new(
-        "jet_tpu_sender_active_quic_tx_senders",
+        "jet_tpu_client_active_quic_tx_senders",
         "Number of active QUIC transaction senders"
     ).unwrap();
 
@@ -146,17 +145,17 @@ lazy_static::lazy_static! {
     ).unwrap();
 
     static ref TXN_WORKER_PRE_INSTALL_MISS: IntCounter = IntCounter::new(
-        "jet_tpu_txn_worker_pre_install_miss",
+        "jet_tpu_client_worker_pre_install_miss",
         "Number of times a transaction worker was not pre-installed for a remote peer"
     ).unwrap();
 
     static ref INVALID_TXN_PACKET_SIZE: IntCounter = IntCounter::new(
-        "jet_tpu_invalid_txn_packet_size",
+        "jet_tpu_client_invalid_txn_packet_size",
         "Number of times a transaction packet exceeded the maximum allowed size"
     ).unwrap();
 
     static ref ORPHAN_CONNECTIONS: IntGauge = IntGauge::new(
-        "jet_tpu_orphan_connections",
+        "jet_tpu_client_orphan_connections",
         "Number of orphan connections (no sender tasks referencing them)"
     ).unwrap();
 }
@@ -248,6 +247,9 @@ pub fn incr_quic_gw_tx_connection_cache_miss_cnt() {
 pub fn observe_leader_rtt(leader: Pubkey, rtt: Duration) {
     LEADER_RTT
         .with_label_values(&[&leader.to_string()])
+        .observe(rtt.as_millis() as f64);
+    LEADER_RTT
+        .with_label_values(&["all"])
         .observe(rtt.as_millis() as f64);
 }
 
