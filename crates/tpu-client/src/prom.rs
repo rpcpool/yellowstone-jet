@@ -155,6 +155,14 @@ lazy_static::lazy_static! {
         "Number of times a transaction packet exceeded the maximum allowed size"
     ).unwrap();
 
+    static ref ORPHAN_CONNECTIONS: IntGauge = IntGauge::new(
+        "jet_tpu_orphan_connections",
+        "Number of orphan connections (no sender tasks referencing them)"
+    ).unwrap();
+}
+
+pub fn set_orphan_connections(count: usize) {
+    ORPHAN_CONNECTIONS.set(count as i64);
 }
 
 pub fn incr_invalid_txn_packet_size() {
@@ -304,6 +312,7 @@ pub fn register_metrics(reg: &Registry) {
         .unwrap();
     reg.register(Box::new(INVALID_TXN_PACKET_SIZE.clone()))
         .unwrap();
+    reg.register(Box::new(ORPHAN_CONNECTIONS.clone())).unwrap();
 }
 
 pub fn inc_quic_gw_unreachable_peer_count(leader: Pubkey) {

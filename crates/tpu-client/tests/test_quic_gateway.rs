@@ -93,7 +93,7 @@ impl LeaderTpuInfoService for FakeLeaderTpuInfoService {
 
 struct MockedRemoteValidator;
 
-struct MockReceipt {
+struct InterceptedTxn {
     from: Pubkey,
     connection_id: usize,
     data: Vec<u8>,
@@ -134,7 +134,7 @@ impl MockedRemoteValidator {
         kp: Keypair,
         addr: SocketAddr,
         notifiers: MockValidatorNotifiers,
-    ) -> (mpsc::Receiver<MockReceipt>, JoinHandle<()>) {
+    ) -> (mpsc::Receiver<InterceptedTxn>, JoinHandle<()>) {
         let endpoint = build_validator_quic_tpu_endpoint(&kp, addr);
         let (client_tx, client_rx) = mpsc::channel(100);
         let client_tx2 = client_tx.clone();
@@ -197,7 +197,7 @@ impl MockedRemoteValidator {
                             acc
                         });
                         drop(rx);
-                        let req = MockReceipt {
+                        let req = InterceptedTxn {
                             from: remote_key,
                             connection_id: new_connection_id,
                             data: combined,

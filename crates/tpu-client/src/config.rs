@@ -194,13 +194,20 @@ pub struct TpuSenderConfig {
     pub tpu_info_override: Vec<TpuOverrideInfo>,
 
     ///
-    /// Duration after which an unused connection is evicted.
+    /// Duration after which an orphan connection is evicted.
+    ///
+    /// # Note
+    ///
+    /// An orphan connection is a connection that is established but have no sender tasks referencing it.
+    /// Each remote peer identity multiplexed over a connection gets 1:1 mapping to a sender task.
+    ///
+    /// When all sender tasks for a connection are dropped, the connection becomes an orphan.
     ///
     #[serde(
         default = "TpuSenderConfig::default_unused_connection_ttl",
         with = "humantime_serde"
     )]
-    pub unused_connection_ttl: Duration,
+    pub orphan_connection_ttl: Duration,
 
     ///
     /// NO DOCUMENTATION!
@@ -214,6 +221,12 @@ pub struct TpuSenderConfig {
 }
 
 impl TpuSenderConfig {
+    ///
+    /// # Safety
+    ///
+    /// This function enables sending transactions of arbitrary size, which may lead to unexpected behavior or security vulnerabilities.
+    /// It should only be used in controlled testing environments.
+    ///
     pub unsafe fn allow_arbitrary_txn_size(&mut self) {
         #[cfg(not(feature = "intg-testing"))]
         {
@@ -323,7 +336,7 @@ impl Default for TpuSenderConfig {
             send_timeout: DEFAULT_TX_SEND_TIMEOUT,
             leader_prediction_lookahead: Some(DEFAULT_LEADER_PREDICTION_LOOKAHEAD),
             tpu_info_override: Vec::new(),
-            unused_connection_ttl: DEFAULT_UNUSED_CONNECTION_TTL,
+            orphan_connection_ttl: DEFAULT_UNUSED_CONNECTION_TTL,
             #[cfg(feature = "intg-testing")]
             unsafe_allow_arbitrary_txn_size: false,
         }

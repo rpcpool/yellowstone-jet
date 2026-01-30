@@ -329,20 +329,26 @@ pub(crate) struct TpuSenderDriver<CB> {
     ///
     /// Set of unused connections (no tx worker associated).
     ///
-    unusued_connection_set: UnusedConnectionSet,
+    orphan_connection_set: OrphanConnectionSet,
 }
 
 #[derive(Default)]
-struct UnusedConnectionSet {
-    prio_queue: BTreeMap<Instant, Vec<UnusedConnectionInfo>>,
+struct OrphanConnectionSet {
+    prio_queue: BTreeMap<Instant, Vec<OrphanConnectionInfo>>,
     ///
     /// Reverse index from socket addr to its position in the priority queue.
     ///
     prio_queue_rev_index: HashMap<SocketAddr, Vec<(Instant, u64)>>,
+
+    curr_len: usize,
 }
 
-impl UnusedConnectionSet {
-    fn insert(&mut self, info: UnusedConnectionInfo, now: Instant) {
+impl OrphanConnectionSet {
+    fn len(&self) -> usize {
+        self.curr_len
+    }
+
+    fn insert(&mut self, info: OrphanConnectionInfo, now: Instant) {
         // Check if not already present
         if let Some(version_set) = self.prio_queue_rev_index.get_mut(&info.remote_peer_addr) {
             if version_set
@@ -357,13 +363,14 @@ impl UnusedConnectionSet {
                 .insert(info.remote_peer_addr, vec![(now, info.connection_version)]);
         }
         self.prio_queue.entry(now).or_default().push(info);
+        self.curr_len += 1;
     }
 
     fn remove(
         &mut self,
         socket_addr: &SocketAddr,
         connection_version: u64,
-    ) -> Option<UnusedConnectionInfo> {
+    ) -> Option<OrphanConnectionInfo> {
         if let Some(version_set) = self.prio_queue_rev_index.get_mut(socket_addr) {
             if let Some(pos) = version_set
                 .iter()
@@ -382,6 +389,7 @@ impl UnusedConnectionSet {
                         if unused_conn_vec.is_empty() {
                             self.prio_queue.remove(&inserted_at);
                         }
+                        self.curr_len -= 1;
                         return Some(info);
                     }
                 }
@@ -394,7 +402,7 @@ impl UnusedConnectionSet {
         self.prio_queue.keys().next().cloned()
     }
 
-    fn pop(&mut self) -> Option<Vec<UnusedConnectionInfo>> {
+    fn pop(&mut self) -> Option<Vec<OrphanConnectionInfo>> {
         let (inserted_at, unused_conn_vec) = self.prio_queue.pop_first()?;
         for info in &unused_conn_vec {
             if let Some(version_set) = self.prio_queue_rev_index.get_mut(&info.remote_peer_addr) {
@@ -404,11 +412,12 @@ impl UnusedConnectionSet {
                 }
             }
         }
+        self.curr_len -= unused_conn_vec.len();
         Some(unused_conn_vec)
     }
 }
 
-struct UnusedConnectionInfo {
+struct OrphanConnectionInfo {
     remote_peer_addr: SocketAddr,
     connection_version: u64,
 }
@@ -1953,7 +1962,7 @@ where
             .register_watch(remote_peer_identity, remote_peer_addr);
 
         // MAKE SURE THIS CONNECTION IS NOT IN THE UNUSED SET ANYMORE (IF IT WERE).
-        self.unusued_connection_set
+        self.orphan_connection_set
             .remove(&remote_peer_addr, connection_version);
 
         tracing::debug!("Installed tx worker for remote peer: {remote_peer_identity}");
@@ -2327,12 +2336,12 @@ where
                     self.active_staked_sorted_remote_peer_addr
                         .remove(&remote_peer_addr);
                 } else {
-                    let unused_conn_info = UnusedConnectionInfo {
+                    let orphan_conn_info = OrphanConnectionInfo {
                         remote_peer_addr,
                         connection_version: expected_connection_version,
                     };
-                    self.unusued_connection_set
-                        .insert(unused_conn_info, Instant::now());
+                    self.orphan_connection_set
+                        .insert(orphan_conn_info, Instant::now());
                 }
             }
         }
@@ -2685,6 +2694,7 @@ where
         let num_active_workers = self.tx_worker_handle_map.len();
         let num_connecting_tasks = self.connecting_tasks.len();
         let num_queued_tx = self.tx_queues.values().map(|q| q.len()).sum::<usize>();
+        prom::set_orphan_connections(self.orphan_connection_set.len());
         prom::set_active_quic_tx_senders(num_active_workers);
         prom::set_active_quic_connections(self.connection_map.len());
         prom::set_quic_gw_connecting_cnt(num_connecting_tasks);
@@ -2801,24 +2811,24 @@ where
     }
 
     fn next_unused_connection_expiration(&self) -> Option<Instant> {
-        let oldest = self.unusued_connection_set.oldest()?;
-        Some(oldest + self.config.unused_connection_ttl)
+        let oldest = self.orphan_connection_set.oldest()?;
+        Some(oldest + self.config.orphan_connection_ttl)
     }
 
     fn evict_unused_connections(&mut self) {
         let now = Instant::now();
         loop {
-            let Some(oldest) = self.unusued_connection_set.oldest() else {
+            let Some(oldest) = self.orphan_connection_set.oldest() else {
                 break;
             };
-            if oldest + self.config.unused_connection_ttl > now {
+            if oldest + self.config.orphan_connection_ttl > now {
                 break;
             }
-            let Some(unused_conn_info_vec) = self.unusued_connection_set.pop() else {
+            let Some(unused_conn_info_vec) = self.orphan_connection_set.pop() else {
                 break;
             };
             for unused_conn_info in unused_conn_info_vec {
-                let UnusedConnectionInfo {
+                let OrphanConnectionInfo {
                     remote_peer_addr,
                     connection_version,
                 } = unused_conn_info;
@@ -2826,12 +2836,11 @@ where
                 let is_false_positive =
                     self.connection_map
                         .get(&remote_peer_addr)
-                        .map_or(false, |active_conn| {
+                        .is_some_and(|active_conn| {
                             active_conn.connection_version == connection_version
-                                && active_conn
+                                && !active_conn
                                     .multiplexed_remote_peer_identity_with_stake
-                                    .len()
-                                    > 0
+                                    .is_empty()
                         });
 
                 if is_false_positive {
@@ -2851,8 +2860,7 @@ where
                     active_conn
                         .multiplexed_remote_peer_identity_with_stake
                         .is_empty(),
-                    "Evicting connection to remote peer address: {} that still has multiplexed peers",
-                    remote_peer_addr,
+                    "Evicting connection to remote peer address: {remote_peer_addr} that still has multiplexed peers",
                 );
                 active_conn.conn.close(VarInt::from_u32(0), &[0u8]);
                 drop(active_conn);
@@ -2882,6 +2890,7 @@ where
             let next_connection_expiration = self.next_unused_connection_expiration();
             let next_connect_expiration = match next_connection_expiration {
                 Some(expiration_instant) => {
+                    tracing::trace!("Next connection expiration at: {:?}", expiration_instant);
                     tokio::time::sleep_until(expiration_instant.into()).boxed()
                 }
                 None => pending().boxed(),
@@ -3309,7 +3318,7 @@ impl TpuSenderDriverSpawner {
             endpoint_sequence: 0,
             pending_connection_eviction_set: Default::default(),
             active_staked_sorted_remote_peer_addr: Default::default(),
-            unusued_connection_set: Default::default(),
+            orphan_connection_set: Default::default(),
         };
 
         let jh = driver_rt.spawn(driver.run());
@@ -3497,6 +3506,116 @@ mod test {
 
         let actual = set.iter().count();
         assert_eq!(actual, 0);
+    }
+}
+
+#[cfg(test)]
+mod orphan_connect_set_test {
+    use {
+        super::{OrphanConnectionInfo, OrphanConnectionSet},
+        std::{net::SocketAddr, time::Instant},
+    };
+
+    #[test]
+    fn test_empty_unused_connection_set() {
+        let mut set = OrphanConnectionSet::default();
+
+        assert!(set.oldest().is_none());
+        assert!(set.pop().is_none());
+    }
+
+    #[test]
+    fn test_push_and_pop_unused_connection() {
+        let mut set = OrphanConnectionSet::default();
+
+        let now = Instant::now();
+        let addr1: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let info = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+        set.insert(info, now);
+        assert_eq!(set.len(), 1);
+
+        assert_eq!(set.oldest(), Some(now));
+        let popped = set.pop().unwrap();
+        assert_eq!(popped.len(), 1);
+        assert_eq!(popped[0].remote_peer_addr, addr1);
+        assert_eq!(popped[0].connection_version, 1);
+        assert!(set.len() == 0);
+    }
+
+    #[test]
+    fn test_idempotency() {
+        let mut set = OrphanConnectionSet::default();
+
+        let now = Instant::now();
+        let addr1: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let info = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+        let info_clone = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+
+        // INSERT TWICE
+        set.insert(info, now);
+        set.insert(info_clone, now);
+
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.oldest(), Some(now));
+        let popped = set.pop().unwrap();
+        assert_eq!(popped.len(), 1);
+        assert_eq!(popped[0].remote_peer_addr, addr1);
+        assert_eq!(popped[0].connection_version, 1);
+    }
+
+    #[test]
+    fn test_remove() {
+        let mut set = OrphanConnectionSet::default();
+
+        let now = Instant::now();
+        let addr1: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let info = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+        set.insert(info, now);
+
+        assert_eq!(set.oldest(), Some(now));
+        set.remove(&addr1, 1);
+        assert!(set.oldest().is_none());
+        assert!(set.pop().is_none());
+
+        // insert the same connection with two versions
+        let info_v1 = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+        set.insert(info_v1, now);
+        let info_v2 = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 2,
+        };
+        set.insert(info_v2, now);
+
+        assert_eq!(set.len(), 2);
+        assert_eq!(set.oldest(), Some(now));
+        let popped = set.pop().unwrap();
+        assert_eq!(popped.len(), 2);
+        assert!(set.pop().is_none());
+        assert_eq!(set.len(), 0);
+
+        // remove non-existent connection
+        let info3 = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 3,
+        };
+        set.remove(&info3.remote_peer_addr, info3.connection_version);
+        assert!(set.pop().is_none());
+        assert_eq!(set.len(), 0);
     }
 }
 
