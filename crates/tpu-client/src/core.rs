@@ -2465,6 +2465,7 @@ where
                     // If the worker didn't have a fatal error and was not evicted and still has queued transactions,
                     // we can safely reattempt to connect to the remote peer.
                     // This can happen to transient network errors or remote peer being temporarily unavailable.
+                    // THIS CAN ALSO HAPPEN IF THE REMOTE PEER CHANGED ITS ADDRESS.
                     // We can safely resume connection and try to send the queued transactions.
                     tracing::trace!(
                         "Remote peer: {} has queued tx, wil reconnect",
@@ -2700,15 +2701,11 @@ where
                                 handle.remote_peer_addr,
                                 new_addr
                             );
-                            // Update the worker's remote address.
+                            // Update the worker's remote address, and its peer too.
                             handle.cancel_notify.notify_one();
-                            let connection_version = handle.connection_version;
-                            let connection_eviction = ConnectionEviction {
-                                remote_peer_addr: handle.remote_peer_addr,
-                                connection_version,
-                            };
-                            self.pending_connection_eviction_set
-                                .insert(connection_eviction);
+                            // WE DON'T WANT TO EVICT THE CONNECTION OR OTHER MULTIPLEXED PEERS SHARING THE SAME CONNECTION.
+                            // WE CAN'T ASSUME IF A REMOTE PEER ADDRESS CHANGED, THE OTHER MULTIPLEXED PEERS ADDRESSES ALSO CHANGED.
+                            // WE SIMPLY CANCEL THE WORKER, AND WHEN THE WORKER RECONNECTS, IT WILL USE THE NEW ADDRESS.
 
                             #[cfg(feature = "prometheus")]
                             {
