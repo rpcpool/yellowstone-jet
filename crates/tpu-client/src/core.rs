@@ -1653,6 +1653,7 @@ where
                 if debug_source == SpawnSource::NewTransaction {
                     prom::incr_quic_gw_tx_connection_cache_hit_cnt();
                 }
+                prom::incr_fast_txn_worker_install_path();
             }
             self.install_worker(remote_peer_identity, remote_peer_addr);
             return;
@@ -2811,7 +2812,7 @@ where
         Some(oldest + self.config.orphan_connection_ttl)
     }
 
-    fn try_evict_unused_connections(&mut self) {
+    fn try_evict_orphan_connections(&mut self) {
         let now = Instant::now();
         loop {
             let Some(oldest) = self.orphan_connection_set.oldest() else {
@@ -2861,6 +2862,10 @@ where
                 active_conn.conn.close(VarInt::from_u32(0), &[0u8]);
                 drop(active_conn);
                 self.unblock_eviction_waiting_connection();
+                #[cfg(feature = "prometheus")]
+                {
+                    prom::incr_evicted_orphan_connections();
+                }
             }
         }
     }
@@ -2914,7 +2919,7 @@ where
                     }
                 }
                 _ = async { sleep_timer.as_mut().unwrap().await }, if sleep_timer.is_some() => {
-                    self.try_evict_unused_connections();
+                    self.try_evict_orphan_connections();
                 }
                 // If cnc_rx returns None, we don't care as clients can safely drop cnc sender and the runtime should keep function.
                 Some(command) = self.cnc_rx.recv() => {

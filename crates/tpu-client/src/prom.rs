@@ -158,6 +158,24 @@ lazy_static::lazy_static! {
         "jet_tpu_client_orphan_connections",
         "Number of orphan connections (no sender tasks referencing them)"
     ).unwrap();
+
+    static ref EVICTED_ORPHAN_CONNECTIONS: IntCounter = IntCounter::new(
+        "jet_tpu_client_evicted_orphan_connections",
+        "Number of evicted orphan connections"
+    ).unwrap();
+
+    static ref FAST_TXN_WORKER_INSTALL_PATH: IntCounter = IntCounter::new(
+        "jet_tpu_client_fast_txn_worker_install_path",
+        "Number of times the fast path was taken to install a transaction worker"
+    ).unwrap();
+}
+
+pub fn incr_evicted_orphan_connections() {
+    EVICTED_ORPHAN_CONNECTIONS.inc();
+}
+
+pub fn incr_fast_txn_worker_install_path() {
+    FAST_TXN_WORKER_INSTALL_PATH.inc();
 }
 
 pub fn set_orphan_connections(count: usize) {
@@ -315,6 +333,10 @@ pub fn register_metrics(reg: &Registry) {
     reg.register(Box::new(INVALID_TXN_PACKET_SIZE.clone()))
         .unwrap();
     reg.register(Box::new(ORPHAN_CONNECTIONS.clone())).unwrap();
+    reg.register(Box::new(FAST_TXN_WORKER_INSTALL_PATH.clone()))
+        .unwrap();
+    reg.register(Box::new(EVICTED_ORPHAN_CONNECTIONS.clone()))
+        .unwrap();
 }
 
 pub fn inc_quic_gw_unreachable_peer_count(leader: Pubkey) {
