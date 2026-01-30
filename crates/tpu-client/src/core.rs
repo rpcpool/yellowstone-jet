@@ -44,7 +44,7 @@ use {
     crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
     bytes::Bytes,
     derive_more::Display,
-    futures::task::AtomicWaker,
+    futures::{FutureExt, future::pending, task::AtomicWaker},
     quinn::{
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
         WriteError, crypto::rustls::QuicClientConfig,
@@ -76,6 +76,11 @@ use {
         time::interval,
     },
 };
+
+pub const PACKET_DATA_SIZE: usize = 1232;
+
+/// Default duration after which an unused connection is evicted.
+pub const DEFAULT_UNUSED_CONNECTION_TTL: Duration = Duration::from_secs(10);
 
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
 
@@ -317,9 +322,131 @@ pub(crate) struct TpuSenderDriver<CB> {
     ///
     /// Sets of pending connection eviction.
     ///
-    pending_connection_eviction_set: HashSet<ConnectionEviction>,
+    pending_connection_eviction_set: ConnectionEvictionSet,
 
     active_staked_sorted_remote_peer_addr: StakedSortedSet<SocketAddr>,
+
+    ///
+    /// Set of unused connections (no tx worker associated).
+    ///
+    unusued_connection_set: UnusedConnectionSet,
+}
+
+#[derive(Default)]
+struct UnusedConnectionSet {
+    prio_queue: BTreeMap<Instant, Vec<UnusedConnectionInfo>>,
+    ///
+    /// Reverse index from socket addr to its position in the priority queue.
+    ///
+    prio_queue_rev_index: HashMap<SocketAddr, Vec<(Instant, u64)>>,
+}
+
+impl UnusedConnectionSet {
+    fn insert(&mut self, info: UnusedConnectionInfo, now: Instant) {
+        // Check if not already present
+        if let Some(version_set) = self.prio_queue_rev_index.get_mut(&info.remote_peer_addr) {
+            if version_set
+                .iter()
+                .any(|(_, v)| *v == info.connection_version)
+            {
+                return;
+            }
+            version_set.push((now, info.connection_version));
+        } else {
+            self.prio_queue_rev_index
+                .insert(info.remote_peer_addr, vec![(now, info.connection_version)]);
+        }
+        self.prio_queue.entry(now).or_default().push(info);
+    }
+
+    fn remove(
+        &mut self,
+        socket_addr: &SocketAddr,
+        connection_version: u64,
+    ) -> Option<UnusedConnectionInfo> {
+        if let Some(version_set) = self.prio_queue_rev_index.get_mut(socket_addr) {
+            if let Some(pos) = version_set
+                .iter()
+                .position(|(_, v)| *v == connection_version)
+            {
+                let (inserted_at, _) = version_set.remove(pos);
+                if version_set.is_empty() {
+                    self.prio_queue_rev_index.remove(socket_addr);
+                }
+                if let Some(unused_conn_vec) = self.prio_queue.get_mut(&inserted_at) {
+                    if let Some(info_pos) = unused_conn_vec.iter().position(|info| {
+                        info.remote_peer_addr == *socket_addr
+                            && info.connection_version == connection_version
+                    }) {
+                        let info = unused_conn_vec.remove(info_pos);
+                        if unused_conn_vec.is_empty() {
+                            self.prio_queue.remove(&inserted_at);
+                        }
+                        return Some(info);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn oldest(&self) -> Option<Instant> {
+        self.prio_queue.keys().next().cloned()
+    }
+
+    fn pop(&mut self) -> Option<Vec<UnusedConnectionInfo>> {
+        let (inserted_at, unused_conn_vec) = self.prio_queue.pop_first()?;
+        for info in &unused_conn_vec {
+            if let Some(version_set) = self.prio_queue_rev_index.get_mut(&info.remote_peer_addr) {
+                version_set.retain(|(ts, v)| *v != info.connection_version || *ts != inserted_at);
+                if version_set.is_empty() {
+                    self.prio_queue_rev_index.remove(&info.remote_peer_addr);
+                }
+            }
+        }
+        Some(unused_conn_vec)
+    }
+}
+
+struct UnusedConnectionInfo {
+    remote_peer_addr: SocketAddr,
+    connection_version: u64,
+}
+
+#[derive(Default)]
+struct ConnectionEvictionSet {
+    set: HashSet<ConnectionEviction>,
+    socket_addr_set: HashSet<SocketAddr>,
+}
+
+impl ConnectionEvictionSet {
+    fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    fn insert(&mut self, eviction: ConnectionEviction) -> bool {
+        let inserted = self.set.insert(eviction.clone());
+        if inserted {
+            self.socket_addr_set.insert(eviction.remote_peer_addr);
+        }
+        inserted
+    }
+
+    fn remove(&mut self, eviction: &ConnectionEviction) -> bool {
+        let removed = self.set.remove(eviction);
+        if removed {
+            self.socket_addr_set.remove(&eviction.remote_peer_addr);
+        }
+        removed
+    }
+
+    fn contains(&self, eviction: &ConnectionEviction) -> bool {
+        self.set.contains(eviction)
+    }
+
+    fn contains_socket_addr(&self, addr: &SocketAddr) -> bool {
+        self.socket_addr_set.contains(addr)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -521,6 +648,11 @@ pub enum TxDropReason {
     ///
     #[display("remote peer is being evicted")]
     RemotePeerBeingEvicted,
+    ///
+    /// The transaction is invalid.
+    ///
+    #[display("transaction packet size is exceed PACKET_DATA_SIZE (1232 bytes)")]
+    InvalidPacketSize,
 }
 
 ///
@@ -1438,7 +1570,6 @@ where
                 "Skipping connection attempt to remote peer: {} since it is being evicted",
                 remote_peer_identity
             );
-            self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::RemotePeerBeingEvicted);
             return;
         }
 
@@ -1463,6 +1594,13 @@ where
             self.unreachable_peer(remote_peer_identity);
             return;
         };
+
+        if self
+            .pending_connection_eviction_set
+            .contains_socket_addr(&remote_peer_addr)
+        {
+            return;
+        }
 
         if self.connection_map.contains_key(&remote_peer_addr) {
             // We already have an active connection for the remote peer address
@@ -1813,6 +1951,11 @@ where
             .insert(remote_peer_identity, remote_peer_stake);
         self.remote_peer_addr_watcher
             .register_watch(remote_peer_identity, remote_peer_addr);
+
+        // MAKE SURE THIS CONNECTION IS NOT IN THE UNUSED SET ANYMORE (IF IT WERE).
+        self.unusued_connection_set
+            .remove(&remote_peer_addr, connection_version);
+
         tracing::debug!("Installed tx worker for remote peer: {remote_peer_identity}");
     }
 
@@ -2022,6 +2165,25 @@ where
         self.last_peer_activity
             .insert(remote_peer_identity, Instant::now());
         let tx_id = tx.tx_sig;
+
+        // Check size
+        if tx.wire.len() > PACKET_DATA_SIZE && !self.config.unsafe_allow_arbitrary_txn_size {
+            let tx_drop = TxDrop {
+                remote_peer_identity,
+                drop_reason: TxDropReason::InvalidPacketSize,
+                dropped_tx_vec: VecDeque::from([(tx, 1)]),
+            };
+            #[cfg(feature = "prometheus")]
+            {
+                prom::incr_quic_gw_drop_tx_cnt(remote_peer_identity, 1);
+                prom::incr_invalid_txn_packet_size();
+            }
+            if let Some(callback) = self.response_outlet.as_ref() {
+                callback.call(TpuSenderResponse::TxDrop(tx_drop));
+            }
+            return;
+        }
+
         // Do I have a transaction sender worker for this remote peer?
         if let Some(handle) = self.tx_worker_handle_map.get(&remote_peer_identity) {
             // If we have an active transaction sender worker for the remote peer,
@@ -2156,13 +2318,22 @@ where
             self.active_staked_sorted_remote_peer_addr
                 .insert(remote_peer_addr, new_stake_for_addr);
 
-            if has_no_worker && is_connection_mark_for_eviction {
-                self.connection_map.remove(&remote_peer_addr);
-                self.pending_connection_eviction_set
-                    .remove(&connection_eviction);
-                self.unblock_eviction_waiting_connection();
-                self.active_staked_sorted_remote_peer_addr
-                    .remove(&remote_peer_addr);
+            if has_no_worker {
+                if is_connection_mark_for_eviction {
+                    self.connection_map.remove(&remote_peer_addr);
+                    self.pending_connection_eviction_set
+                        .remove(&connection_eviction);
+                    self.unblock_eviction_waiting_connection();
+                    self.active_staked_sorted_remote_peer_addr
+                        .remove(&remote_peer_addr);
+                } else {
+                    let unused_conn_info = UnusedConnectionInfo {
+                        remote_peer_addr,
+                        connection_version: expected_connection_version,
+                    };
+                    self.unusued_connection_set
+                        .insert(unused_conn_info, Instant::now());
+                }
             }
         }
     }
@@ -2270,7 +2441,10 @@ where
                         "Remote peer: {} tx worker was canceled, will not reconnect",
                         remote_peer_identity
                     );
-                    self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DropByDriver);
+                    self.drop_peer_queued_tx(
+                        remote_peer_identity,
+                        TxDropReason::RemotePeerBeingEvicted,
+                    );
                 } else if !tx_to_rescue.is_empty() {
                     // If the worker didn't have a fatal error and was not evicted and still has queued transactions,
                     // we can safely reattempt to connect to the remote peer.
@@ -2626,6 +2800,67 @@ where
         }
     }
 
+    fn next_unused_connection_expiration(&self) -> Option<Instant> {
+        let oldest = self.unusued_connection_set.oldest()?;
+        Some(oldest + self.config.unused_connection_ttl)
+    }
+
+    fn evict_unused_connections(&mut self) {
+        let now = Instant::now();
+        loop {
+            let Some(oldest) = self.unusued_connection_set.oldest() else {
+                break;
+            };
+            if oldest + self.config.unused_connection_ttl > now {
+                break;
+            }
+            let Some(unused_conn_info_vec) = self.unusued_connection_set.pop() else {
+                break;
+            };
+            for unused_conn_info in unused_conn_info_vec {
+                let UnusedConnectionInfo {
+                    remote_peer_addr,
+                    connection_version,
+                } = unused_conn_info;
+                // If for some reason, the connection is still active and has multiplexed peers, we skip eviction.
+                let is_false_positive =
+                    self.connection_map
+                        .get(&remote_peer_addr)
+                        .map_or(false, |active_conn| {
+                            active_conn.connection_version == connection_version
+                                && active_conn
+                                    .multiplexed_remote_peer_identity_with_stake
+                                    .len()
+                                    > 0
+                        });
+
+                if is_false_positive {
+                    continue;
+                }
+
+                let Some(active_conn) = self.connection_map.remove(&remote_peer_addr) else {
+                    continue;
+                };
+
+                if active_conn.connection_version != connection_version {
+                    // Connection has been re-established since it was marked as unused.
+                    continue;
+                }
+
+                assert!(
+                    active_conn
+                        .multiplexed_remote_peer_identity_with_stake
+                        .is_empty(),
+                    "Evicting connection to remote peer address: {} that still has multiplexed peers",
+                    remote_peer_addr,
+                );
+                active_conn.conn.close(VarInt::from_u32(0), &[0u8]);
+                drop(active_conn);
+                self.unblock_eviction_waiting_connection();
+            }
+        }
+    }
+
     pub async fn run(mut self) {
         #[cfg(feature = "prometheus")]
         {
@@ -2644,6 +2879,13 @@ where
             }
             self.try_predict_upcoming_leaders_if_necessary();
 
+            let next_connection_expiration = self.next_unused_connection_expiration();
+            let next_connect_expiration = match next_connection_expiration {
+                Some(expiration_instant) => {
+                    tokio::time::sleep_until(expiration_instant.into()).boxed()
+                }
+                None => pending().boxed(),
+            };
             tokio::select! {
                 maybe = self.tx_inlet.recv() => {
                     match maybe {
@@ -2655,6 +2897,9 @@ where
                             break;
                         }
                     }
+                }
+                _ = next_connect_expiration => {
+                    self.evict_unused_connections();
                 }
                 // If cnc_rx returns None, we don't care as clients can safely drop cnc sender and the runtime should keep function.
                 Some(command) = self.cnc_rx.recv() => {
@@ -2980,6 +3225,21 @@ impl TpuSenderDriverSpawner {
     where
         CB: TpuSenderResponseCallback,
     {
+        if config.unsafe_allow_arbitrary_txn_size {
+            #[cfg(feature = "intg-testing")]
+            {
+                tracing::info!(
+                    "TpuSenderConfig::allow_arbitrary_txn_size is set to true. This is allowed in integration testing builds."
+                );
+            }
+            #[cfg(not(feature = "intg-testing"))]
+            {
+                panic!(
+                    "TpuSenderConfig::allow_arbitrary_txn_size can only be set to true in integration testing builds."
+                );
+            }
+        }
+
         let (tx_inlet, tx_outlet) = mpsc::channel(self.driver_tx_channel_capacity);
         let (driver_cnc_tx, driver_cnc_rx) = mpsc::channel(10);
 
@@ -3016,7 +3276,6 @@ impl TpuSenderDriverSpawner {
             config.tpu_port,
             Arc::clone(&self.leader_tpu_info_service),
         );
-
         let driver = TpuSenderDriver {
             stake_info_map: Arc::clone(&self.stake_info_map),
             tx_worker_handle_map: Default::default(),
@@ -3050,6 +3309,7 @@ impl TpuSenderDriverSpawner {
             endpoint_sequence: 0,
             pending_connection_eviction_set: Default::default(),
             active_staked_sorted_remote_peer_addr: Default::default(),
+            unusued_connection_set: Default::default(),
         };
 
         let jh = driver_rt.spawn(driver.run());

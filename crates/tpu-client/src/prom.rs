@@ -150,6 +150,15 @@ lazy_static::lazy_static! {
         "Number of times a transaction worker was not pre-installed for a remote peer"
     ).unwrap();
 
+    static ref INVALID_TXN_PACKET_SIZE: IntCounter = IntCounter::new(
+        "jet_tpu_invalid_txn_packet_size",
+        "Number of times a transaction packet exceeded the maximum allowed size"
+    ).unwrap();
+
+}
+
+pub fn incr_invalid_txn_packet_size() {
+    INVALID_TXN_PACKET_SIZE.inc();
 }
 
 pub fn incr_txn_worker_pre_installed_miss() {
@@ -292,6 +301,8 @@ pub fn register_metrics(reg: &Registry) {
         .unwrap();
     reg.register(Box::new(NUM_CONN_TO_EVICT.clone())).unwrap();
     reg.register(Box::new(TXN_WORKER_PRE_INSTALL_MISS.clone()))
+        .unwrap();
+    reg.register(Box::new(INVALID_TXN_PACKET_SIZE.clone()))
         .unwrap();
 }
 

@@ -27,9 +27,9 @@ use {
         config::TpuSenderConfig,
         core::{
             ConnectionEvictionStrategy, IgnorantLeaderPredictor, LeaderTpuInfoService, Nothing,
-            StakeBasedEvictionStrategy, StakeSortedPeerSet, TpuSenderDriverSpawner,
-            TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn, TxDropReason,
-            UpcomingLeaderPredictor, ValidatorStakeInfoService,
+            PACKET_DATA_SIZE, StakeBasedEvictionStrategy, StakeSortedPeerSet,
+            TpuSenderDriverSpawner, TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn,
+            TxDropReason, UpcomingLeaderPredictor, ValidatorStakeInfoService,
         },
     },
 };
@@ -700,7 +700,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     let rx_server_addr = generate_random_local_addr();
     let rx_server_identity = Keypair::new();
 
-    // Here's the challenging when testing network error with quinn:
+    // Here's the challenge when testing network error with quinn:
     // Writing to a uni-stream returns success if the the write has been flushed to the internal quinn buffer,
     // not the actual wire.
     // Also, even if you write it to the wire, it does not guarantee that the remote peer has received it, if for example,
@@ -708,6 +708,73 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     // If we send a too little payload, even if the remote peer closed the uni stream, it will not trigger a connection lost,
     // because quinn will be so fast that it will send the payload before the remote peer closes the stream.
     let huge_payload = Bytes::from(vec![0u8; 1024 * 1024 * 100]); // 100MB payload
+    let gateway_kp = Keypair::new();
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let fake_tpu_info_service =
+        FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+
+    let gateway_spawner = TpuSenderDriverSpawner {
+        stake_info_map: Arc::new(stake_info_map.clone()),
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        driver_tx_channel_capacity: 100,
+    };
+    const MAX_CONN_ATTEMPT: NonZeroUsize = NonZeroUsize::new(1).unwrap();
+    let gateway_config = TpuSenderConfig {
+        max_connection_attempts: 1,
+        max_send_attempt: MAX_CONN_ATTEMPT,
+        unsafe_allow_arbitrary_txn_size: true,
+        ..Default::default()
+    };
+    let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
+
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        driver_join_handle: _,
+    } = gateway_spawner.spawn(
+        gateway_kp.insecure_clone(),
+        gateway_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
+    );
+
+    let _rx_server_handle = tokio::spawn(async move {
+        let connecting = rx_server_endpoint.accept().await.expect("accept");
+        let conn = connecting.await.expect("quinn connection");
+        loop {
+            // Simulate a connection lost by dropping the connection
+            let mut uni = conn.accept_uni().await.expect("accept uni");
+            let _ = uni.stop(VarInt::from_u32(0));
+            drop(uni);
+        }
+    });
+
+    let tx_sig = Signature::new_unique();
+    let txn = TpuSenderTxn::from_owned(tx_sig, rx_server_identity.pubkey(), huge_payload.clone());
+    transaction_sink.send(txn).await.expect("send tx");
+
+    // This handle should return after MAX_CONN_ATTEMPT attempts
+    tracing::trace!("Waiting for rx_server_handle to finish");
+    // let _ = rx_server_handle.await;
+    tracing::trace!("rx_server_handle finished");
+
+    let resp = callback_rx.recv().await.expect("recv response");
+
+    let TpuSenderResponse::TxFailed(actual_resp) = resp else {
+        panic!("Expected TpuSenderResponse::TxSent");
+    };
+
+    assert_eq!(actual_resp.tx_sig, tx_sig);
+}
+
+#[tokio::test]
+async fn it_should_refuse_txn_bigger_than_1232_bytes() {
+    let rx_server_addr = generate_random_local_addr();
+    let rx_server_identity = Keypair::new();
+
+    let huge_payload = Bytes::from(vec![0u8; PACKET_DATA_SIZE + 1]); // 100MB payload
     let gateway_kp = Keypair::new();
     let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =
@@ -760,13 +827,15 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     tracing::trace!("rx_server_handle finished");
 
     let resp = callback_rx.recv().await.expect("recv response");
-    tracing::trace!("Received response: {:?}", resp);
 
-    let TpuSenderResponse::TxFailed(actual_resp) = resp else {
-        panic!("Expected TpuSenderResponse::TxSent, got something {resp:?}");
+    let TpuSenderResponse::TxDrop(actual_resp) = resp else {
+        panic!("Expected TpuSenderResponse::TxDrop");
     };
 
-    assert_eq!(actual_resp.tx_sig, tx_sig);
+    assert!(matches!(
+        actual_resp.drop_reason,
+        TxDropReason::InvalidPacketSize
+    ));
 }
 
 #[tokio::test]

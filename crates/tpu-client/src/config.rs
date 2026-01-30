@@ -1,4 +1,5 @@
 use {
+    crate::core::DEFAULT_UNUSED_CONNECTION_TTL,
     serde::{Deserialize, Deserializer, de},
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_pubkey::Pubkey,
@@ -191,9 +192,46 @@ pub struct TpuSenderConfig {
     ///
     #[serde(default)]
     pub tpu_info_override: Vec<TpuOverrideInfo>,
+
+    ///
+    /// Duration after which an unused connection is evicted.
+    ///
+    #[serde(
+        default = "TpuSenderConfig::default_unused_connection_ttl",
+        with = "humantime_serde"
+    )]
+    pub unused_connection_ttl: Duration,
+
+    ///
+    /// NO DOCUMENTATION!
+    ///
+    /// IF YOU USE THIS FEATURE YOU SHOULD FEEL BAD.
+    #[serde(
+        skip_deserializing,
+        default = "TpuSenderConfig::default_allow_arbitrary_txn_size"
+    )]
+    pub unsafe_allow_arbitrary_txn_size: bool,
 }
 
 impl TpuSenderConfig {
+    pub unsafe fn allow_arbitrary_txn_size(&mut self) {
+        #[cfg(not(feature = "intg-testing"))]
+        {
+            panic!(
+                "TpuSenderConfig::allow_arbitrary_txn_size can only be set to true in integration testing builds."
+            );
+        }
+        self.unsafe_allow_arbitrary_txn_size = true;
+    }
+
+    pub const fn default_allow_arbitrary_txn_size() -> bool {
+        false
+    }
+
+    pub const fn default_unused_connection_ttl() -> Duration {
+        DEFAULT_UNUSED_CONNECTION_TTL
+    }
+
     pub const fn default_connection_timeout() -> Duration {
         DEFAULT_CONNECTION_TIMEOUT
     }
@@ -285,6 +323,9 @@ impl Default for TpuSenderConfig {
             send_timeout: DEFAULT_TX_SEND_TIMEOUT,
             leader_prediction_lookahead: Some(DEFAULT_LEADER_PREDICTION_LOOKAHEAD),
             tpu_info_override: Vec::new(),
+            unused_connection_ttl: DEFAULT_UNUSED_CONNECTION_TTL,
+            #[cfg(feature = "intg-testing")]
+            unsafe_allow_arbitrary_txn_size: false,
         }
     }
 }

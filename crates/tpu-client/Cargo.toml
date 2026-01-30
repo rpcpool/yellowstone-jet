@@ -51,6 +51,7 @@ yellowstone-grpc = [
     "dep:solana-rpc-client",
 ]
 shield = ["dep:yellowstone-shield-store"]
+intg-testing = []
 
 [dependencies]
 async-trait = { workspace = true }
