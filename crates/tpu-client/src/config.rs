@@ -337,7 +337,6 @@ impl Default for TpuSenderConfig {
             leader_prediction_lookahead: Some(DEFAULT_LEADER_PREDICTION_LOOKAHEAD),
             tpu_info_override: Vec::new(),
             orphan_connection_ttl: DEFAULT_UNUSED_CONNECTION_TTL,
-            #[cfg(feature = "intg-testing")]
             unsafe_allow_arbitrary_txn_size: false,
         }
     }
