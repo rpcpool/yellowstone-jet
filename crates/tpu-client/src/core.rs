@@ -135,8 +135,6 @@ enum DriverTaskMeta {
 }
 
 struct TxWorkerSenderHandle {
-    #[allow(dead_code)]
-    remote_peer_identity: Pubkey,
     remote_peer_addr: SocketAddr,
     connection_version: u64,
     sender: mpsc::Sender<TpuSenderTxn>,
@@ -602,10 +600,6 @@ impl ConnectingTask {
             );
         }
 
-        // let remote_peer_addr = self
-        //     .service
-        //     .get_quic_dest_addr(&self.remote_peer_identity, self.tpu_port_kind);
-        // let remote_peer_addr = remote_peer_addr.ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
         let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
             .with_safe_default_protocol_versions()
             .expect("Failed to set QUIC client protocol versions")
@@ -1190,7 +1184,7 @@ where
 /// An eviction strategy that evicts the lowest staked remote peer first,
 /// unless it has been used recently.
 ///
-/// # Mutiplexing Note
+/// # Multiplexing Note
 ///
 /// Because multiple remote peer identities may share the same socket address,
 /// evicting one remote peer identity will also terminate the connection for all other
@@ -1637,7 +1631,7 @@ where
         let eviction_count_required = self
             .connecting_blocked_by_eviction_list
             .len()
-            .saturating_sub(self.being_evicted_peers.len());
+            .saturating_sub(self.pending_connection_eviction_set.len());
 
         if eviction_count_required == 0 {
             tracing::trace!("No eviction required at this time");
@@ -1662,7 +1656,7 @@ where
             &addr_map,
         );
         tracing::trace!("Eviction plan len {}", eviction_plan.len());
-        if !eviction_plan.is_empty() {
+        if eviction_plan.is_empty() {
             tracing::info!("Planned {} evictions", eviction_plan.len());
 
             // If the evictin plan is empty, pick the connection with the least amount of a active stake
@@ -1778,7 +1772,6 @@ where
         let worker_fut = worker.run();
         let ah = self.tx_worker_set.spawn(worker_fut);
         let handle = TxWorkerSenderHandle {
-            remote_peer_identity,
             remote_peer_addr,
             sender: tx,
             cancel_notify,
@@ -1916,7 +1909,7 @@ where
                                 // NOTE: THE RETRY COUNT IS NOT INSIDE A SPECIFIC REGISTER OR MAP,
                                 // IT'S STATELESS MEANING THE RETRY COUNT IS DETERMINED BY THE NUMBER OF ATTEMPTS STORED ON EACH CONNECTING TASK.
                                 // EACH REATTEMPT SPAWNS A NEW CONNECTING TASK WITH ATTEMPT COUNT EQUALS TO PREVIOUS ATTEMPT COUNT + 1.
-                                // AFTER REACHING MAX ATTEMPTS, THE DEAULT MATCH BRANCH WILL HANDLE THE FAILURE CALLED "whatever".
+                                // AFTER REACHING MAX ATTEMPTS, THE DEFAULT MATCH BRANCH WILL HANDLE THE FAILURE CALLED "whatever".
 
                                 tracing::warn!(
                                     "Connection attempt {} to remote peer: {multiplexed_remote_peer_identity_vec:?} failed, retrying...",
@@ -3181,7 +3174,6 @@ pub const fn module_path_for_test() -> &'static str {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod test {
     use {
         super::{
@@ -3249,7 +3241,6 @@ mod test {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod stake_based_eviction_strategy_test {
     use {
         super::{ConnectionEvictionStrategy, StakeSortedPeerSet},
