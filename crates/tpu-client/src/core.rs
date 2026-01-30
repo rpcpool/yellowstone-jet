@@ -433,6 +433,11 @@ impl ConnectionEvictionSet {
         self.set.len()
     }
 
+    fn clear(&mut self) {
+        self.set.clear();
+        self.socket_addr_set.clear();
+    }
+
     fn insert(&mut self, eviction: ConnectionEviction) -> bool {
         let inserted = self.set.insert(eviction.clone());
         if inserted {
@@ -662,6 +667,11 @@ pub enum TxDropReason {
     ///
     #[display("transaction packet size is exceed PACKET_DATA_SIZE (1232 bytes)")]
     InvalidPacketSize,
+    ///
+    /// The remote peer identity changed.
+    ///
+    #[display("driver QUIC identity changed")]
+    DriverIdentityChanged,
 }
 
 ///
@@ -2493,7 +2503,8 @@ where
         // Make sure to update the endpoint usage
         let tx_worker_sender_map = std::mem::take(&mut self.tx_worker_handle_map);
         let mut tx_worker_set = std::mem::take(&mut self.tx_worker_set);
-
+        let mut tx_queues = std::mem::take(&mut self.tx_queues);
+        let response_outlet = self.response_outlet.clone();
         let fut = async move {
             drop(tx_worker_sender_map);
             while let Some(result) = tx_worker_set.join_next_with_id().await {
@@ -2505,13 +2516,34 @@ where
                     remote_peer_identity,
                 } = tx_worker_meta.remove(&id).unwrap();
 
+                let inflight_txn = match result {
+                    Ok((_, mut worker_completed)) => {
+                        let mut canceled_txn = VecDeque::new();
+                        while let Ok(tx) = worker_completed.rx.try_recv() {
+                            canceled_txn.push_back((tx, 1));
+                        }
+                        canceled_txn.extend(worker_completed.pending_tx.into_iter());
+                        canceled_txn
+                    }
+                    Err(_) => VecDeque::new(),
+                };
+
+                let mut canceled_txn_queue =
+                    tx_queues.remove(&remote_peer_identity).unwrap_or_default();
+                canceled_txn_queue.extend(inflight_txn);
+                if let Some(callback) = response_outlet.as_ref() {
+                    let tx_drop = TxDrop {
+                        remote_peer_identity,
+                        drop_reason: TxDropReason::DriverIdentityChanged,
+                        dropped_tx_vec: canceled_txn_queue,
+                    };
+                    callback.call(TpuSenderResponse::TxDrop(tx_drop));
+                }
+
                 tracing::trace!(
                     "graceful drop worker for remote peer: {}",
                     remote_peer_identity
                 );
-                if let Err(e) = result {
-                    tracing::debug!("remote peer {remote_peer_identity} join failed with {e:?}");
-                }
             }
         };
 
@@ -2549,6 +2581,8 @@ where
         } = update_identity_cmd;
         self.schedule_graceful_drop_all_worker();
         self.connection_map.clear();
+        self.being_evicted_peers.clear();
+        self.pending_connection_eviction_set.clear();
         self.connecting_tasks.abort_all();
         self.connecting_tasks.detach_all();
         self.connecting_remote_peers.clear();
@@ -2616,6 +2650,8 @@ where
         self.connecting_remote_peers.clear();
         self.connecting_remote_peers_addr.clear();
         self.connecting_blocked_by_eviction_list.clear();
+        self.pending_connection_eviction_set.clear();
+        self.being_evicted_peers.clear();
 
         let connecting_meta = std::mem::take(&mut self.connecting_meta);
 
