@@ -2376,15 +2376,6 @@ where
                     .remove(&id)
                     .expect("tx worker meta");
 
-                // When we remove the worker, we also need to update the various stake maps we have cached so far.
-                // There is the active_staked_sorted_remote_peer and active_staked_sorted_remote_peer_addr
-                // The active_staked_sorted_remote_peer_addr is updated in `remove_worker_from_active_connection`
-                self.active_staked_sorted_remote_peer
-                    .peer_stake_map
-                    .get(&remote_peer_identity)
-                    .copied()
-                    .unwrap_or(0);
-
                 // We remove the stake from the remote peer address map
                 self.active_staked_sorted_remote_peer
                     .remove(&remote_peer_identity);
