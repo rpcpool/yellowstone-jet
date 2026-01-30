@@ -830,11 +830,6 @@ struct QuicTxSenderWorker<CB> {
     tx_queue: VecDeque<(TpuSenderTxn, usize)>,
     cancel_notify: Arc<Notify>,
     max_tx_attempt: NonZeroUsize,
-    // TODO: Check if this is necessary, since there is already flow control in QUIC
-    // Moreover, most QUIC API are instantaneous and do not block
-    // and if a connection is idle for 2s it will be closed anyway, moreover remote validator could technically decide to kick us off
-    #[allow(dead_code)]
-    tx_send_timeout: Duration,
     txn_sent: usize,
 }
 
@@ -989,6 +984,11 @@ where
 
     async fn run(mut self) -> TxSenderWorkerCompleted {
         let mut canceled = false;
+        let mut last_activity = Instant::now();
+        let mut burst_timer = Box::pin(tokio::time::sleep_until(
+            (last_activity + Duration::from_secs(10)).into(),
+        ));
+        const MAX_IDLE_DURATION: Duration = Duration::from_secs(10);
         let maybe_err = loop {
             tracing::trace!(
                 "worker {} tick loop -- queue size: {}",
@@ -999,10 +999,13 @@ where
             if let Some(e) = self.try_process_tx_in_queue().await {
                 break Some(e);
             }
+            // Every 10 seconds we will look if there is new tx to processed.
+            // If not we will close the worker to free up resources.
             tokio::select! {
                 maybe = self.incoming_rx.recv() => {
                     match maybe {
                         Some(tx) => {
+                            last_activity = Instant::now();
                             tracing::trace!("Received tx: {} for remote peer: {}", tx.tx_sig, self.remote_peer);
                             self.tx_queue.push_back((tx, 1));
                         }
@@ -1010,6 +1013,19 @@ where
                             tracing::debug!("Transaction sender inlet closed for remote peer: {:?}", self.remote_peer);
                             break None;
                         }
+                    }
+                }
+                _ = &mut burst_timer => {
+                    let idle_duration = Instant::now().duration_since(last_activity);
+                    tracing::debug!(
+                        "Transaction sender worker for remote peer: {:?} idle for {:?}, shutting down",
+                        self.remote_peer,
+                        idle_duration
+                    );
+                    if idle_duration >= MAX_IDLE_DURATION {
+                        break None;
+                    } else {
+                        burst_timer.as_mut().reset(( last_activity + Duration::from_secs(10) ).into());
                     }
                 }
                 err = self.connection.closed() => {
@@ -1924,7 +1940,6 @@ where
                 .unwrap_or_default(),
             cancel_notify: Arc::clone(&cancel_notify),
             max_tx_attempt: self.config.max_send_attempt,
-            tx_send_timeout: self.config.send_timeout,
             txn_sent: 0,
         };
 
