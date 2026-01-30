@@ -1814,8 +1814,6 @@ where
         );
         tracing::trace!("Eviction plan len {}", eviction_plan.len());
         if eviction_plan.is_empty() {
-            tracing::info!("Planned {} evictions", eviction_plan.len());
-
             // If the evictin plan is empty, pick the connection with the least amount of a active stake
             let min_staked_active_conn = self.connection_map.values().min_by_key(|active_conn| {
                 active_conn
@@ -2574,11 +2572,7 @@ where
     /// 8. Replay all connecting tasks with the new identity and connecting meta stored at step #3.
     ///  
     ///
-    fn update_identity(&mut self, update_identity_cmd: UpdateIdentityCommand) {
-        let UpdateIdentityCommand {
-            new_identity,
-            callback,
-        } = update_identity_cmd;
+    async fn update_identity(&mut self, new_identity: Keypair, barrier_like: impl Future) {
         self.schedule_graceful_drop_all_worker();
         self.connection_map.clear();
         self.being_evicted_peers.clear();
@@ -2604,72 +2598,9 @@ where
         {
             prom::quic_set_identity(self.identity.pubkey());
         }
-        connecting_meta.values().for_each(|meta| {
-            meta.multiplexed_remote_peer_identity_vec
-                .iter()
-                .for_each(|remote_peer_identity| {
-                    self.spawn_connecting(
-                        *remote_peer_identity,
-                        meta.connection_attempt,
-                        SpawnSource::UpdateIdentity,
-                    );
-                });
-        });
 
-        if !connecting_meta.is_empty() {
-            tracing::trace!(
-                "Will auto-reconnect to {} remote peers after identity update",
-                connecting_meta.len()
-            );
-        }
+        barrier_like.await;
 
-        callback
-            .set
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        callback.waker.wake();
-        tracing::trace!(
-            "Updated tpu sender driver identity to: {}",
-            self.identity.pubkey()
-        );
-    }
-
-    ///
-    /// Similar to [`TpuSenderDriver::update_identity`], but await a synchronization barrier
-    /// before resuming driver operations.
-    ///
-    async fn update_identity_sync(&mut self, command: MultiStepIdentitySynchronizationCommand) {
-        let MultiStepIdentitySynchronizationCommand {
-            new_identity,
-            barrier,
-        } = command;
-
-        self.schedule_graceful_drop_all_worker();
-        self.connection_map.clear();
-        self.connecting_tasks.abort_all();
-        self.connecting_tasks.detach_all();
-        self.connecting_remote_peers.clear();
-        self.connecting_remote_peers_addr.clear();
-        self.connecting_blocked_by_eviction_list.clear();
-        self.pending_connection_eviction_set.clear();
-        self.being_evicted_peers.clear();
-
-        let connecting_meta = std::mem::take(&mut self.connecting_meta);
-
-        // Update identity
-        let (certificate, privkey) = new_dummy_x509_certificate(&new_identity);
-        let cert = Arc::new(QuicClientCertificate {
-            certificate,
-            key: privkey,
-        });
-
-        self.client_certificate = cert;
-        self.identity = new_identity;
-        #[cfg(feature = "prometheus")]
-        {
-            prom::quic_set_identity(self.identity.pubkey());
-        }
-        // Wait for the barrier to be released
-        barrier.wait().await;
         connecting_meta.values().for_each(|meta| {
             meta.multiplexed_remote_peer_identity_vec
                 .iter()
@@ -2698,13 +2629,29 @@ where
     async fn handle_cnc(&mut self, command: DriverCommand) {
         match command {
             DriverCommand::UpdateIdenttiy(cmd) => {
-                self.update_identity(cmd);
+                let UpdateIdentityCommand {
+                    new_identity,
+                    callback,
+                } = cmd;
+                let fake_barrier = async {
+                    callback
+                        .set
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    callback.waker.wake();
+                };
+                self.update_identity(new_identity, fake_barrier).await;
             }
             DriverCommand::MultiStepIdentitySynchronization(
                 multi_step_identity_synchronization_command,
             ) => {
-                self.update_identity_sync(multi_step_identity_synchronization_command)
-                    .await;
+                let MultiStepIdentitySynchronizationCommand {
+                    new_identity,
+                    barrier,
+                } = multi_step_identity_synchronization_command;
+                let barrier_fut = async {
+                    barrier.wait().await;
+                };
+                self.update_identity(new_identity, barrier_fut).await;
             }
         }
     }
