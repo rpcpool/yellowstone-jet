@@ -20,6 +20,7 @@ use {
     std::sync::Arc,
     thiserror::Error,
     tokio::sync::mpsc,
+    yellowstone_jet_tpu_client::core::PACKET_DATA_SIZE,
 };
 
 #[derive(Debug, Error)]
@@ -109,7 +110,17 @@ impl TransactionHandler {
         }
 
         let signature = transaction.signatures[0];
-        let wire_transaction = bincode::serialize(&transaction)?;
+        let mut wire_transaction = bincode::serialize(&transaction)?;
+        if wire_transaction.len() > PACKET_DATA_SIZE {
+            wire_transaction.shrink_to_fit();
+            if wire_transaction.len() > PACKET_DATA_SIZE {
+                return Err(TransactionHandlerError::InvalidTransaction(format!(
+                    "transaction size {} exceeds maximum allowed size of {} bytes",
+                    wire_transaction.len(),
+                    PACKET_DATA_SIZE
+                )));
+            }
+        }
 
         self.transaction_sink
             .send(Arc::new(SendTransactionRequest {
