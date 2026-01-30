@@ -7151,7 +7151,6 @@ dependencies = [
  "solana-net-utils",
  "solana-packet",
  "solana-pubkey 3.0.0",
- "solana-quic-definitions",
  "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-signature",

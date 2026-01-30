@@ -53,7 +53,6 @@ use {
     solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_quic_definitions::{QUIC_KEEP_ALIVE, QUIC_SEND_FAIRNESS},
     solana_signature::Signature,
     solana_signer::Signer,
     solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
@@ -80,10 +79,24 @@ use {
 
 pub const PACKET_DATA_SIZE: usize = 1232;
 
+pub const QUIC_SEND_FAIRNESS: bool = false;
+
+///
+/// MAX TIMEOUT is not consistent across solana clients, firedancer has much lower timeout than agave.a
+/// 10 seconds the least common timeout.
+///
+pub const QUIC_MAX_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Default duration after which an unused connection is evicted.
 pub const DEFAULT_UNUSED_CONNECTION_TTL: Duration = Duration::from_secs(10);
 
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
+
+/// Keep-alive interval for QUIC connections.
+/// The rate at which we send PING frames to keep the connection alive.
+/// So apparently this is consistent across the network and solana client.
+/// putting 1s makes it the safest option.
+pub const QUIC_KEEP_ALIVE: Duration = Duration::from_secs(1); // seconds
 
 // TODO see if its worth making this configurable
 #[cfg(feature = "prometheus")]

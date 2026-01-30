@@ -1,9 +1,8 @@
 use {
-    crate::core::DEFAULT_UNUSED_CONNECTION_TTL,
+    crate::core::{DEFAULT_UNUSED_CONNECTION_TTL, QUIC_MAX_TIMEOUT},
     serde::{Deserialize, Deserializer, de},
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_pubkey::Pubkey,
-    solana_quic_definitions::QUIC_MAX_TIMEOUT,
     std::{net::SocketAddr, num::NonZeroUsize, ops::Range, time::Duration},
 };
 

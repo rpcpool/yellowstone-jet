@@ -95,7 +95,6 @@ solana-message = { workspace = true }
 solana-net-utils = { workspace = true }
 solana-packet = { workspace = true }
 solana-pubkey = { workspace = true }
-solana-quic-definitions = { workspace = true }
 solana-rpc-client = { workspace = true, optional = true }
 solana-rpc-client-api = { workspace = true }
 solana-signature = { workspace = true, features = ["rand"] }
