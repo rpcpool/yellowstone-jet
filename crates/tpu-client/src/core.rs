@@ -37,6 +37,7 @@
 //! ```
 //!
 //!
+
 #[cfg(feature = "prometheus")]
 use crate::prom;
 use {
@@ -52,7 +53,6 @@ use {
     solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_quic_definitions::{QUIC_KEEP_ALIVE, QUIC_SEND_FAIRNESS},
     solana_signature::Signature,
     solana_signer::Signer,
     solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
@@ -61,6 +61,7 @@ use {
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroUsize,
+        pin::Pin,
         sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
         task::Poll,
         time::{Duration, Instant},
@@ -72,11 +73,30 @@ use {
             mpsc::{self},
         },
         task::{self, Id, JoinError, JoinHandle, JoinSet},
-        time::interval,
+        time::{Sleep, interval},
     },
 };
 
+pub const PACKET_DATA_SIZE: usize = 1232;
+
+pub const QUIC_SEND_FAIRNESS: bool = false;
+
+///
+/// MAX TIMEOUT is not consistent across solana clients, firedancer has much lower timeout than agave.a
+/// 10 seconds the least common timeout.
+///
+pub const QUIC_MAX_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default duration after which an unused connection is evicted.
+pub const DEFAULT_UNUSED_CONNECTION_TTL: Duration = Duration::from_secs(10);
+
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
+
+/// Keep-alive interval for QUIC connections.
+/// The rate at which we send PING frames to keep the connection alive.
+/// So apparently this is consistent across the network and solana client.
+/// putting 1s makes it the safest option.
+pub const QUIC_KEEP_ALIVE: Duration = Duration::from_secs(1); // seconds
 
 // TODO see if its worth making this configurable
 #[cfg(feature = "prometheus")]
@@ -88,8 +108,6 @@ pub(crate) enum ConnectingError {
     ConnectError(#[from] quinn::ConnectError),
     #[error(transparent)]
     ConnectionError(#[from] quinn::ConnectionError),
-    #[error("Connection to remote peer not in leader schedule")]
-    PeerNotInLeaderSchedule,
 }
 
 pub(crate) struct SentOk {
@@ -100,10 +118,13 @@ pub(crate) struct SentOk {
 /// Metadata about an inflight connection attempt to a remote peer.
 ///
 struct ConnectingMeta {
+    /// The identity used in the certificate to connect with.
     current_client_identity: Pubkey,
-    remote_peer_identity: Pubkey,
+    /// List of all remote peer identities being connected to in this task.
+    /// (multiplexing multiple remote peer connection in one task since multiple remote peer can share same endpoint).
+    multiplexed_remote_peer_identity_vec: Vec<Pubkey>,
+    remote_peer_address: SocketAddr,
     connection_attempt: usize,
-    endpoint_idx: usize,
     created_at: Instant,
 }
 
@@ -133,28 +154,15 @@ enum DriverTaskMeta {
 }
 
 struct TxWorkerSenderHandle {
-    remote_peer_identity: Pubkey,
     remote_peer_addr: SocketAddr,
+    connection_version: u64,
     sender: mpsc::Sender<TpuSenderTxn>,
     cancel_notify: Arc<Notify>,
 }
 
 struct WaitingEviction {
-    remote_peer_identity: Pubkey,
+    remote_peer_addr: SocketAddr,
     notify: Arc<Notify>,
-}
-
-#[derive(Debug, Default)]
-struct EndpointUsage {
-    ///
-    /// Number of active connections using this endpoint
-    ///
-    connected_remote_peers: HashSet<Pubkey>,
-
-    ///
-    /// Number of ongoing connection attempts using this endpoint
-    ///
-    connecting_remote_peers: HashSet<Pubkey>,
 }
 
 ///
@@ -190,7 +198,6 @@ const FOREVER: Duration = Duration::from_secs(31_536_000); // One year is consid
 
 struct TxWorkerMeta {
     remote_peer_identity: Pubkey,
-    endpoint_idx: usize,
 }
 
 ///
@@ -228,7 +235,6 @@ pub(crate) struct TpuSenderDriver<CB> {
     tx_queues: HashMap<Pubkey, VecDeque<(TpuSenderTxn, usize)>>,
 
     endpoints: Vec<Endpoint>,
-    endpoints_usage: Vec<EndpointUsage>,
 
     ///
     /// JoinSet of inflight connection attempt
@@ -244,6 +250,11 @@ pub(crate) struct TpuSenderDriver<CB> {
     /// Reversed of [`TokioQuicDriver::connecting_meta`]
     ///
     connecting_remote_peers: HashMap<Pubkey, tokio::task::Id>,
+
+    ///
+    /// Map from remote peer socket address to the connecting task ids.
+    /// Task Id is the key for [`TokioQuicDriver::connecting_tasks`].
+    connecting_remote_peers_addr: HashMap<SocketAddr, tokio::task::Id>,
 
     ///
     /// Service to locate tpu port address from remote peer identity.
@@ -305,6 +316,187 @@ pub(crate) struct TpuSenderDriver<CB> {
     /// Next leader prediction deadline.
     ///
     next_leader_prediction_deadline: Instant,
+
+    ///
+    /// A map of active connections.
+    ///
+    connection_map: HashMap<SocketAddr, ActiveConnection>,
+
+    ///
+    /// Current connection version.
+    /// Each new connection gets assigned a new connection version.
+    /// This is used during connection eviction.
+    connection_version: u64,
+
+    ///
+    /// Used to do round-robin selection of endpoint for new connections.
+    ///
+    endpoint_sequence: usize,
+
+    ///
+    /// Sets of pending connection eviction.
+    ///
+    pending_connection_eviction_set: ConnectionEvictionSet,
+
+    active_staked_sorted_remote_peer_addr: StakedSortedSet<SocketAddr>,
+
+    ///
+    /// Set of unused connections (no tx worker associated).
+    ///
+    orphan_connection_set: OrphanConnectionSet,
+}
+
+#[derive(Default)]
+struct OrphanConnectionSet {
+    prio_queue: BTreeMap<Instant, Vec<OrphanConnectionInfo>>,
+    ///
+    /// Reverse index from socket addr to its position in the priority queue.
+    ///
+    prio_queue_rev_index: HashMap<SocketAddr, Vec<(Instant, u64)>>,
+
+    curr_len: usize,
+}
+
+impl OrphanConnectionSet {
+    fn len(&self) -> usize {
+        self.curr_len
+    }
+
+    fn insert(&mut self, info: OrphanConnectionInfo, now: Instant) {
+        // Check if not already present
+        if let Some(version_set) = self.prio_queue_rev_index.get_mut(&info.remote_peer_addr) {
+            if version_set
+                .iter()
+                .any(|(_, v)| *v == info.connection_version)
+            {
+                return;
+            }
+            version_set.push((now, info.connection_version));
+        } else {
+            self.prio_queue_rev_index
+                .insert(info.remote_peer_addr, vec![(now, info.connection_version)]);
+        }
+        self.prio_queue.entry(now).or_default().push(info);
+        self.curr_len += 1;
+    }
+
+    fn remove(
+        &mut self,
+        socket_addr: &SocketAddr,
+        connection_version: u64,
+    ) -> Option<OrphanConnectionInfo> {
+        if let Some(version_set) = self.prio_queue_rev_index.get_mut(socket_addr) {
+            if let Some(pos) = version_set
+                .iter()
+                .position(|(_, v)| *v == connection_version)
+            {
+                let (inserted_at, _) = version_set.remove(pos);
+                if version_set.is_empty() {
+                    self.prio_queue_rev_index.remove(socket_addr);
+                }
+                if let Some(unused_conn_vec) = self.prio_queue.get_mut(&inserted_at) {
+                    if let Some(info_pos) = unused_conn_vec.iter().position(|info| {
+                        info.remote_peer_addr == *socket_addr
+                            && info.connection_version == connection_version
+                    }) {
+                        let info = unused_conn_vec.remove(info_pos);
+                        if unused_conn_vec.is_empty() {
+                            self.prio_queue.remove(&inserted_at);
+                        }
+                        self.curr_len -= 1;
+                        return Some(info);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn oldest(&self) -> Option<Instant> {
+        self.prio_queue.keys().next().cloned()
+    }
+
+    fn pop(&mut self) -> Option<Vec<OrphanConnectionInfo>> {
+        let (inserted_at, unused_conn_vec) = self.prio_queue.pop_first()?;
+        for info in &unused_conn_vec {
+            if let Some(version_set) = self.prio_queue_rev_index.get_mut(&info.remote_peer_addr) {
+                version_set.retain(|(ts, v)| *v != info.connection_version || *ts != inserted_at);
+                if version_set.is_empty() {
+                    self.prio_queue_rev_index.remove(&info.remote_peer_addr);
+                }
+            }
+        }
+        self.curr_len -= unused_conn_vec.len();
+        Some(unused_conn_vec)
+    }
+}
+
+struct OrphanConnectionInfo {
+    remote_peer_addr: SocketAddr,
+    connection_version: u64,
+}
+
+#[derive(Default)]
+struct ConnectionEvictionSet {
+    set: HashSet<ConnectionEviction>,
+    socket_addr_set: HashSet<SocketAddr>,
+}
+
+impl ConnectionEvictionSet {
+    fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.set.clear();
+        self.socket_addr_set.clear();
+    }
+
+    fn insert(&mut self, eviction: ConnectionEviction) -> bool {
+        let inserted = self.set.insert(eviction.clone());
+        if inserted {
+            self.socket_addr_set.insert(eviction.remote_peer_addr);
+        }
+        inserted
+    }
+
+    fn remove(&mut self, eviction: &ConnectionEviction) -> bool {
+        let removed = self.set.remove(eviction);
+        if removed {
+            self.socket_addr_set.remove(&eviction.remote_peer_addr);
+        }
+        removed
+    }
+
+    fn contains(&self, eviction: &ConnectionEviction) -> bool {
+        self.set.contains(eviction)
+    }
+
+    fn contains_socket_addr(&self, addr: &SocketAddr) -> bool {
+        self.socket_addr_set.contains(addr)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConnectionEviction {
+    ///
+    /// The remote peer identity being evicted.
+    ///
+    pub remote_peer_addr: SocketAddr,
+    ///
+    /// The connection version being evicted.
+    ///
+    pub connection_version: u64,
+}
+
+pub struct ActiveConnection {
+    conn: Arc<Connection>,
+    connection_version: u64,
+    multiplexed_remote_peer_identity_with_stake: HashMap<Pubkey, u64>,
 }
 
 pub trait LeaderTpuInfoService {
@@ -488,6 +680,16 @@ pub enum TxDropReason {
     ///
     #[display("remote peer is being evicted")]
     RemotePeerBeingEvicted,
+    ///
+    /// The transaction is invalid.
+    ///
+    #[display("transaction packet size is exceed PACKET_DATA_SIZE (1232 bytes)")]
+    InvalidPacketSize,
+    ///
+    /// The remote peer identity changed.
+    ///
+    #[display("driver QUIC identity changed")]
+    DriverIdentityChanged,
 }
 
 ///
@@ -525,12 +727,10 @@ pub enum TpuSenderResponse {
 /// A task to connect to a remote peer.
 ///
 struct ConnectingTask {
-    service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     remote_peer_identity: Pubkey,
     cert: Arc<QuicClientCertificate>,
     max_idle_timeout: Duration,
     connection_timeout: Duration,
-    tpu_port_kind: TpuPortKind,
     wait_for_eviction: Option<Arc<Notify>>,
     endpoint: Endpoint,
 }
@@ -556,19 +756,19 @@ pub fn crypto_provider() -> CryptoProvider {
 }
 
 impl ConnectingTask {
-    async fn run(self) -> Result<Connection, ConnectingError> {
+    async fn run(self, remote_peer_addr: SocketAddr) -> Result<Connection, ConnectingError> {
         if let Some(signal) = &self.wait_for_eviction {
             tracing::trace!(
                 "Waiting for eviction to complete before connecting to remote peer: {}",
                 self.remote_peer_identity
             );
             signal.notified().await;
+            tracing::trace!(
+                "Eviction completed, proceeding to connect to remote peer: {}",
+                self.remote_peer_identity
+            );
         }
 
-        let remote_peer_addr = self
-            .service
-            .get_quic_dest_addr(&self.remote_peer_identity, self.tpu_port_kind);
-        let remote_peer_addr = remote_peer_addr.ok_or(ConnectingError::PeerNotInLeaderSchedule)?;
         let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
             .with_safe_default_protocol_versions()
             .expect("Failed to set QUIC client protocol versions")
@@ -635,7 +835,7 @@ impl ConnectingTask {
 /// benchmarks conducted by the Anza team indicate that this approach degrades performance rather than improving it.
 struct QuicTxSenderWorker<CB> {
     remote_peer: Pubkey,
-    connection: Connection,
+    connection: Arc<Connection>,
     /// The current client identity being used for the connection
     current_client_identity: Pubkey,
     incoming_rx: mpsc::Receiver<TpuSenderTxn>,
@@ -643,11 +843,6 @@ struct QuicTxSenderWorker<CB> {
     tx_queue: VecDeque<(TpuSenderTxn, usize)>,
     cancel_notify: Arc<Notify>,
     max_tx_attempt: NonZeroUsize,
-    // TODO: Check if this is necessary, since there is already flow control in QUIC
-    // Moreover, most QUIC API are instantaneous and do not block
-    // and if a connection is idle for 2s it will be closed anyway, moreover remote validator could technically decide to kick us off
-    #[allow(dead_code)]
-    tx_send_timeout: Duration,
     txn_sent: usize,
 }
 
@@ -802,6 +997,11 @@ where
 
     async fn run(mut self) -> TxSenderWorkerCompleted {
         let mut canceled = false;
+        let mut last_activity = Instant::now();
+        let mut burst_timer = Box::pin(tokio::time::sleep_until(
+            (last_activity + Duration::from_secs(10)).into(),
+        ));
+        const MAX_IDLE_DURATION: Duration = Duration::from_secs(10);
         let maybe_err = loop {
             tracing::trace!(
                 "worker {} tick loop -- queue size: {}",
@@ -812,11 +1012,13 @@ where
             if let Some(e) = self.try_process_tx_in_queue().await {
                 break Some(e);
             }
-
+            // Every 10 seconds we will look if there is new tx to processed.
+            // If not we will close the worker to free up resources.
             tokio::select! {
                 maybe = self.incoming_rx.recv() => {
                     match maybe {
                         Some(tx) => {
+                            last_activity = Instant::now();
                             tracing::trace!("Received tx: {} for remote peer: {}", tx.tx_sig, self.remote_peer);
                             self.tx_queue.push_back((tx, 1));
                         }
@@ -824,6 +1026,19 @@ where
                             tracing::debug!("Transaction sender inlet closed for remote peer: {:?}", self.remote_peer);
                             break None;
                         }
+                    }
+                }
+                _ = &mut burst_timer => {
+                    let idle_duration = Instant::now().duration_since(last_activity);
+                    tracing::debug!(
+                        "Transaction sender worker for remote peer: {:?} idle for {:?}, shutting down",
+                        self.remote_peer,
+                        idle_duration
+                    );
+                    if idle_duration >= MAX_IDLE_DURATION {
+                        break None;
+                    } else {
+                        burst_timer.as_mut().reset(( last_activity + Duration::from_secs(10) ).into());
                     }
                 }
                 err = self.connection.closed() => {
@@ -864,7 +1079,7 @@ pub trait ConnectionEvictionStrategy {
     ///
     /// Plan up to `plan_ahead_size` [`quinn::Connection`] to evicts.
     ///
-    /// Arguments:
+    /// # Arguments
     ///
     /// `now`: the current time, can be used by the strategy to apply grace period if it supports it.
     /// `ss_identites`: a sorted set of remote pubkeys currently connected to.
@@ -889,18 +1104,203 @@ pub trait ConnectionEvictionStrategy {
         evicting_masq: &HashSet<Pubkey>,
         plan_ahead_size: usize,
     ) -> Vec<Pubkey>;
+
+    ///
+    /// Plan up to `plan_ahead_size` [`quinn::Connection`] to evicts, with additional context from remote peer address map.
+    ///
+    /// This default implementation simply calls [`Self::plan_eviction`].
+    ///
+    /// Strategies that need additional context from remote peer address map should override this method.
+    ///
+    /// # Arguments
+    ///
+    /// `now`: the current time, can be used by the strategy to apply grace period if it supports it.
+    /// `ss_identies`: a sorted set of remote pubkeys currently connected to.
+    /// `usage_table`: A lookup table from remote peer identity to last time a transaction was routed to.
+    /// `evicting_masq` : a set of pubkey already schedule for evicting, may overlap with `ss_identities`.
+    /// The resulted plan should not include any of `already_evicting`.
+    /// `plan_ahead_size` : how far ahead should the strategy plan ahead future evictions.
+    /// `remote_peer_address_map`: A [`RemotePeerAddrMap`] that provides information about remote peer addresses and their connections.
+    ///
+    /// # Returns
+    ///
+    /// A list of remote peer identity to evict in order of evicting priority.
+    ///
+    /// # Multiplexing Note
+    ///
+    /// Multiple remote peer identities may share the same socket address.
+    /// Evicting one remote peer identity will also terminate the connection for all other the remote peer identities sharing the same socket address.
+    ///
+    /// See [`StakeBasedEvictionStrategy`] for an example of eviction strategy that uses this method.
+    ///
+    #[allow(unused_variables)]
+    fn plan_eviction_with_addr_map(
+        &self,
+        now: Instant,
+        ss_identies: &StakeSortedPeerSet,
+        usage_table: &HashMap<Pubkey, Instant>,
+        already_evicting: &HashSet<Pubkey>,
+        plan_ahead_size: usize,
+        remote_peer_address_map: &RemotePeerAddrMap<'_>,
+    ) -> Vec<Pubkey> {
+        self.plan_eviction(
+            now,
+            ss_identies,
+            usage_table,
+            already_evicting,
+            plan_ahead_size,
+        )
+    }
 }
+
+///
+/// A map that provides information about remote peer addresses and their connections.
+///
+/// # Note
+///
+/// This struct is used to provide additional context to eviction strategies that need to know.
+/// You can get the address of a peer, the connected stake at an address, and iterate over staked sorted remote peer groups.
+///
+pub struct RemotePeerAddrMap<'a> {
+    connection_map: ConnectionMap<'a>,
+    staked_sorted_address_set: &'a StakedSortedSet<SocketAddr>,
+}
+
+enum ConnectionMap<'a> {
+    Quinn(&'a HashMap<SocketAddr, ActiveConnection>),
+    // Only use for test
+    #[allow(dead_code)]
+    Test(&'a HashMap<SocketAddr, HashMap<Pubkey, u64>>),
+}
+
+impl ConnectionMap<'_> {
+    fn get_peer_stake_mapping(&self, addr: &SocketAddr) -> Option<&HashMap<Pubkey, u64>> {
+        match self {
+            ConnectionMap::Quinn(map) => map
+                .get(addr)
+                .map(|active_conn| &active_conn.multiplexed_remote_peer_identity_with_stake),
+            ConnectionMap::Test(map) => map.get(addr),
+        }
+    }
+}
+
+///
+/// A group of remote peer identities multiplexed over the same socket address.
+///
+/// # Note
+///
+/// Multiple remote peer identities may share the same socket address.
+/// This struct represents such a group, along with their associated stake values.
+///
+pub struct MultiplexedPeerGroup<'a> {
+    pub socket_addr: SocketAddr,
+    group: &'a HashMap<Pubkey, u64>,
+}
+
+impl MultiplexedPeerGroup<'_> {
+    ///
+    /// Gets the total stake of all remote peer identities in the group.
+    ///
+    pub fn total_stake(&self) -> u64 {
+        self.group.values().sum()
+    }
+
+    ///
+    /// Yields iterator over the remote peer identities and their stake in the group.
+    ///
+    pub fn iter(&self) -> impl Iterator<Item = (&Pubkey, &u64)> {
+        self.group.iter()
+    }
+}
+
+impl RemotePeerAddrMap<'_> {
+    ///
+    /// Gets the total connected stake at a given socket address.
+    ///
+    /// # Multiplexing Note
+    ///
+    /// Multiple remote peer identities may share the same socket address.
+    /// The total connected stake is the sum of the stake of all remote peer identities
+    ///
+    pub fn get_connected_stake_at_addr(&self, addr: &SocketAddr) -> Option<u64> {
+        self.connection_map
+            .get_peer_stake_mapping(addr)
+            .map(|peer_stake_map| peer_stake_map.values().sum())
+    }
+
+    ///
+    /// Yields instance of [`MultiplexedPeerGroup`] in order of ascending stake.
+    ///
+    /// A [`MultiplexedPeerGroup`] represents a group of remote peer identities multiplexed over the same socket address.
+    ///
+    /// The stake of each group is the sum of the stake of all remote peer identities in the group.
+    ///
+    /// # Eviction Strategy Usage
+    ///
+    /// This function can be used by eviction strategies to make informed decisions based on the stake distribution across different remote peer groups.
+    /// Because multiple remote peer may share the same socket address, evicting one remote peer identity will also terminate the connection for all other
+    /// remote peer identities sharing the same socket address.
+    ///
+    /// If a remote connection host peers with various stake levels, evicting the lowest staked peer may not be optimal.
+    ///
+    pub fn staked_sorted_remote_peer_groups(
+        &self,
+    ) -> impl Iterator<Item = MultiplexedPeerGroup<'_>> + '_ {
+        let iter = Box::new(self.staked_sorted_address_set.iter());
+        struct MyIterator<'a> {
+            iter: Box<dyn Iterator<Item = (u64, SocketAddr)> + 'a>,
+            connection_map: &'a ConnectionMap<'a>,
+        }
+
+        impl<'a> Iterator for MyIterator<'a> {
+            type Item = MultiplexedPeerGroup<'a>;
+
+            #[allow(clippy::while_let_on_iterator)]
+            fn next(&mut self) -> Option<Self::Item> {
+                while let Some((_, addr)) = self.iter.next() {
+                    tracing::trace!("Yielding multiplexed peer group at address: {}", addr);
+                    if let Some(peer_stake_map) = self.connection_map.get_peer_stake_mapping(&addr)
+                    {
+                        return Some(MultiplexedPeerGroup {
+                            socket_addr: addr,
+                            group: peer_stake_map,
+                        });
+                    }
+                }
+                None
+            }
+        }
+        MyIterator {
+            iter,
+            connection_map: &self.connection_map,
+        }
+    }
+}
+
+pub type StakeSortedPeerSet = StakedSortedSet<Pubkey>;
 
 ///
 /// A set of remote peer identities sorted by their stake value.
 ///
-#[derive(Debug, Default)]
-pub struct StakeSortedPeerSet {
-    peer_stake_map: HashMap<Pubkey, u64 /* stake */>,
-    sorted_map: BTreeMap<u64 /* stake */, HashSet<Pubkey>>,
+#[derive(Debug)]
+pub struct StakedSortedSet<V> {
+    peer_stake_map: HashMap<V, u64 /* stake */>,
+    sorted_map: BTreeMap<u64 /* stake */, HashSet<V>>,
 }
 
-impl StakeSortedPeerSet {
+impl<V> Default for StakedSortedSet<V> {
+    fn default() -> Self {
+        Self {
+            peer_stake_map: Default::default(),
+            sorted_map: Default::default(),
+        }
+    }
+}
+
+impl<V> StakedSortedSet<V>
+where
+    V: Clone + Eq + std::hash::Hash,
+{
     ///
     /// Removes a peer from the set.
     ///
@@ -908,7 +1308,7 @@ impl StakeSortedPeerSet {
     ///
     /// `true` if the peer was present and removed, `false` otherwise.
     ///
-    pub fn remove(&mut self, peer: &Pubkey) -> bool {
+    pub fn remove(&mut self, peer: &V) -> bool {
         if let Some(old_stake) = self.peer_stake_map.remove(peer) {
             let mut is_entry_empty = false;
             if let Some(peers) = self.sorted_map.get_mut(&old_stake) {
@@ -926,6 +1326,11 @@ impl StakeSortedPeerSet {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.peer_stake_map.clear();
+        self.sorted_map.clear();
+    }
+
     ///
     /// Inserts or updates a peer with the given stake.
     ///
@@ -933,20 +1338,27 @@ impl StakeSortedPeerSet {
     ///
     /// `true` if the peer was already present and updated, `false` if it was newly inserted.
     ///
-    pub fn insert(&mut self, peer: Pubkey, stake: u64) -> bool {
+    pub fn insert(&mut self, peer: V, stake: u64) -> bool {
         let already_present = self.remove(&peer);
-        self.peer_stake_map.insert(peer, stake);
-        self.sorted_map.entry(stake).or_default().insert(peer);
+        self.peer_stake_map.insert(peer.clone(), stake);
+        self.sorted_map
+            .entry(stake)
+            .or_default()
+            .insert(peer.clone());
         already_present
+    }
+
+    pub fn get(&self, peer: &V) -> Option<u64> {
+        self.peer_stake_map.get(peer).copied()
     }
 
     ///
     /// Iterates over the set in ascending order of stake.
     ///
-    pub fn iter(&self) -> impl Iterator<Item = (u64, Pubkey)> {
+    pub fn iter(&self) -> impl Iterator<Item = (u64, V)> {
         self.sorted_map
             .iter()
-            .flat_map(|(stake, peers)| peers.iter().map(|peer| (*stake, *peer)))
+            .flat_map(|(stake, peers)| peers.iter().map(|peer| (*stake, peer.clone())))
     }
 
     ///
@@ -960,6 +1372,21 @@ impl StakeSortedPeerSet {
 ///
 /// An eviction strategy that evicts the lowest staked remote peer first,
 /// unless it has been used recently.
+///
+/// # Multiplexing Note
+///
+/// Because multiple remote peer identities may share the same socket address,
+/// evicting one remote peer identity will also terminate the connection for all other
+/// remote peer identities sharing the same socket address.
+///
+/// This strategy takes that into account by evicting groups of remote peer identities
+/// multiplexed over the same socket address.
+///
+/// Because of this its recommended to use [`ConnectionEvictionStrategy::plan_eviction_with_addr_map`]
+///
+/// # Grace Period
+///
+/// This strategy applies a grace period to avoid evicting remote peers that have been used recently.
 ///
 #[derive(Debug)]
 pub struct StakeBasedEvictionStrategy {
@@ -997,7 +1424,9 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
             .iter()
             .filter(|(_, peer)| !already_evicting.contains(peer))
             .filter(|(_, peer)| {
-                let last_usage = usage_table.get(peer).expect("missing last activity");
+                let Some(last_usage) = usage_table.get(peer) else {
+                    return true;
+                };
                 let elapsed = now.saturating_duration_since(*last_usage);
                 elapsed >= self.peer_idle_eviction_grace_period
             })
@@ -1017,14 +1446,88 @@ impl ConnectionEvictionStrategy for StakeBasedEvictionStrategy {
             plan
         }
     }
+
+    ///
+    /// Plan up to `plan_ahead_size` [`quinn::Connection`] to evicts, with additional context from remote peer address map.
+    ///
+    fn plan_eviction_with_addr_map(
+        &self,
+        now: Instant,
+        _ss_identies: &StakeSortedPeerSet,
+        usage_table: &HashMap<Pubkey, Instant>,
+        already_evicting: &HashSet<Pubkey>,
+        plan_ahead_size: usize,
+        remote_peer_address_map: &RemotePeerAddrMap<'_>,
+    ) -> Vec<Pubkey> {
+        let mut proposed_eviction = Vec::with_capacity(plan_ahead_size);
+
+        remote_peer_address_map
+            .staked_sorted_remote_peer_groups()
+            .filter_map(|group| {
+                for (peer, _peer_stake) in group.iter() {
+                    if already_evicting.contains(peer) {
+                        return None;
+                    }
+                    let Some(last_usage) = usage_table.get(peer) else {
+                        continue;
+                    };
+                    let elapsed = now.saturating_duration_since(*last_usage);
+                    if elapsed < self.peer_idle_eviction_grace_period {
+                        return None;
+                    }
+                }
+                Some(group)
+            })
+            .take(plan_ahead_size)
+            .for_each(|group| {
+                for (peer, _peer_stake) in group.iter() {
+                    proposed_eviction.push(*peer);
+                }
+            });
+        tracing::trace!("Planned eviction peers len: {:?}", proposed_eviction.len());
+        if proposed_eviction.is_empty() {
+            // Or else we don't care, just evict the lowest-staked peer group.
+            remote_peer_address_map
+                .staked_sorted_remote_peer_groups()
+                .filter_map(|group| {
+                    for (peer, _peer_stake) in group.iter() {
+                        if already_evicting.contains(peer) {
+                            return None;
+                        }
+                    }
+                    Some(group)
+                })
+                .take(plan_ahead_size)
+                .for_each(|group| {
+                    for (peer, _peer_stake) in group.iter() {
+                        proposed_eviction.push(*peer);
+                    }
+                });
+        }
+        proposed_eviction
+    }
 }
 
-#[derive(Debug)]
+///
+/// Source of spawning a connection task.
+///
+/// Spawning a connection task can be triggered by different events.
+/// This enum helps for debugging of logging purposes.
+///
+/// See [`TpuSenderDriver::spawn_connecting`] for more information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpawnSource {
+    /// A new transaction arrived for a remote peer without a worker.
     NewTransaction,
+    /// Connection spawned because the underlying driver's identity used to sign certicated was updated.
     UpdateIdentity,
+    ///
+    /// Connection spawned because a prediction that a remote peer will be needed soon.
+    ///
     Prediction,
+    /// Connection spawned as part of re-attempting failed connections.
     Reattempt,
+    /// Connection spawned as part of rescuing queued transactions for a remote peer's worker.
     Rescue,
 }
 
@@ -1068,7 +1571,33 @@ where
 {
     ///
     /// Spawns a "connecting" task to a remote peer.
+    ///
     /// this is called when a transaction is received for a remote peer which does not have a worker installed yet.
+    ///
+    /// # Multiplexing Note
+    ///
+    /// Multiple remote peer identities may share the same socket address.
+    ///
+    /// This method will multiplex remote peer identities over the same connection if there is already a connecting task
+    /// for the same remote peer address.
+    ///
+    /// If a [`quinn::Connection`] already exists for the  TPU address of the provided `remote_peer_identity`,
+    /// this method will directly call [`TpuSenderDriver::install_worker`] for the remote peer identity using the existing connection
+    /// and add it to the multiplexed remote peer identities of the connection.
+    ///
+    /// ## Fragmentation edge-case caused by multiplexing
+    ///
+    /// Since multiple [`QuicTxSenderWorker`] may share the same [`quinn::Connection`], we have to ensure that
+    /// each worker sends transactions sequentially over the connection, not concurrently.
+    ///
+    /// Since there is only one leader at a time in Solana, it's expected that most of the time only one remote peer identity
+    /// will be active on a connection, thus fragmentation should not exists.
+    ///
+    /// The only occurence of fragmentation would be during leader transitions over two validators sharing the same TPU address.
+    /// In this case, both remote peer identities may have pending transactions to send over the same connection during the last half of a slot.
+    /// NOTE: This very edge-case will be fixed in the future.
+    ///
+    /// Lastly, most validators will not multiplex multiple identities over the same address, thus fragmentation should be non-existent in practice.
     ///
     fn spawn_connecting(
         &mut self,
@@ -1080,6 +1609,12 @@ where
             .connecting_remote_peers
             .contains_key(&remote_peer_identity)
         {
+            #[cfg(feature = "prometheus")]
+            {
+                if debug_source == SpawnSource::NewTransaction {
+                    prom::incr_quic_gw_tx_connection_cache_miss_cnt();
+                }
+            }
             tracing::warn!(
                 "Skipping connection attempt to remote peer: {} since it is already connecting",
                 remote_peer_identity
@@ -1092,7 +1627,6 @@ where
                 "Skipping connection attempt to remote peer: {} since it is being evicted",
                 remote_peer_identity
             );
-            self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::RemotePeerBeingEvicted);
             return;
         }
 
@@ -1107,69 +1641,138 @@ where
             return;
         }
 
+        // Check if we already have a connection for the remote peer address
+        // If not, check if there is already a connecting task for the same remote peer address
+        // If not, spawn a new connecting task
+        let Some(remote_peer_addr) = self
+            .leader_tpu_info_service
+            .get_quic_dest_addr(&remote_peer_identity, self.config.tpu_port)
+        else {
+            self.unreachable_peer(remote_peer_identity);
+            return;
+        };
+
+        if self
+            .pending_connection_eviction_set
+            .contains_socket_addr(&remote_peer_addr)
+        {
+            return;
+        }
+
+        if self.connection_map.contains_key(&remote_peer_addr) {
+            // We already have an active connection for the remote peer address
+            tracing::debug!(
+                "Re-using existing active connection to remote peer address: {} for remote peer identity: {}",
+                remote_peer_addr,
+                remote_peer_identity
+            );
+            #[cfg(feature = "prometheus")]
+            {
+                if debug_source == SpawnSource::NewTransaction {
+                    prom::incr_quic_gw_tx_connection_cache_hit_cnt();
+                }
+                prom::incr_fast_txn_worker_install_path();
+            }
+            self.install_worker(remote_peer_identity, remote_peer_addr);
+            return;
+        }
+
+        #[cfg(feature = "prometheus")]
+        {
+            if debug_source == SpawnSource::NewTransaction {
+                prom::incr_quic_gw_tx_connection_cache_miss_cnt();
+            }
+        }
+
+        let maybe_existing_connecting_task =
+            self.connecting_remote_peers_addr.get(&remote_peer_addr);
+
         // We need signal to wait for eviction to complete before we can proceed with the connection.
         // Otherwise, the connecting attempt may fail to bind a local port.
-        let maybe_wait_for_eviction = if !self.has_connection_capacity() {
-            let notify = Arc::new(Notify::new());
-            let waiting_eviction = WaitingEviction {
-                remote_peer_identity,
-                notify: Arc::clone(&notify),
+        let maybe_wait_for_eviction =
+            if !self.has_connection_capacity() && maybe_existing_connecting_task.is_none() {
+                // We need to evict a connection before we can proceed.
+                let notify = Arc::new(Notify::new());
+                let waiting_eviction = WaitingEviction {
+                    remote_peer_addr,
+                    notify: Arc::clone(&notify),
+                };
+                tracing::trace!(
+                    "Remote peer: {} connection attempt blocked, waiting for eviction",
+                    remote_peer_identity
+                );
+                self.connecting_blocked_by_eviction_list
+                    .push_back(waiting_eviction);
+                Some(notify)
+            } else {
+                // There is room for new connections, no need to wait for eviction.
+                None
             };
-            self.connecting_blocked_by_eviction_list
-                .push_back(waiting_eviction);
-            Some(notify)
-        } else {
-            None
-        };
 
-        let service = Arc::clone(&self.leader_tpu_info_service);
-        let endpoint_idx = self.get_least_used_endpoint();
-        let cert = Arc::clone(&self.client_certificate);
-        let max_idle_timeout = self.config.max_idle_timeout;
-        let fut = ConnectingTask {
-            service,
-            remote_peer_identity,
-            cert,
-            max_idle_timeout,
-            connection_timeout: self.config.connecting_timeout,
-            tpu_port_kind: self.config.tpu_port,
-            wait_for_eviction: maybe_wait_for_eviction,
-            endpoint: self.endpoints[endpoint_idx].clone(),
+        match maybe_existing_connecting_task {
+            Some(existing_task_id) => {
+                // There is already a connecting task for the same remote peer address.
+                // Due to multiplexing, we can re-use the existing connecting task.
+                tracing::info!(
+                    "Re-using existing connecting task to remote peer address: {} for remote peer identity: {}",
+                    remote_peer_addr,
+                    remote_peer_identity
+                );
+                let meta = self
+                    .connecting_meta
+                    .get_mut(existing_task_id)
+                    .expect("missing connecting meta for existing task");
+                meta.multiplexed_remote_peer_identity_vec
+                    .push(remote_peer_identity);
+
+                // Just add yourself to the connecting remote peers map.
+                let old = self
+                    .connecting_remote_peers
+                    .insert(remote_peer_identity, *existing_task_id);
+                assert!(
+                    old.is_none(),
+                    "Remote peer should not be already connecting"
+                );
+            }
+            None => {
+                // No existing connecting task for the remote peer address, spawn a new one.
+                let endpoint_idx = self.next_endpoint_idx();
+                let cert = Arc::clone(&self.client_certificate);
+                let max_idle_timeout = self.config.max_idle_timeout;
+                let fut = ConnectingTask {
+                    remote_peer_identity,
+                    cert,
+                    max_idle_timeout,
+                    connection_timeout: self.config.connecting_timeout,
+                    wait_for_eviction: maybe_wait_for_eviction,
+                    endpoint: self.endpoints[endpoint_idx].clone(),
+                }
+                .run(remote_peer_addr);
+                let meta = ConnectingMeta {
+                    current_client_identity: self.identity.pubkey(),
+                    multiplexed_remote_peer_identity_vec: vec![remote_peer_identity],
+                    remote_peer_address: remote_peer_addr,
+                    connection_attempt: attempt,
+                    created_at: Instant::now(),
+                };
+
+                let abort_handle = self.connecting_tasks.spawn(fut);
+
+                tracing::info!(
+                    "Spawning connection for remote peer: {remote_peer_identity}, attempt: {attempt}, source: {debug_source:?}",
+                );
+                let old = self
+                    .connecting_remote_peers
+                    .insert(remote_peer_identity, abort_handle.id());
+                assert!(
+                    old.is_none(),
+                    "Remote peer should not be already connecting"
+                );
+                self.connecting_meta.insert(abort_handle.id(), meta);
+                self.connecting_remote_peers_addr
+                    .insert(remote_peer_addr, abort_handle.id());
+            }
         }
-        .run();
-        let meta = ConnectingMeta {
-            current_client_identity: self.identity.pubkey(),
-            remote_peer_identity,
-            connection_attempt: attempt,
-            endpoint_idx,
-            created_at: Instant::now(),
-        };
-        self.endpoints_usage[endpoint_idx]
-            .connecting_remote_peers
-            .insert(remote_peer_identity);
-        let abort_handle = self.connecting_tasks.spawn(fut);
-        tracing::info!(
-            "Spawning connection for remote peer: {remote_peer_identity}, attempt: {attempt}, source: {debug_source:?}",
-        );
-        let old = self
-            .connecting_remote_peers
-            .insert(remote_peer_identity, abort_handle.id());
-        assert!(
-            old.is_none(),
-            "Remote peer should not be already connecting"
-        );
-        self.connecting_meta.insert(abort_handle.id(), meta);
-    }
-
-    fn get_least_used_endpoint(&mut self) -> usize {
-        self.endpoints_usage
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, usage)| {
-                usage.connected_remote_peers.len() + usage.connecting_remote_peers.len()
-            })
-            .map(|(idx, _)| idx)
-            .expect("At least one endpoint should be available")
     }
 
     ///
@@ -1207,7 +1810,7 @@ where
     }
 
     fn has_connection_capacity(&self) -> bool {
-        self.tx_worker_handle_map.len() < self.max_concurrent_connection()
+        self.connection_map.len() < self.max_concurrent_connection()
     }
 
     const fn max_concurrent_connection(&self) -> usize {
@@ -1224,46 +1827,123 @@ where
         let eviction_count_required = self
             .connecting_blocked_by_eviction_list
             .len()
-            .saturating_sub(self.being_evicted_peers.len());
+            .saturating_sub(self.pending_connection_eviction_set.len());
 
         if eviction_count_required == 0 {
+            tracing::trace!("No eviction required at this time");
             return;
         }
-        let eviction_plan = self.eviction_strategy.plan_eviction(
+        tracing::info!(
+            "Eviction required for {} connections",
+            eviction_count_required
+        );
+        let connection_map = ConnectionMap::Quinn(&self.connection_map);
+        let addr_map = RemotePeerAddrMap {
+            connection_map,
+            staked_sorted_address_set: &self.active_staked_sorted_remote_peer_addr,
+        };
+
+        let mut eviction_plan = self.eviction_strategy.plan_eviction_with_addr_map(
             Instant::now(),
             &self.active_staked_sorted_remote_peer,
             &self.last_peer_activity,
             &self.being_evicted_peers,
             eviction_count_required,
+            &addr_map,
         );
-        if !eviction_plan.is_empty() {
-            tracing::info!("Planned {} evictions", eviction_plan.len());
-        }
-        eviction_plan
-            .into_iter()
-            .flat_map(|peer| self.tx_worker_handle_map.get(&peer))
-            .for_each(|handle| {
-                handle.cancel_notify.notify_one();
-                #[cfg(feature = "prometheus")]
-                {
-                    prom::incr_quic_gw_total_connection_evictions_cnt(1);
-                }
-                self.being_evicted_peers.insert(handle.remote_peer_identity);
+        tracing::trace!("Eviction plan len {}", eviction_plan.len());
+        if eviction_plan.is_empty() && self.pending_connection_eviction_set.is_empty() {
+            // If the evictin plan is empty, pick the connection with the least amount of a active stake
+            let min_staked_active_conn = self.connection_map.values().min_by_key(|active_conn| {
+                active_conn
+                    .multiplexed_remote_peer_identity_with_stake
+                    .values()
+                    .sum::<u64>()
             });
+            if let Some(active_conn) = min_staked_active_conn {
+                for peer in active_conn
+                    .multiplexed_remote_peer_identity_with_stake
+                    .keys()
+                {
+                    eviction_plan.push(*peer);
+                }
+            }
+        }
+
+        // Because of multiplexing, in order to do the connection eviction we must
+        // evict all tx workers that are using the same connection.
+        // For each remote peer to evict, we need to extends the eviction set to include all neighboring
+        // remote peers that are multiplexed on the same connection.
+        let mut cancel_handles_vec = Vec::with_capacity(eviction_plan.len());
+        for peer in eviction_plan {
+            if let Some(handle) = self.tx_worker_handle_map.get(&peer) {
+                let remote_peer_addr = handle.remote_peer_addr;
+                self.being_evicted_peers.insert(peer);
+                cancel_handles_vec.push(Arc::clone(&handle.cancel_notify));
+                if let Some(active_conn) = self.connection_map.get(&remote_peer_addr) {
+                    if active_conn.connection_version != handle.connection_version {
+                        // This means the connection has been re-established since the worker was created.
+                        // So we don't need to evict other multiplexed peers on this connection.
+                        continue;
+                    }
+                    let connection_eviction = ConnectionEviction {
+                        remote_peer_addr: active_conn.conn.remote_address(),
+                        connection_version: active_conn.connection_version,
+                    };
+                    self.pending_connection_eviction_set
+                        .insert(connection_eviction);
+                    for multiplexed_peer in active_conn
+                        .multiplexed_remote_peer_identity_with_stake
+                        .keys()
+                    {
+                        self.being_evicted_peers.insert(*multiplexed_peer);
+                        if let Some(handle) = self.tx_worker_handle_map.get(multiplexed_peer) {
+                            let cancel_notify = Arc::clone(&handle.cancel_notify);
+                            cancel_handles_vec.push(cancel_notify);
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::trace!(
+            "Evicting {} remote peer connections",
+            cancel_handles_vec.len()
+        );
+        for cancel_handle in cancel_handles_vec {
+            cancel_handle.notify_one();
+        }
     }
 
     ///
     /// Installs a transaction sender worker for a remote peer with the given connection.
     ///
-    fn install_worker(
-        &mut self,
-        remote_peer_identity: Pubkey,
-        endpoint_idx: usize,
-        connection: Connection,
-    ) {
+    /// # Arguments
+    ///
+    /// - `remote_peer_identity`: The public key of the remote peer.
+    /// - `remote_peer_addr`: The socket address of the remote peer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there is no active connection for the given remote peer address.
+    /// This function assumes that a connection has already been established for the remote peer address.
+    ///
+    /// See [`TpuSenderDriver::spawn_connecting`] for connection establishment
+    /// and see [`TpuSenderDriver::handle_connecting_result`] for handling connection results.
+    ///
+    fn install_worker(&mut self, remote_peer_identity: Pubkey, remote_peer_addr: SocketAddr) {
         let (tx, rx) = mpsc::channel(self.config.transaction_sender_worker_channel_capacity);
 
-        let remote_peer_addr = connection.remote_address();
+        let (connection, connection_version) = match self.connection_map.get(&remote_peer_addr) {
+            Some(active_conn) => (
+                Arc::clone(&active_conn.conn),
+                active_conn.connection_version,
+            ),
+            None => {
+                panic!("Active connection must exist for remote peer address: {remote_peer_addr}");
+            }
+        };
+
         let output_tx = self.response_outlet.clone();
         let cancel_notify = Arc::new(Notify::new());
 
@@ -1279,30 +1959,58 @@ where
                 .unwrap_or_default(),
             cancel_notify: Arc::clone(&cancel_notify),
             max_tx_attempt: self.config.max_send_attempt,
-            tx_send_timeout: self.config.send_timeout,
             txn_sent: 0,
         };
 
         let worker_fut = worker.run();
         let ah = self.tx_worker_set.spawn(worker_fut);
         let handle = TxWorkerSenderHandle {
-            remote_peer_identity,
             remote_peer_addr,
             sender: tx,
             cancel_notify,
+            connection_version,
         };
         assert!(
             self.tx_worker_handle_map
                 .insert(remote_peer_identity, handle)
                 .is_none()
         );
+        let task_id = ah.id();
         self.tx_worker_task_meta_map.insert(
-            ah.id(),
+            task_id,
             TxWorkerMeta {
                 remote_peer_identity,
-                endpoint_idx,
             },
         );
+        let Some(active_conn) = self.connection_map.get_mut(&remote_peer_addr) else {
+            unreachable!();
+        };
+        let remote_peer_stake = self
+            .stake_info_map
+            .get_stake_info(&remote_peer_identity)
+            .unwrap_or(0);
+        assert!(
+            active_conn
+                .multiplexed_remote_peer_identity_with_stake
+                .insert(remote_peer_identity, remote_peer_stake)
+                .is_none(),
+            "duplicate remote peer identity in active connection"
+        );
+        let total_remote_addr_stake: u64 = active_conn
+            .multiplexed_remote_peer_identity_with_stake
+            .values()
+            .sum();
+        self.active_staked_sorted_remote_peer_addr
+            .insert(remote_peer_addr, total_remote_addr_stake);
+        self.active_staked_sorted_remote_peer
+            .insert(remote_peer_identity, remote_peer_stake);
+        self.remote_peer_addr_watcher
+            .register_watch(remote_peer_identity, remote_peer_addr);
+
+        // MAKE SURE THIS CONNECTION IS NOT IN THE UNUSED SET ANYMORE (IF IT WERE).
+        self.orphan_connection_set
+            .remove(&remote_peer_addr, connection_version);
+
         tracing::debug!("Installed tx worker for remote peer: {remote_peer_identity}");
     }
 
@@ -1310,6 +2018,9 @@ where
     /// Handles the result of a connection attempt to a remote peer.
     ///
     /// Reattempts the connection if it fails, up to the maximum number of attempts, unless the peer is unreachable.
+    ///
+    /// If the connection is successful, this function call [`TpuSenderDriver::install_worker`] to set up a transaction sender worker for each
+    /// multiplexed remote peer identity over the connection.
     ///
     fn handle_connecting_result(
         &mut self,
@@ -1320,9 +2031,9 @@ where
                 #[allow(unused_variables)]
                 let ConnectingMeta {
                     current_client_identity,
-                    remote_peer_identity,
+                    multiplexed_remote_peer_identity_vec,
                     connection_attempt,
-                    endpoint_idx,
+                    remote_peer_address,
                     created_at,
                 } = self
                     .connecting_meta
@@ -1332,49 +2043,45 @@ where
                 {
                     prom::observe_quic_gw_connection_time(created_at.elapsed());
                 }
-
-                self.endpoints_usage[endpoint_idx]
-                    .connecting_remote_peers
-                    .remove(&remote_peer_identity);
-
-                let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
+                for remote_peer_identity in &multiplexed_remote_peer_identity_vec {
+                    self.connecting_remote_peers.remove(remote_peer_identity);
+                }
+                self.connecting_remote_peers_addr
+                    .remove(&remote_peer_address);
 
                 if self.identity.pubkey() != current_client_identity {
                     // THIS SHOULD NOT HAPPEN SINCE ON IDENTITY CHANGE WE ABORT ALL CONNECTING TASKS
                     // BUT JUST IN CASE, WE CHECK AGAIN.
                     tracing::warn!(
-                        "Abandoning connection attempt to remote peer: {remote_peer_identity} since the client identity has changed"
+                        "Abandoning connection attempt to remote peer: {multiplexed_remote_peer_identity_vec:?} since the client identity has changed"
                     );
-                    self.spawn_connecting(
-                        remote_peer_identity,
-                        connection_attempt,
-                        SpawnSource::UpdateIdentity,
-                    );
+                    for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                        self.spawn_connecting(
+                            remote_peer_identity,
+                            connection_attempt,
+                            SpawnSource::UpdateIdentity,
+                        );
+                    }
                     return;
                 }
 
                 match result {
                     Ok(conn) => {
-                        tracing::debug!("Connected to remote peer: {:?}", remote_peer_identity);
-                        let remote_peer_stake = self
-                            .stake_info_map
-                            .get_stake_info(&remote_peer_identity)
-                            .unwrap_or(0);
-                        self.active_staked_sorted_remote_peer
-                            .insert(remote_peer_identity, remote_peer_stake);
-
-                        self.remote_peer_addr_watcher
-                            .register_watch(remote_peer_identity, conn.remote_address());
-
-                        self.install_worker(remote_peer_identity, endpoint_idx, conn);
-
-                        self.endpoints_usage[endpoint_idx]
-                            .connected_remote_peers
-                            .insert(remote_peer_identity);
-
                         #[cfg(feature = "prometheus")]
                         {
                             prom::incr_quic_gw_connection_success_cnt();
+                        }
+                        let conn = Arc::new(conn);
+                        let active_connection = ActiveConnection {
+                            conn: Arc::clone(&conn),
+                            connection_version: self.next_connection_version(),
+                            multiplexed_remote_peer_identity_with_stake: Default::default(),
+                        };
+                        self.connection_map
+                            .insert(remote_peer_address, active_connection);
+                        for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                            tracing::debug!("Connected to remote peer: {:?}", remote_peer_identity);
+                            self.install_worker(remote_peer_identity, remote_peer_address);
                         }
                     }
                     Err(connect_err) => {
@@ -1390,27 +2097,56 @@ where
                                 // This should never happen, but if it does, we panic.
                                 // The endpoint is stopping, so we cannot connect to the remote peer.
                                 panic!(
-                                    "Endpoint is stopping, cannot connect to remote peer: {remote_peer_identity}, with identity: {current_client_identity}"
+                                    "Endpoint is stopping, cannot connect to remote peer: {multiplexed_remote_peer_identity_vec:?}, with identity: {current_client_identity}"
                                 );
                             }
                             ConnectingError::ConnectionError(_)
                                 if connection_attempt < self.config.max_connection_attempts =>
                             {
+                                // HERE'S THE CODE THE HANDLE RETRY LOGIC.
+                                // NOTE: THE RETRY COUNT IS NOT INSIDE A SPECIFIC REGISTER OR MAP,
+                                // IT'S STATELESS MEANING THE RETRY COUNT IS DETERMINED BY THE NUMBER OF ATTEMPTS STORED ON EACH CONNECTING TASK.
+                                // EACH REATTEMPT SPAWNS A NEW CONNECTING TASK WITH ATTEMPT COUNT EQUALS TO PREVIOUS ATTEMPT COUNT + 1.
+                                // AFTER REACHING MAX ATTEMPTS, THE DEFAULT MATCH BRANCH WILL HANDLE THE FAILURE CALLED "whatever".
+
                                 tracing::warn!(
-                                    "Connection attempt {} to remote peer: {remote_peer_identity} failed, retrying...",
+                                    "Connection attempt {} to remote peer: {multiplexed_remote_peer_identity_vec:?} failed, retrying...",
                                     connection_attempt
                                 );
-                                self.spawn_connecting(
-                                    remote_peer_identity,
-                                    connection_attempt.saturating_add(1),
-                                    SpawnSource::Reattempt,
-                                );
+
+                                //
+                                for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                                    let latest_remote_peer_address =
+                                        self.leader_tpu_info_service.get_quic_dest_addr(
+                                            &remote_peer_identity,
+                                            self.config.tpu_port,
+                                        );
+                                    let Some(latest_remote_peer_address) =
+                                        latest_remote_peer_address
+                                    else {
+                                        self.unreachable_peer(remote_peer_identity);
+                                        continue;
+                                    };
+                                    let new_connection_attempt =
+                                        if latest_remote_peer_address != remote_peer_address {
+                                            1
+                                        } else {
+                                            connection_attempt.saturating_add(1)
+                                        };
+                                    self.spawn_connecting(
+                                        remote_peer_identity,
+                                        new_connection_attempt,
+                                        SpawnSource::Reattempt,
+                                    );
+                                }
                             }
                             whatever => {
                                 tracing::warn!(
-                                    "Failed to connect to remote peer: {remote_peer_identity}, with identity: {current_client_identity}, error: {whatever:?}"
+                                    "Failed to connect to remote peer: {multiplexed_remote_peer_identity_vec:?}, with identity: {current_client_identity}, error: {whatever:?}"
                                 );
-                                self.unreachable_peer(remote_peer_identity);
+                                for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                                    self.unreachable_peer(remote_peer_identity);
+                                }
                             }
                         }
                     }
@@ -1423,25 +2159,58 @@ where
                 }
                 let ConnectingMeta {
                     current_client_identity: _,
-                    remote_peer_identity,
+                    multiplexed_remote_peer_identity_vec,
                     connection_attempt: _,
-                    endpoint_idx,
+                    remote_peer_address,
                     created_at: _,
                 } = self
                     .connecting_meta
                     .remove(&join_err.id())
                     .expect("connecting_meta");
 
-                self.endpoints_usage[endpoint_idx]
-                    .connecting_remote_peers
-                    .remove(&remote_peer_identity);
-                let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
-                tracing::error!(
-                    "Join error during connecting to {remote_peer_identity:?}: {:?}",
-                    join_err
-                );
+                self.connecting_remote_peers_addr
+                    .remove(&remote_peer_address);
+                for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                    let _ = self.connecting_remote_peers.remove(&remote_peer_identity);
+                    self.drop_peer_queued_tx(
+                        remote_peer_identity,
+                        TxDropReason::RemotePeerUnreachable,
+                    );
+                    tracing::error!(
+                        "Join error during connecting to {remote_peer_identity:?}: {:?}",
+                        join_err
+                    );
+                }
             }
         }
+    }
+
+    ///
+    /// Generates the next connection version number.
+    ///
+    /// We use connection versioning to track connection re-establishments.
+    ///
+    /// This is more a sanity check than anything else and not part of any core business logic.
+    ///
+    /// Why we are doing connection version tracking? Because this tpu sender driver is like a complex state-machine with alot of moving parts.
+    /// Connections can be re-established, workers can be spawned and evicted, all happening concurrently.
+    /// Making sure that a worker is using the correct connection is important to avoid subtle bugs.
+    /// So we use connection versioning to `assert!` that we didn't create any orphan worker or orphan connection in the code.
+    ///
+    ///
+    fn next_connection_version(&mut self) -> u64 {
+        let ret = self.connection_version;
+        self.connection_version += 1;
+        ret
+    }
+
+    ///
+    /// Round-robin endpoint selection
+    ///
+    fn next_endpoint_idx(&mut self) -> usize {
+        let ret = self.endpoint_sequence;
+        self.endpoint_sequence = (self.endpoint_sequence + 1) % self.endpoints.len();
+        ret
     }
 
     ///
@@ -1455,6 +2224,25 @@ where
         self.last_peer_activity
             .insert(remote_peer_identity, Instant::now());
         let tx_id = tx.tx_sig;
+
+        // Check size
+        if tx.wire.len() > PACKET_DATA_SIZE && !self.config.unsafe_allow_arbitrary_txn_size {
+            let tx_drop = TxDrop {
+                remote_peer_identity,
+                drop_reason: TxDropReason::InvalidPacketSize,
+                dropped_tx_vec: VecDeque::from([(tx, 1)]),
+            };
+            #[cfg(feature = "prometheus")]
+            {
+                prom::incr_quic_gw_drop_tx_cnt(remote_peer_identity, 1);
+                prom::incr_invalid_txn_packet_size();
+            }
+            if let Some(callback) = self.response_outlet.as_ref() {
+                callback.call(TpuSenderResponse::TxDrop(tx_drop));
+            }
+            return;
+        }
+
         // Do I have a transaction sender worker for this remote peer?
         if let Some(handle) = self.tx_worker_handle_map.get(&remote_peer_identity) {
             // If we have an active transaction sender worker for the remote peer,
@@ -1502,7 +2290,7 @@ where
         } else {
             #[cfg(feature = "prometheus")]
             {
-                prom::incr_quic_gw_tx_connection_cache_miss_cnt();
+                prom::incr_txn_worker_pre_installed_miss();
             }
             // We don't have any active transaction sender worker for the remote peer,
             // we need to queue the transaction and try to spawn a new connection.
@@ -1513,36 +2301,99 @@ where
             tracing::trace!("queuing tx: {:?}", tx_id);
 
             // Check if we are not already connecting to this remote peer.
-            if !self
-                .connecting_remote_peers
-                .contains_key(&remote_peer_identity)
-            {
-                // If the remote peer is already being connected, just queue the tx.
-                self.spawn_connecting(remote_peer_identity, 1, SpawnSource::NewTransaction);
-            }
+            // If the remote peer is already being connected, just queue the tx.
+            self.spawn_connecting(remote_peer_identity, 1, SpawnSource::NewTransaction);
         }
     }
 
+    ///
+    /// Unblocks a connection attempt that was waiting for eviction to complete.
+    /// We do this blocking to avoid connection capacity exhaustion.
+    /// Since we have a maximum number of concurrent connections that can be configured by the user.
     fn unblock_eviction_waiting_connection(&mut self) {
-        while let Some(WaitingEviction {
-            remote_peer_identity,
+        let Some(WaitingEviction {
+            remote_peer_addr,
             notify,
         }) = self.connecting_blocked_by_eviction_list.pop_front()
-        {
-            notify.notify_one();
+        else {
+            return;
+        };
+        tracing::trace!(
+            "Unblocking connection attempt to remote peer address: {} after eviction",
+            remote_peer_addr
+        );
+        notify.notify_one();
+    }
 
-            // If we are still trying to connect to this peer, stop unblocking more.
-            if self
-                .connecting_remote_peers
-                .contains_key(&remote_peer_identity)
-            {
-                tracing::trace!(
-                    "Unblocked waiting connection for remote peer: {}",
-                    remote_peer_identity
+    ///
+    /// Removes a worker from an active connection's multiplexed peer list.
+    ///
+    /// If the connection has no more multiplexed peers and is marked for eviction,
+    /// the connection is removed from the active connection map and eviction waiters are unblocked.
+    ///
+    /// # Note
+    ///
+    /// if the connection version does not match the expected version, the removal operation is ignored, not mutation is performed.
+    ///
+    fn remove_worker_from_active_connection(
+        &mut self,
+        remote_peer_addr: SocketAddr,
+        remote_peer_identity: Pubkey,
+        expected_connection_version: u64,
+    ) {
+        if let Some(active_conn) = self.connection_map.get_mut(&remote_peer_addr) {
+            if active_conn.connection_version != expected_connection_version {
+                // This means the connection has been re-established since the worker was created.
+                // So we don't need to remove the multiplexed peer from this connection.
+                tracing::warn!(
+                    "Skipping removal of remote peer: {} from active connection at address: {} due to connection version mismatch, expected: {}, actual: {}",
+                    remote_peer_identity,
+                    remote_peer_addr,
+                    expected_connection_version,
+                    active_conn.connection_version,
                 );
-                break;
+                return;
             }
-            // Else continue the loop to unblock the next waiting connection.
+            active_conn
+                .multiplexed_remote_peer_identity_with_stake
+                .remove(&remote_peer_identity);
+
+            let connection_eviction = ConnectionEviction {
+                remote_peer_addr,
+                connection_version: expected_connection_version,
+            };
+            let is_connection_mark_for_eviction = self
+                .pending_connection_eviction_set
+                .contains(&connection_eviction);
+            let has_no_worker = active_conn
+                .multiplexed_remote_peer_identity_with_stake
+                .is_empty();
+
+            let new_stake_for_addr: u64 = active_conn
+                .multiplexed_remote_peer_identity_with_stake
+                .values()
+                .sum();
+
+            self.active_staked_sorted_remote_peer_addr
+                .insert(remote_peer_addr, new_stake_for_addr);
+
+            if has_no_worker {
+                if is_connection_mark_for_eviction {
+                    self.connection_map.remove(&remote_peer_addr);
+                    self.pending_connection_eviction_set
+                        .remove(&connection_eviction);
+                    self.unblock_eviction_waiting_connection();
+                    self.active_staked_sorted_remote_peer_addr
+                        .remove(&remote_peer_addr);
+                } else {
+                    let orphan_conn_info = OrphanConnectionInfo {
+                        remote_peer_addr,
+                        connection_version: expected_connection_version,
+                    };
+                    self.orphan_connection_set
+                        .insert(orphan_conn_info, Instant::now());
+                }
+            }
         }
     }
 
@@ -1554,35 +2405,47 @@ where
             Ok((id, mut worker_completed)) => {
                 let TxWorkerMeta {
                     remote_peer_identity,
-                    endpoint_idx,
                 } = self
                     .tx_worker_task_meta_map
                     .remove(&id)
                     .expect("tx worker meta");
 
-                self.endpoints_usage[endpoint_idx]
-                    .connected_remote_peers
-                    .remove(&remote_peer_identity);
-
+                // We remove the stake from the remote peer address map
                 self.active_staked_sorted_remote_peer
                     .remove(&remote_peer_identity);
+
                 self.remote_peer_addr_watcher.forget(remote_peer_identity);
 
-                self.unblock_eviction_waiting_connection();
-                let is_evicted_conn = self.being_evicted_peers.remove(&remote_peer_identity);
+                let is_being_evicted = self.being_evicted_peers.remove(&remote_peer_identity);
                 let worker_tx = self
                     .tx_worker_handle_map
                     .remove(&remote_peer_identity)
                     .expect("tx worker sender");
+
+                if let Some(active_conn) = self.connection_map.get_mut(&worker_tx.remote_peer_addr)
+                {
+                    let active_conn_version = active_conn.connection_version;
+                    let worker_conn_version = worker_tx.connection_version;
+                    assert!(
+                        active_conn_version == worker_conn_version,
+                        "Connection version mismatch for remote peer: {remote_peer_identity}, active: {active_conn_version}, worker: {worker_conn_version}",
+                    );
+
+                    self.remove_worker_from_active_connection(
+                        worker_tx.remote_peer_addr,
+                        remote_peer_identity,
+                        worker_conn_version,
+                    );
+                }
                 self.last_peer_activity.remove(&remote_peer_identity);
                 drop(worker_tx);
 
-                tracing::warn!(
+                tracing::trace!(
                     "Tx worker for remote peer: {:?} completed, err: {:?}, canceled: {}, evicted: {}",
                     remote_peer_identity,
                     worker_completed.err,
                     worker_completed.canceled,
-                    is_evicted_conn
+                    is_being_evicted
                 );
 
                 // It's possible that the worker failed while having pending transactions.
@@ -1618,7 +2481,7 @@ where
                 if is_peer_unreachable {
                     // If the peer is unreachable, we drop all queued transactions for it.
                     self.unreachable_peer(remote_peer_identity);
-                } else if is_evicted_conn {
+                } else if is_being_evicted {
                     // If the worker was schedule for eviction, we simply drop all queued transactions
                     // because evicted workers are not expected to reconnect soon since they have been
                     // chosen to be eviction strategy. We don't want to be stuck in a loop
@@ -1628,11 +2491,15 @@ where
                         "Remote peer: {} tx worker was canceled, will not reconnect",
                         remote_peer_identity
                     );
-                    self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DropByDriver);
+                    self.drop_peer_queued_tx(
+                        remote_peer_identity,
+                        TxDropReason::RemotePeerBeingEvicted,
+                    );
                 } else if !tx_to_rescue.is_empty() {
                     // If the worker didn't have a fatal error and was not evicted and still has queued transactions,
                     // we can safely reattempt to connect to the remote peer.
                     // This can happen to transient network errors or remote peer being temporarily unavailable.
+                    // THIS CAN ALSO HAPPEN IF THE REMOTE PEER CHANGED ITS ADDRESS.
                     // We can safely resume connection and try to send the queued transactions.
                     tracing::trace!(
                         "Remote peer: {} has queued tx, wil reconnect",
@@ -1641,14 +2508,13 @@ where
                     self.last_peer_activity
                         .insert(remote_peer_identity, Instant::now());
                     self.spawn_connecting(remote_peer_identity, 1, SpawnSource::Rescue);
+                } else {
+                    // Worker returned without error, no work to do, all done.
                 }
             }
             Err(join_err) => {
                 let id = join_err.id();
                 if let Some(meta) = self.tx_worker_task_meta_map.remove(&id) {
-                    self.endpoints_usage[meta.endpoint_idx]
-                        .connected_remote_peers
-                        .remove(&meta.remote_peer_identity);
                     panic!(
                         "Join error during tx sender worker {} ended: {:?}",
                         meta.remote_peer_identity, join_err
@@ -1669,12 +2535,11 @@ where
         tracing::trace!("Scheduling graceful drop of all transaction workers");
         let mut tx_worker_meta = std::mem::take(&mut self.tx_worker_task_meta_map);
         // Make sure to update the endpoint usage
-        self.endpoints_usage
-            .iter_mut()
-            .for_each(|usage| usage.connected_remote_peers.clear());
         let tx_worker_sender_map = std::mem::take(&mut self.tx_worker_handle_map);
         let mut tx_worker_set = std::mem::take(&mut self.tx_worker_set);
-
+        let mut tx_queues = std::mem::take(&mut self.tx_queues);
+        self.active_staked_sorted_remote_peer.clear();
+        let response_outlet = self.response_outlet.clone();
         let fut = async move {
             drop(tx_worker_sender_map);
             while let Some(result) = tx_worker_set.join_next_with_id().await {
@@ -1684,15 +2549,36 @@ where
                 };
                 let TxWorkerMeta {
                     remote_peer_identity,
-                    endpoint_idx: _,
                 } = tx_worker_meta.remove(&id).unwrap();
+
+                let inflight_txn = match result {
+                    Ok((_, mut worker_completed)) => {
+                        let mut canceled_txn = VecDeque::new();
+                        while let Ok(tx) = worker_completed.rx.try_recv() {
+                            canceled_txn.push_back((tx, 1));
+                        }
+                        canceled_txn.extend(worker_completed.pending_tx.into_iter());
+                        canceled_txn
+                    }
+                    Err(_) => VecDeque::new(),
+                };
+
+                let mut canceled_txn_queue =
+                    tx_queues.remove(&remote_peer_identity).unwrap_or_default();
+                canceled_txn_queue.extend(inflight_txn);
+                if let Some(callback) = response_outlet.as_ref() {
+                    let tx_drop = TxDrop {
+                        remote_peer_identity,
+                        drop_reason: TxDropReason::DriverIdentityChanged,
+                        dropped_tx_vec: canceled_txn_queue,
+                    };
+                    callback.call(TpuSenderResponse::TxDrop(tx_drop));
+                }
+
                 tracing::trace!(
                     "graceful drop worker for remote peer: {}",
                     remote_peer_identity
                 );
-                if let Err(e) = result {
-                    tracing::debug!("remote peer {remote_peer_identity} join failed with {e:?}");
-                }
             }
         };
 
@@ -1704,21 +2590,39 @@ where
     ///
     /// Updates the driver identity and reconnects to all remote peers with the new identity.
     ///
-    fn update_identity(&mut self, update_identity_cmd: UpdateIdentityCommand) {
-        let UpdateIdentityCommand {
-            new_identity,
-            callback,
-        } = update_identity_cmd;
+    /// # DANGER
+    ///
+    /// This function is super important to get right. Changing the identity of the driver
+    /// means that all existing connections are invalidated and must be re-established.
+    ///
+    /// It also means we need to properly clean up all existing state associated with the old identity and prior connections.
+    ///
+    /// # Steps performed
+    ///
+    /// 1. Schedule a graceful drop of all transaction workers.
+    /// 2. Clear the connection map.
+    /// 3. Store inflight connecting task metadata, in order to replay them later.
+    /// 4. Abort and detach all inflight connecting tasks.
+    /// 5. Clear all connecting remote peers and their addresses.
+    /// 6. Clear the connecting blocked by eviction list.
+    /// 7. Update the identity and client certificate.
+    /// 8. Replay all connecting tasks with the new identity and connecting meta stored at step #3.
+    ///  
+    ///
+    async fn update_identity(&mut self, new_identity: Keypair, barrier_like: impl Future) {
         self.schedule_graceful_drop_all_worker();
+        self.connection_map.clear();
+        self.being_evicted_peers.clear();
+        self.pending_connection_eviction_set.clear();
         self.connecting_tasks.abort_all();
         self.connecting_tasks.detach_all();
         self.connecting_remote_peers.clear();
-        let connecting_meta = std::mem::take(&mut self.connecting_meta);
+        self.connecting_remote_peers_addr.clear();
+        self.connecting_blocked_by_eviction_list.clear();
+        // active staked sroted remote peer map is clear in `schedule_graceful_drop_all_worker`
+        self.active_staked_sorted_remote_peer_addr.clear();
 
-        // Make sure to properly update the endpoint usage
-        self.endpoints_usage
-            .iter_mut()
-            .for_each(|usage| usage.connecting_remote_peers.clear());
+        let connecting_meta = std::mem::take(&mut self.connecting_meta);
 
         // Update identity
         let (certificate, privkey) = new_dummy_x509_certificate(&new_identity);
@@ -1733,73 +2637,19 @@ where
         {
             prom::quic_set_identity(self.identity.pubkey());
         }
+
+        barrier_like.await;
+
         connecting_meta.values().for_each(|meta| {
-            self.spawn_connecting(
-                meta.remote_peer_identity,
-                meta.connection_attempt,
-                SpawnSource::UpdateIdentity,
-            );
-        });
-
-        if !connecting_meta.is_empty() {
-            tracing::trace!(
-                "Will auto-reconnect to {} remote peers after identity update",
-                connecting_meta.len()
-            );
-        }
-
-        callback
-            .set
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        callback.waker.wake();
-        tracing::trace!(
-            "Updated tpu sender driver identity to: {}",
-            self.identity.pubkey()
-        );
-    }
-
-    ///
-    /// Similar to [`TpuSenderDriver::update_identity`], but await a synchronization barrier
-    /// before resuming driver operations.
-    ///
-    async fn update_identity_sync(&mut self, command: MultiStepIdentitySynchronizationCommand) {
-        let MultiStepIdentitySynchronizationCommand {
-            new_identity,
-            barrier,
-        } = command;
-
-        self.schedule_graceful_drop_all_worker();
-        self.connecting_tasks.abort_all();
-        self.connecting_tasks.detach_all();
-        self.connecting_remote_peers.clear();
-        let connecting_meta = std::mem::take(&mut self.connecting_meta);
-
-        // Make sure to properly update the endpoint usage
-        self.endpoints_usage
-            .iter_mut()
-            .for_each(|usage| usage.connecting_remote_peers.clear());
-
-        // Update identity
-        let (certificate, privkey) = new_dummy_x509_certificate(&new_identity);
-        let cert = Arc::new(QuicClientCertificate {
-            certificate,
-            key: privkey,
-        });
-
-        self.client_certificate = cert;
-        self.identity = new_identity;
-        #[cfg(feature = "prometheus")]
-        {
-            prom::quic_set_identity(self.identity.pubkey());
-        }
-        // Wait for the barrier to be released
-        barrier.wait().await;
-        connecting_meta.values().for_each(|meta| {
-            self.spawn_connecting(
-                meta.remote_peer_identity,
-                meta.connection_attempt,
-                SpawnSource::UpdateIdentity,
-            );
+            meta.multiplexed_remote_peer_identity_vec
+                .iter()
+                .for_each(|remote_peer_identity| {
+                    self.spawn_connecting(
+                        *remote_peer_identity,
+                        meta.connection_attempt,
+                        SpawnSource::UpdateIdentity,
+                    );
+                });
         });
 
         if !connecting_meta.is_empty() {
@@ -1818,13 +2668,29 @@ where
     async fn handle_cnc(&mut self, command: DriverCommand) {
         match command {
             DriverCommand::UpdateIdenttiy(cmd) => {
-                self.update_identity(cmd);
+                let UpdateIdentityCommand {
+                    new_identity,
+                    callback,
+                } = cmd;
+                let fake_barrier = async {
+                    callback
+                        .set
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    callback.waker.wake();
+                };
+                self.update_identity(new_identity, fake_barrier).await;
             }
             DriverCommand::MultiStepIdentitySynchronization(
                 multi_step_identity_synchronization_command,
             ) => {
-                self.update_identity_sync(multi_step_identity_synchronization_command)
-                    .await;
+                let MultiStepIdentitySynchronizationCommand {
+                    new_identity,
+                    barrier,
+                } = multi_step_identity_synchronization_command;
+                let barrier_fut = async {
+                    barrier.wait().await;
+                };
+                self.update_identity(new_identity, barrier_fut).await;
             }
         }
     }
@@ -1850,10 +2716,12 @@ where
         let num_active_workers = self.tx_worker_handle_map.len();
         let num_connecting_tasks = self.connecting_tasks.len();
         let num_queued_tx = self.tx_queues.values().map(|q| q.len()).sum::<usize>();
-        prom::set_quic_gw_active_connection_cnt(num_active_workers);
+        prom::set_orphan_connections(self.orphan_connection_set.len());
+        prom::set_active_quic_tx_senders(num_active_workers);
+        prom::set_active_quic_connections(self.connection_map.len());
         prom::set_quic_gw_connecting_cnt(num_connecting_tasks);
-        prom::set_quic_gw_ongoing_evictions_cnt(self.being_evicted_peers.len());
-        prom::set_quic_gw_tx_blocked_by_connecting_cnt(num_queued_tx);
+        prom::set_num_conn_to_evict(self.pending_connection_eviction_set.len());
+        prom::set_txn_blocked_by_connection(num_queued_tx);
     }
 
     fn handle_remote_peer_addr_change(&mut self, remote_peers_changed: HashSet<Pubkey>) {
@@ -1872,8 +2740,12 @@ where
                                 handle.remote_peer_addr,
                                 new_addr
                             );
-                            // Update the worker's remote address.
+                            // Update the worker's remote address, and its peer too.
                             handle.cancel_notify.notify_one();
+                            // WE DON'T WANT TO EVICT THE CONNECTION OR OTHER MULTIPLEXED PEERS SHARING THE SAME CONNECTION.
+                            // WE CAN'T ASSUME IF A REMOTE PEER ADDRESS CHANGED, THE OTHER MULTIPLEXED PEERS ADDRESSES ALSO CHANGED.
+                            // WE SIMPLY CANCEL THE WORKER, AND WHEN THE WORKER RECONNECTS, IT WILL USE THE NEW ADDRESS.
+
                             #[cfg(feature = "prometheus")]
                             {
                                 prom::incr_quic_gw_remote_peer_addr_changes_detected();
@@ -1883,6 +2755,13 @@ where
                     None => {
                         // If we don't have a new address, we need to drop the worker.
                         handle.cancel_notify.notify_one();
+                        let connection_version = handle.connection_version;
+                        let connection_eviction = ConnectionEviction {
+                            remote_peer_addr: handle.remote_peer_addr,
+                            connection_version,
+                        };
+                        self.pending_connection_eviction_set
+                            .insert(connection_eviction);
                         #[cfg(feature = "prometheus")]
                         {
                             prom::incr_quic_gw_remote_peer_addr_changes_detected();
@@ -1949,6 +2828,69 @@ where
         }
     }
 
+    fn next_orphan_connection_expiration(&self) -> Option<Instant> {
+        let oldest = self.orphan_connection_set.oldest()?;
+        Some(oldest + self.config.orphan_connection_ttl)
+    }
+
+    fn try_evict_orphan_connections(&mut self) {
+        let now = Instant::now();
+        loop {
+            let Some(oldest) = self.orphan_connection_set.oldest() else {
+                break;
+            };
+            if oldest + self.config.orphan_connection_ttl > now {
+                break;
+            }
+            let Some(unused_conn_info_vec) = self.orphan_connection_set.pop() else {
+                break;
+            };
+            for unused_conn_info in unused_conn_info_vec {
+                let OrphanConnectionInfo {
+                    remote_peer_addr,
+                    connection_version,
+                } = unused_conn_info;
+                // If for some reason, the connection is still active and has multiplexed peers, we skip eviction.
+                let is_false_positive =
+                    self.connection_map
+                        .get(&remote_peer_addr)
+                        .is_some_and(|active_conn| {
+                            active_conn.connection_version == connection_version
+                                && !active_conn
+                                    .multiplexed_remote_peer_identity_with_stake
+                                    .is_empty()
+                        });
+
+                if is_false_positive {
+                    continue;
+                }
+
+                let Some(active_conn) = self.connection_map.remove(&remote_peer_addr) else {
+                    continue;
+                };
+
+                if active_conn.connection_version != connection_version {
+                    // Connection has been re-established since it was marked as unused.
+                    continue;
+                }
+
+                assert!(
+                    active_conn
+                        .multiplexed_remote_peer_identity_with_stake
+                        .is_empty(),
+                    "Evicting connection to remote peer address: {remote_peer_addr} that still has multiplexed peers",
+                );
+                active_conn.conn.close(VarInt::from_u32(0), &[0u8]);
+                drop(active_conn);
+                self.unblock_eviction_waiting_connection();
+                #[cfg(feature = "prometheus")]
+                {
+                    prom::incr_evicted_orphan_connections();
+                }
+            }
+        }
+    }
+
     pub async fn run(mut self) {
         #[cfg(feature = "prometheus")]
         {
@@ -1956,6 +2898,7 @@ where
         }
         #[allow(unused_mut, dead_code)]
         let mut last_metric_update = Instant::now();
+        let mut sleep_timer: Option<Pin<Box<Sleep>>> = None;
         loop {
             self.do_eviction_if_required();
             #[cfg(feature = "prometheus")]
@@ -1967,6 +2910,23 @@ where
             }
             self.try_predict_upcoming_leaders_if_necessary();
 
+            let next_connection_expiration = self.next_orphan_connection_expiration();
+            match next_connection_expiration {
+                Some(expiration_instant) => {
+                    let now = Instant::now();
+                    if sleep_timer.is_none() {
+                        let sleep_dur = expiration_instant.saturating_duration_since(now);
+                        // If I understand tokio correclty, the first time you poll a timer it must acquire a mutex lock.
+                        // So we box it and pin it to avoid re-creating the timer on every loop iteration since next orphan connection expiration
+                        // is unlikely to change until we evict some connections.
+                        // Also, the next orphan connection deadline can only increase overtime.
+                        sleep_timer = Some(Box::pin(tokio::time::sleep(sleep_dur)));
+                    }
+                }
+                None => {
+                    sleep_timer = None;
+                }
+            };
             tokio::select! {
                 maybe = self.tx_inlet.recv() => {
                     match maybe {
@@ -1978,6 +2938,9 @@ where
                             break;
                         }
                     }
+                }
+                _ = async { sleep_timer.as_mut().unwrap().await }, if sleep_timer.is_some() => {
+                    self.try_evict_orphan_connections();
                 }
                 // If cnc_rx returns None, we don't care as clients can safely drop cnc sender and the runtime should keep function.
                 Some(command) = self.cnc_rx.recv() => {
@@ -2020,6 +2983,9 @@ impl RemotePeerAddrWatcher {
         tpu_port_kind: TpuPortKind,
         leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static>,
     ) -> Self {
+        tracing::trace!(
+            "Spawning remote peer address watcher with refresh interval: {refresh_interval:?}"
+        );
         let shared = Default::default();
         let (cnc_tx, cnc_rx) = mpsc::unbounded_channel();
         let notify = Arc::new(Notify::new());
@@ -2300,6 +3266,21 @@ impl TpuSenderDriverSpawner {
     where
         CB: TpuSenderResponseCallback,
     {
+        if config.unsafe_allow_arbitrary_txn_size {
+            #[cfg(feature = "intg-testing")]
+            {
+                tracing::info!(
+                    "TpuSenderConfig::allow_arbitrary_txn_size is set to true. This is allowed in integration testing builds."
+                );
+            }
+            #[cfg(not(feature = "intg-testing"))]
+            {
+                panic!(
+                    "TpuSenderConfig::allow_arbitrary_txn_size can only be set to true in integration testing builds."
+                );
+            }
+        }
+
         let (tx_inlet, tx_outlet) = mpsc::channel(self.driver_tx_channel_capacity);
         let (driver_cnc_tx, driver_cnc_rx) = mpsc::channel(10);
 
@@ -2310,7 +3291,6 @@ impl TpuSenderDriverSpawner {
         });
 
         let mut endpoints = vec![];
-        let mut endpoints_usage = vec![];
         for _ in 0..config.num_endpoints.get() {
             let endpoint = (0..config.max_local_port_binding_attempts)
                 .find_map(|_| {
@@ -2330,7 +3310,6 @@ impl TpuSenderDriverSpawner {
                 .expect("Failed to create QUIC endpoint");
 
             endpoints.push(endpoint);
-            endpoints_usage.push(EndpointUsage::default());
         }
 
         let remote_peer_addr_watcher = RemotePeerAddrWatcher::new(
@@ -2338,7 +3317,6 @@ impl TpuSenderDriverSpawner {
             config.tpu_port,
             Arc::clone(&self.leader_tpu_info_service),
         );
-
         let driver = TpuSenderDriver {
             stake_info_map: Arc::clone(&self.stake_info_map),
             tx_worker_handle_map: Default::default(),
@@ -2363,10 +3341,16 @@ impl TpuSenderDriverSpawner {
             eviction_strategy,
             connecting_blocked_by_eviction_list: Default::default(),
             endpoints,
-            endpoints_usage,
             remote_peer_addr_watcher,
             leader_predictor,
             next_leader_prediction_deadline: Instant::now(),
+            connecting_remote_peers_addr: Default::default(),
+            connection_map: Default::default(),
+            connection_version: 0,
+            endpoint_sequence: 0,
+            pending_connection_eviction_set: Default::default(),
+            active_staked_sorted_remote_peer_addr: Default::default(),
+            orphan_connection_set: Default::default(),
         };
 
         let jh = driver_rt.spawn(driver.run());
@@ -2558,11 +3542,126 @@ mod test {
 }
 
 #[cfg(test)]
+mod orphan_connect_set_test {
+    use {
+        super::{OrphanConnectionInfo, OrphanConnectionSet},
+        std::{net::SocketAddr, time::Instant},
+    };
+
+    #[test]
+    fn test_empty_unused_connection_set() {
+        let mut set = OrphanConnectionSet::default();
+
+        assert!(set.oldest().is_none());
+        assert!(set.pop().is_none());
+    }
+
+    #[test]
+    fn test_push_and_pop_unused_connection() {
+        let mut set = OrphanConnectionSet::default();
+
+        let now = Instant::now();
+        let addr1: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let info = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+        set.insert(info, now);
+        assert_eq!(set.len(), 1);
+
+        assert_eq!(set.oldest(), Some(now));
+        let popped = set.pop().unwrap();
+        assert_eq!(popped.len(), 1);
+        assert_eq!(popped[0].remote_peer_addr, addr1);
+        assert_eq!(popped[0].connection_version, 1);
+        assert!(set.len() == 0);
+    }
+
+    #[test]
+    fn test_idempotency() {
+        let mut set = OrphanConnectionSet::default();
+
+        let now = Instant::now();
+        let addr1: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let info = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+        let info_clone = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+
+        // INSERT TWICE
+        set.insert(info, now);
+        set.insert(info_clone, now);
+
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.oldest(), Some(now));
+        let popped = set.pop().unwrap();
+        assert_eq!(popped.len(), 1);
+        assert_eq!(popped[0].remote_peer_addr, addr1);
+        assert_eq!(popped[0].connection_version, 1);
+    }
+
+    #[test]
+    fn test_remove() {
+        let mut set = OrphanConnectionSet::default();
+
+        let now = Instant::now();
+        let addr1: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let info = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+        set.insert(info, now);
+
+        assert_eq!(set.oldest(), Some(now));
+        set.remove(&addr1, 1);
+        assert!(set.oldest().is_none());
+        assert!(set.pop().is_none());
+
+        // insert the same connection with two versions
+        let info_v1 = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 1,
+        };
+        set.insert(info_v1, now);
+        let info_v2 = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 2,
+        };
+        set.insert(info_v2, now);
+
+        assert_eq!(set.len(), 2);
+        assert_eq!(set.oldest(), Some(now));
+        let popped = set.pop().unwrap();
+        assert_eq!(popped.len(), 2);
+        assert!(set.pop().is_none());
+        assert_eq!(set.len(), 0);
+
+        // remove non-existent connection
+        let info3 = OrphanConnectionInfo {
+            remote_peer_addr: addr1,
+            connection_version: 3,
+        };
+        set.remove(&info3.remote_peer_addr, info3.connection_version);
+        assert!(set.pop().is_none());
+        assert_eq!(set.len(), 0);
+    }
+}
+
+#[cfg(test)]
 mod stake_based_eviction_strategy_test {
     use {
         super::{ConnectionEvictionStrategy, StakeSortedPeerSet},
+        crate::core::{ConnectionMap, RemotePeerAddrMap, StakedSortedSet},
         solana_pubkey::Pubkey,
-        std::time::{Duration, Instant},
+        std::{
+            collections::HashMap,
+            net::SocketAddr,
+            time::{Duration, Instant},
+        },
     };
 
     #[test]
@@ -2674,6 +3773,118 @@ mod stake_based_eviction_strategy_test {
         // It should propose to evict the lowest staked peer
         assert_eq!(eviction_plan.len(), 1);
         assert!(eviction_plan.contains(&peer3));
+    }
+
+    #[test]
+    fn it_should_pick_lowest_multiplexed_staked() {
+        let addr1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+
+        let peer1 = Pubkey::new_unique();
+        let peer2 = Pubkey::new_unique();
+        let peer3 = Pubkey::new_unique();
+
+        let multiplexed_gr1 = HashMap::from_iter([(peer1, 1), (peer2, 1000)]);
+        let multiplexed_gr2 = HashMap::from_iter([(peer3, 500)]);
+
+        let connection_map =
+            HashMap::from_iter([(addr1, multiplexed_gr1), (addr2, multiplexed_gr2)]);
+
+        let mut staked_sorted_address_set = StakedSortedSet::default();
+        staked_sorted_address_set.insert(addr1, 1001); // 1 + 1000
+        staked_sorted_address_set.insert(addr2, 500);
+        let connection_map = ConnectionMap::Test(&connection_map);
+        let remote_addr_map = RemotePeerAddrMap {
+            connection_map,
+            staked_sorted_address_set: &staked_sorted_address_set,
+        };
+
+        let strategy = super::StakeBasedEvictionStrategy {
+            // We put no grace period for this test.
+            peer_idle_eviction_grace_period: Duration::ZERO,
+        };
+
+        let active_staked_sorted_remote_peer = StakeSortedPeerSet::default();
+        let last_peer_activity = std::collections::HashMap::new();
+
+        let now = Instant::now();
+        let actual = strategy.plan_eviction_with_addr_map(
+            now,
+            &active_staked_sorted_remote_peer,
+            &last_peer_activity,
+            &Default::default(), // max connections to evict
+            1,
+            &remote_addr_map,
+        );
+
+        // It should propose to evict the lowest multiplexed staked address (addr2)
+        assert_eq!(actual.len(), 1);
+        assert!(actual.contains(&peer3));
+    }
+}
+
+#[cfg(test)]
+mod test_remote_peer_addr_map {
+
+    use {
+        super::RemotePeerAddrMap,
+        crate::core::{ConnectionMap, StakedSortedSet},
+        solana_pubkey::Pubkey,
+        std::{collections::HashMap, net::SocketAddr},
+    };
+
+    #[test]
+    fn test_empty_map() {
+        let connection_map = HashMap::<SocketAddr, HashMap<Pubkey, u64>>::new();
+        let connection_map = ConnectionMap::Test(&connection_map);
+        let staked_sorted_address_set = StakedSortedSet::default();
+        let remote_addr_map = RemotePeerAddrMap {
+            connection_map,
+            staked_sorted_address_set: &staked_sorted_address_set,
+        };
+        let actual = remote_addr_map.staked_sorted_remote_peer_groups().count();
+        assert_eq!(actual, 0);
+    }
+
+    #[test]
+    fn test_remote_peer_addr_map_sort_order() {
+        let addr1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+
+        let peer1 = Pubkey::new_unique();
+        let peer2 = Pubkey::new_unique();
+        let peer3 = Pubkey::new_unique();
+
+        let multiplexed_gr1 = HashMap::from_iter([(peer1, 1), (peer2, 1000)]);
+        let multiplexed_gr2 = HashMap::from_iter([(peer3, 500)]);
+
+        let connection_map =
+            HashMap::from_iter([(addr1, multiplexed_gr1), (addr2, multiplexed_gr2)]);
+
+        let mut staked_sorted_address_set = StakedSortedSet::default();
+        staked_sorted_address_set.insert(addr1, 1001); // 1 + 1000
+        staked_sorted_address_set.insert(addr2, 500);
+        let connection_map = ConnectionMap::Test(&connection_map);
+        let remote_addr_map = RemotePeerAddrMap {
+            connection_map,
+            staked_sorted_address_set: &staked_sorted_address_set,
+        };
+
+        let actual_multiplexed_stake = remote_addr_map.get_connected_stake_at_addr(&addr1).unwrap();
+        let actual_multiplexed_stake2 =
+            remote_addr_map.get_connected_stake_at_addr(&addr2).unwrap();
+
+        assert_eq!(actual_multiplexed_stake, 1001);
+        assert_eq!(actual_multiplexed_stake2, 500);
+
+        // See if the sort is correct
+        let actual_sorted_address = remote_addr_map
+            .staked_sorted_remote_peer_groups()
+            .map(|group| group.socket_addr)
+            .collect::<Vec<_>>();
+
+        let expected_sorted_address = vec![addr2, addr1]; // addr2 has less stake than addr1
+        assert_eq!(actual_sorted_address, expected_sorted_address);
     }
 }
 

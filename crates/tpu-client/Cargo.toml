@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet-tpu-client"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -51,6 +51,7 @@ yellowstone-grpc = [
     "dep:solana-rpc-client",
 ]
 shield = ["dep:yellowstone-shield-store"]
+intg-testing = []
 
 [dependencies]
 async-trait = { workspace = true }
@@ -94,7 +95,6 @@ solana-message = { workspace = true }
 solana-net-utils = { workspace = true }
 solana-packet = { workspace = true }
 solana-pubkey = { workspace = true }
-solana-quic-definitions = { workspace = true }
 solana-rpc-client = { workspace = true, optional = true }
 solana-rpc-client-api = { workspace = true }
 solana-signature = { workspace = true, features = ["rand"] }

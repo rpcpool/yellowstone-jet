@@ -1,8 +1,8 @@
 use {
+    crate::core::{DEFAULT_UNUSED_CONNECTION_TTL, QUIC_MAX_TIMEOUT},
     serde::{Deserialize, Deserializer, de},
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_pubkey::Pubkey,
-    solana_quic_definitions::QUIC_MAX_TIMEOUT,
     std::{net::SocketAddr, num::NonZeroUsize, ops::Range, time::Duration},
 };
 
@@ -191,9 +191,59 @@ pub struct TpuSenderConfig {
     ///
     #[serde(default)]
     pub tpu_info_override: Vec<TpuOverrideInfo>,
+
+    ///
+    /// Duration after which an orphan connection is evicted.
+    ///
+    /// # Note
+    ///
+    /// An orphan connection is a connection that is established but have no sender tasks referencing it.
+    /// Each remote peer identity multiplexed over a connection gets 1:1 mapping to a sender task.
+    ///
+    /// When all sender tasks for a connection are dropped, the connection becomes an orphan.
+    ///
+    #[serde(
+        default = "TpuSenderConfig::default_unused_connection_ttl",
+        with = "humantime_serde"
+    )]
+    pub orphan_connection_ttl: Duration,
+
+    ///
+    /// NO DOCUMENTATION!
+    ///
+    /// IF YOU USE THIS FEATURE YOU SHOULD FEEL BAD.
+    #[serde(
+        skip_deserializing,
+        default = "TpuSenderConfig::default_allow_arbitrary_txn_size"
+    )]
+    pub unsafe_allow_arbitrary_txn_size: bool,
 }
 
 impl TpuSenderConfig {
+    ///
+    /// # Safety
+    ///
+    /// This function enables sending transactions of arbitrary size, which may lead to unexpected behavior or security vulnerabilities.
+    /// It should only be used in controlled testing environments.
+    ///
+    pub unsafe fn allow_arbitrary_txn_size(&mut self) {
+        #[cfg(not(feature = "intg-testing"))]
+        {
+            panic!(
+                "TpuSenderConfig::allow_arbitrary_txn_size can only be set to true in integration testing builds."
+            );
+        }
+        self.unsafe_allow_arbitrary_txn_size = true;
+    }
+
+    pub const fn default_allow_arbitrary_txn_size() -> bool {
+        false
+    }
+
+    pub const fn default_unused_connection_ttl() -> Duration {
+        DEFAULT_UNUSED_CONNECTION_TTL
+    }
+
     pub const fn default_connection_timeout() -> Duration {
         DEFAULT_CONNECTION_TIMEOUT
     }
@@ -257,7 +307,7 @@ impl TpuSenderConfig {
 /// Talking with Anza, we should not open more than 5 endpoints to host QUIC connections.
 pub const DEFAULT_QUIC_DRIVER_ENDPOINT_COUNT: NonZeroUsize =
     NonZeroUsize::new(5).expect("default endpoint count must be non-zero");
-pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
+pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(4);
 pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
 pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
@@ -285,6 +335,8 @@ impl Default for TpuSenderConfig {
             send_timeout: DEFAULT_TX_SEND_TIMEOUT,
             leader_prediction_lookahead: Some(DEFAULT_LEADER_PREDICTION_LOOKAHEAD),
             tpu_info_override: Vec::new(),
+            orphan_connection_ttl: DEFAULT_UNUSED_CONNECTION_TTL,
+            unsafe_allow_arbitrary_txn_size: false,
         }
     }
 }
