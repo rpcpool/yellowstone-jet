@@ -7019,7 +7019,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet"
-version = "14.9.1"
+version = "14.9.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7110,7 +7110,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet-tpu-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7151,7 +7151,6 @@ dependencies = [
  "solana-net-utils",
  "solana-packet",
  "solana-pubkey 3.0.0",
- "solana-quic-definitions",
  "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-signature",
