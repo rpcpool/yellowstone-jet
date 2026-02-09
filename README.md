@@ -34,43 +34,14 @@ A sample configuration file can be found [config.yml](https://github.com/rpcpool
 
 ### Systemd
 
-Running Jet as a service under SystemD is our recommended approach. A sample systemd file:
+Running Jet as a service under SystemD is our recommended approach. A sample systemd file is provided at [systemd/yellowstone-jet.service](systemd/yellowstone-jet.service).
 
-```
-[Unit]
-Description=Yellowstone Jet transaction forwarder
-After=network-online.target
-StartLimitInterval=0
-StartLimitIntervalSec=0
+To install:
 
-[Service]
-Type=simple
-User=yellowstone-jet
-Group=yellowstone-jet
-PermissionsStartOnly=true
-ExecStart=/usr/local/bin/yellowstone-jet --config /etc/yellowstone-jet.yml
-
-Environment=RUST_LOG="warn"
-
-SyslogIdentifier=yellowstone-jet
-KillMode=process
-Restart=always
-RestartSec=5
-
-LimitNOFILE=700000
-LimitNPROC=700000
-
-LockPersonality=true
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-RemoveIPC=true
-RestrictSUIDSGID=true
-
-ProtectSystem=full
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo cp systemd/yellowstone-jet.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now yellowstone-jet
 ```
 
 ## Attribution
