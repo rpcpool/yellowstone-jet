@@ -10,6 +10,13 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+### Breaking
+
+- Dropped custom Solana RPC patches. Jet now uses upstream Solana crates directly.
+- Removed `proxy_sanitize_check` and `skip_sanitize` since `sanitizeTransaction` was only available through the patches.
+- Removed `proxy_preflight_check`. Transactions with `skip_preflight: false` are now rejected with an error.
+- `TransactionHandler` no longer needs an RPC client.
+- Proto field `TransactionConfig.skip_sanitize` (field 2) is now reserved.
 
 ## [14.9.1]
 
