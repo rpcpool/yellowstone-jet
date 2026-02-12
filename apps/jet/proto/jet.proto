@@ -83,7 +83,7 @@ message TransactionWrapper {
 
 message TransactionConfig {
   bool skip_preflight = 1;
-  bool skip_sanitize = 2;
+  reserved 2; // was skip_sanitize
   optional uint32 max_retries = 3;
   repeated string forwarding_policies = 4;
 }

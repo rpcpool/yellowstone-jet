@@ -4,17 +4,11 @@ use {
     bincode::config::Options,
     jsonrpsee::core::RpcResult,
     solana_bincode::limited_deserialize,
-    solana_client::{
-        client_error::{ClientError, ClientErrorKind},
-        nonblocking::rpc_client::RpcClient,
-        rpc_config::RcpSanitizeTransactionConfig,
-        rpc_request::RpcError,
-    },
     solana_nonce::NONCED_TX_MARKER_IX_INDEX,
     solana_packet::PACKET_DATA_SIZE,
     solana_pubkey::Pubkey,
     solana_system_interface::instruction::SystemInstruction,
-    solana_transaction::{Transaction, versioned::VersionedTransaction},
+    solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status_client_types::TransactionBinaryEncoding,
     std::any::type_name,
 };
@@ -129,24 +123,4 @@ pub fn get_durable_nonce(tx: &VersionedTransaction) -> Option<Pubkey> {
             })
         })
         .cloned()
-}
-
-pub async fn sanitize_transaction_support_check(rpc: &RpcClient) -> anyhow::Result<bool> {
-    if let Err(ClientError { kind, .. }) = rpc
-        .sanitize_transaction(
-            &Transaction::default(),
-            RcpSanitizeTransactionConfig::default(),
-        )
-        .await
-    {
-        if let ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. }) = *kind {
-            match code {
-                -32601 => return Ok(false),
-                -32602 => return Ok(true),
-                _ => {}
-            }
-        }
-    }
-
-    anyhow::bail!("failed to check sanitizeTransaction in RPC")
 }
