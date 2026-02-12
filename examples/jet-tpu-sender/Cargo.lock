@@ -5993,9 +5993,9 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet-tpu-client"
-version = "0.1.0-rc3"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "225f71c5fb907a18cf93ae9d16afe3ed1c1ff071a64557a014b4a41a2b7003dd"
+checksum = "a9e333430f45aafe286e99ce4efe96cef6dadca9858192e609ebb13ca647caec"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6031,7 +6031,6 @@ dependencies = [
  "solana-net-utils",
  "solana-packet",
  "solana-pubkey 3.0.0",
- "solana-quic-definitions",
  "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-signature",
