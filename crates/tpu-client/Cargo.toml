@@ -15,40 +15,36 @@ exclude = ["src/bin/*"]
 [[bin]]
 name = "test-managed-schedule"
 path = "src/bin/test-managed-schedule.rs"
-publish = false
 
 [[bin]]
 name = "test-tpu-info"
 path = "src/bin/test-tpu-info.rs"
-publish = false
 
 [[bin]]
 name = "test-tpu-send"
 path = "src/bin/test-tpu-send.rs"
-publish = false
 
 [[bin]]
 name = "test-slot-tracker"
 path = "src/bin/test-slot-tracker.rs"
-publish = false
 
 [features]
 default = ["yellowstone-grpc"]
 prometheus = ["dep:prometheus"]
 examples = [
-    "dep:dotenvy",
-    "dep:tracing-subscriber",
+    "dep:bincode",
     "dep:clap",
+    "dep:dotenvy",
+    "dep:solana-hash",
     "dep:solana-system-interface",
     "dep:solana-transaction",
-    "dep:solana-hash",
-    "dep:bincode",
+    "dep:tracing-subscriber",
     "yellowstone-grpc",
 ]
 yellowstone-grpc = [
+    "dep:solana-rpc-client",
     "dep:yellowstone-grpc-client",
     "dep:yellowstone-grpc-proto",
-    "dep:solana-rpc-client",
 ]
 shield = ["dep:yellowstone-shield-store"]
 intg-testing = []
@@ -57,18 +53,17 @@ intg-testing = []
 async-trait = { workspace = true }
 base64 = { workspace = true }
 bincode = { workspace = true, optional = true }
-bs58 = { workspace = true }
 borsh = { workspace = true }
+bs58 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["cargo", "derive", "env"], optional = true }
-
 derive_more = { workspace = true, features = ["display"] }
 dotenvy = { workspace = true, optional = true }
 futures = { workspace = true }
 hostname = { workspace = true }
 http-body-util = { workspace = true }
-hyper = { workspace = true }
 humantime-serde = { workspace = true }
+hyper = { workspace = true }
 lazy_static = { workspace = true }
 maplit = { workspace = true }
 pin-project = { workspace = true }
@@ -76,15 +71,31 @@ prometheus = { workspace = true, optional = true }
 quinn = { workspace = true }
 quinn-proto = { workspace = true }
 rand = { workspace = true }
-rustls = { workspace = true }
 retry = { workspace = true }
+rustls = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"], optional = true }
 
-solana-account = { workspace = true }
+# Agave Monorepo
 solana-client = { workspace = true }
+solana-net-utils = { workspace = true }
+solana-rpc-client = { workspace = true, optional = true }
+solana-rpc-client-api = { workspace = true }
+solana-streamer = { workspace = true }
+solana-system-interface = { workspace = true, optional = true, features = ["bincode"] }
+solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
+solana-version = { workspace = true }
+
+# Solana SDK
+solana-account = { workspace = true }
 solana-clock = { workspace = true }
 solana-commitment-config = { workspace = true }
 solana-epoch-info = { workspace = true }
@@ -92,26 +103,14 @@ solana-hash = { workspace = true, optional = true }
 solana-instruction = { workspace = true }
 solana-keypair = { workspace = true }
 solana-message = { workspace = true }
-solana-net-utils = { workspace = true }
 solana-packet = { workspace = true }
 solana-pubkey = { workspace = true }
-solana-rpc-client = { workspace = true, optional = true }
-solana-rpc-client-api = { workspace = true }
 solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
-solana-streamer = { workspace = true }
-solana-system-interface = { workspace = true, optional = true, features = ["bincode"] }
-solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
-solana-transaction-error = { workspace = true }
 solana-transaction = { workspace = true, optional = true }
-solana-version = { workspace = true }
+solana-transaction-error = { workspace = true }
 
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tokio-stream = { workspace = true }
-tokio-util = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"], optional = true }
+# Yellowstone
 yellowstone-grpc-client = { workspace = true, optional = true }
 yellowstone-grpc-proto = { workspace = true, optional = true }
 yellowstone-shield-store = { workspace = true, optional = true }
