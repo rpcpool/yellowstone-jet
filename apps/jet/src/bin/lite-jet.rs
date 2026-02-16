@@ -3,9 +3,7 @@ use tikv_jemallocator::Jemalloc;
 use {
     clap::{Parser, Subcommand},
     futures::future::FutureExt,
-    solana_client::{
-        nonblocking::rpc_client::RpcClient as SolanaRpcClient, rpc_client::RpcClientConfig,
-    },
+    solana_client::rpc_client::RpcClientConfig,
     solana_commitment_config::CommitmentConfig,
     solana_keypair::Keypair,
     solana_rpc_client::http_sender::HttpSender,
@@ -246,12 +244,8 @@ async fn run_jet(
         "yellowstone_tpu_sender_related_objects".to_string(),
     );
 
-    let tx_handler_rpc = Arc::new(SolanaRpcClient::new(config.upstream.rpc.clone()));
     let tx_handler = TransactionHandler {
         transaction_sink: scheduler_in,
-        rpc: tx_handler_rpc,
-        proxy_sanitize_check: false,
-        proxy_preflight_check: false,
     };
 
     let ah = tg.spawn(tpu_sender_loop(

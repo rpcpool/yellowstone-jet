@@ -368,7 +368,6 @@ async fn main() -> anyhow::Result<()> {
            let config = JetRpcSendTransactionConfig::new(
                 Some(RpcSendTransactionConfig {
                     skip_preflight: true,
-                    skip_sanitize: false,
                     preflight_commitment: Some(CommitmentLevel::Finalized),
                     encoding: Some(UiTransactionEncoding::Base64),
                     max_retries: config.max_retries,

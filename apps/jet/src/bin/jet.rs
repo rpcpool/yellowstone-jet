@@ -6,9 +6,7 @@ use {
     futures::future::FutureExt,
     jsonrpsee::http_client::HttpClientBuilder,
     reqwest::{Client, Url},
-    solana_client::{
-        nonblocking::rpc_client::RpcClient as SolanaRpcClient, rpc_client::RpcClientConfig,
-    },
+    solana_client::rpc_client::RpcClientConfig,
     solana_commitment_config::CommitmentConfig,
     solana_keypair::{Keypair, read_keypair},
     solana_pubkey::Pubkey,
@@ -44,7 +42,6 @@ use {
         metrics::{REGISTRY, collect_to_text, jet as metrics},
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
-        solana::sanitize_transaction_support_check,
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         transaction_handler::TransactionHandler,
@@ -425,15 +422,8 @@ async fn run_jet(
     let mut jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
         vec![Box::new(gateway_identity_updater)];
 
-    let tx_handler_rpc = Arc::new(SolanaRpcClient::new(config.upstream.rpc.clone()));
-    let sanitize_supported = sanitize_transaction_support_check(&tx_handler_rpc)
-        .await
-        .expect("sanitize transaction support check");
     let tx_handler = TransactionHandler {
         transaction_sink: scheduler_in,
-        rpc: tx_handler_rpc,
-        proxy_sanitize_check: config.listen_solana_like.proxy_sanitize_check && sanitize_supported,
-        proxy_preflight_check: config.listen_solana_like.proxy_preflight_check,
     };
 
     let rpc_solana_like = RpcServer::new(

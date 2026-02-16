@@ -48,14 +48,6 @@ listen_solana_like:
   bind:
     # - env: JET_SOLANA_LIKE_ADDR
     - 127.0.0.1:8000
-  # Allow to do sanitize check on RPC server (required for ALTs), supported only on patched nodes
-  # If option set to `true`` then Jet would check `sanitizeTransaction` method before start
-  # See https://github.com/rpcpool/solana-public/tree/v1.17.31-rpc-sanitize-tx
-  # RECOMMENDED: false
-  proxy_sanitize_check: false
-  # Allow to do preflight check on RPC server (simulateTransaction)
-  # RECOMMENDED: false
-  proxy_preflight_check: false
 
 
 # Send retry options

@@ -293,21 +293,10 @@ pub struct ConfigListenAdmin {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigListenSolanaLike {
     /// RPC listen addresses
     #[serde(deserialize_with = "deserialize_listen")]
     pub bind: Vec<SocketAddr>,
-
-    /// Allow to do sanitize check on RPC server (required for ALTs), supported only on patched nodes
-    /// If option set to `true`` then Jet would check `sanitizeTransaction` method before start
-    /// See https://github.com/rpcpool/solana-public/tree/v1.17.31-rpc-sanitize-tx
-    #[serde(default)]
-    pub proxy_sanitize_check: bool,
-
-    /// Allow to do preflight check on RPC server (simulateTransaction)
-    #[serde(default)]
-    pub proxy_preflight_check: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
