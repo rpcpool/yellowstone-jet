@@ -293,7 +293,6 @@ pub struct ConfigListenAdmin {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigListenSolanaLike {
     /// RPC listen addresses
     #[serde(deserialize_with = "deserialize_listen")]
