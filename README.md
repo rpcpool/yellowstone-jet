@@ -19,13 +19,16 @@ Implements the Solana QUIC protocol for sending transactions.
 ## Building
 
 ```
-cargo build --release
+cargo build --release -p yellowstone-jet  
+
 ```
+
+Jet binary will be located at `./target/release/jet`
 
 ## Usage
 
 ```
-yellowstone-jet --config yellowstone.yaml
+jet --config yellowstone.yaml
 ```
 
 ## Config file
