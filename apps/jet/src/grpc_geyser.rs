@@ -162,6 +162,21 @@ pub struct GeyserSubscriber {
 }
 
 impl GeyserSubscriber {
+    fn is_supported_geyser_version(version: &Version, required: &VersionReq) -> bool {
+        if required.matches(version) {
+            return true;
+        }
+
+        // semver excludes prereleases from broad ranges (e.g. ">=1.14.1").
+        // Treat prereleases as supported when their stable counterpart matches.
+        if !version.pre.is_empty() {
+            let stable = Version::new(version.major, version.minor, version.patch);
+            return required.matches(&stable);
+        }
+
+        false
+    }
+
     pub fn new(
         primary_grpc: ConfigUpstreamGrpc,
         include_transactions: bool,
@@ -723,7 +738,7 @@ impl GeyserSubscriber {
             GeyserError::VersionParse(format!("failed to parse required version: {e}"))
         })?;
 
-        if !required.matches(&version) {
+        if !Self::is_supported_geyser_version(&version, &required) {
             return Err(GeyserError::VersionValidation(format!(
                 "gRPC version {version} doesn't match required {required}"
             )));
@@ -767,7 +782,11 @@ impl GeyserStreams for GeyserSubscriber {
 #[cfg(test)]
 mod tests {
     use {
-        crate::{grpc_geyser::SlotTrackingInfo, util::SlotStatus},
+        crate::{
+            grpc_geyser::{GeyserSubscriber, SlotTrackingInfo},
+            util::SlotStatus,
+        },
+        semver::{Version, VersionReq},
         solana_hash::Hash,
     };
 
@@ -831,5 +850,28 @@ mod tests {
         info.statuses_seen = 0; // Reset again
         info.mark_status_seen(SlotStatus::SlotConfirmed);
         assert!(!info.has_seen_status(SlotStatus::SlotFinalized));
+    }
+
+    #[test]
+    fn it_should_parse_rc_version() {
+        let version_str = "2.0.0-rc1";
+        let version = Version::parse(version_str).unwrap();
+        let required = VersionReq::parse(">=1.14.1").unwrap();
+
+        assert!(GeyserSubscriber::is_supported_geyser_version(
+            &version, &required
+        ));
+
+        let version_str = "1.14.0-rc1";
+        let version = Version::parse(version_str).unwrap();
+        assert!(!GeyserSubscriber::is_supported_geyser_version(
+            &version, &required
+        ));
+
+        let version_str = "1.14.0";
+        let version = Version::parse(version_str).unwrap();
+        assert!(!GeyserSubscriber::is_supported_geyser_version(
+            &version, &required
+        ));
     }
 }
