@@ -362,6 +362,12 @@ impl OrphanConnectionSet {
         self.curr_len
     }
 
+    fn clear(&mut self) {
+        self.prio_queue.clear();
+        self.prio_queue_rev_index.clear();
+        self.curr_len = 0;
+    }
+
     fn insert(&mut self, info: OrphanConnectionInfo, now: Instant) {
         // Check if not already present
         if let Some(version_set) = self.prio_queue_rev_index.get_mut(&info.remote_peer_addr) {
@@ -440,6 +446,7 @@ struct OrphanConnectionInfo {
 struct ConnectionEvictionSet {
     set: HashSet<ConnectionEviction>,
     socket_addr_set: HashSet<SocketAddr>,
+    socket_addr_refcount: HashMap<SocketAddr, usize>,
 }
 
 impl ConnectionEvictionSet {
@@ -454,12 +461,17 @@ impl ConnectionEvictionSet {
     fn clear(&mut self) {
         self.set.clear();
         self.socket_addr_set.clear();
+        self.socket_addr_refcount.clear();
     }
 
     fn insert(&mut self, eviction: ConnectionEviction) -> bool {
         let inserted = self.set.insert(eviction.clone());
         if inserted {
             self.socket_addr_set.insert(eviction.remote_peer_addr);
+            self.socket_addr_refcount
+                .entry(eviction.remote_peer_addr)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
         }
         inserted
     }
@@ -467,7 +479,15 @@ impl ConnectionEvictionSet {
     fn remove(&mut self, eviction: &ConnectionEviction) -> bool {
         let removed = self.set.remove(eviction);
         if removed {
-            self.socket_addr_set.remove(&eviction.remote_peer_addr);
+            let entry = self
+                .socket_addr_refcount
+                .get_mut(&eviction.remote_peer_addr)
+                .expect("missing socket addr refcount for existing eviction");
+            *entry = entry.saturating_sub(1);
+            if *entry == 0 {
+                self.socket_addr_refcount.remove(&eviction.remote_peer_addr);
+                self.socket_addr_set.remove(&eviction.remote_peer_addr);
+            }
         }
         removed
     }
@@ -494,6 +514,7 @@ pub struct ConnectionEviction {
 }
 
 pub struct ActiveConnection {
+    remote_peer_addr: SocketAddr,
     conn: Arc<Connection>,
     connection_version: u64,
     multiplexed_remote_peer_identity_with_stake: HashMap<Pubkey, u64>,
@@ -835,6 +856,7 @@ impl ConnectingTask {
 /// benchmarks conducted by the Anza team indicate that this approach degrades performance rather than improving it.
 struct QuicTxSenderWorker<CB> {
     remote_peer: Pubkey,
+    remote_peer_addr: SocketAddr,
     connection: Arc<Connection>,
     /// The current client identity being used for the connection
     current_client_identity: Pubkey,
@@ -887,7 +909,7 @@ where
         attempt: usize,
     ) -> Option<TxSenderWorkerError> {
         let result = self.send_tx(tx.wire.as_ref()).await;
-        let remote_addr = self.connection.remote_address();
+        let remote_addr = self.remote_peer_addr;
         let tx_sig = tx.tx_sig;
         match result {
             Ok(sent_ok) => {
@@ -937,7 +959,7 @@ where
                     );
                     let resp = TxFailed {
                         remote_peer_identity: self.remote_peer,
-                        remote_peer_addr: self.connection.remote_address(),
+                        remote_peer_addr: self.remote_peer_addr,
                         failure_reason: e.to_string(),
                         tx_sig,
                     };
@@ -1887,7 +1909,7 @@ where
                         continue;
                     }
                     let connection_eviction = ConnectionEviction {
-                        remote_peer_addr: active_conn.conn.remote_address(),
+                        remote_peer_addr: active_conn.remote_peer_addr,
                         connection_version: active_conn.connection_version,
                     };
                     self.pending_connection_eviction_set
@@ -1949,6 +1971,7 @@ where
 
         let worker = QuicTxSenderWorker {
             remote_peer: remote_peer_identity,
+            remote_peer_addr,
             connection,
             current_client_identity: self.identity.pubkey(),
             incoming_rx: rx,
@@ -2073,6 +2096,7 @@ where
                         }
                         let conn = Arc::new(conn);
                         let active_connection = ActiveConnection {
+                            remote_peer_addr: remote_peer_address,
                             conn: Arc::clone(&conn),
                             connection_version: self.next_connection_version(),
                             multiplexed_remote_peer_identity_with_stake: Default::default(),
@@ -2612,6 +2636,7 @@ where
     async fn update_identity(&mut self, new_identity: Keypair, barrier_like: impl Future) {
         self.schedule_graceful_drop_all_worker();
         self.connection_map.clear();
+        self.orphan_connection_set.clear();
         self.being_evicted_peers.clear();
         self.pending_connection_eviction_set.clear();
         self.connecting_tasks.abort_all();
@@ -2850,29 +2875,24 @@ where
                     remote_peer_addr,
                     connection_version,
                 } = unused_conn_info;
-                // If for some reason, the connection is still active and has multiplexed peers, we skip eviction.
-                let is_false_positive =
-                    self.connection_map
-                        .get(&remote_peer_addr)
-                        .is_some_and(|active_conn| {
-                            active_conn.connection_version == connection_version
-                                && !active_conn
-                                    .multiplexed_remote_peer_identity_with_stake
-                                    .is_empty()
-                        });
-
-                if is_false_positive {
-                    continue;
-                }
-
-                let Some(active_conn) = self.connection_map.remove(&remote_peer_addr) else {
+                let Some(active_conn) = self.connection_map.get(&remote_peer_addr) else {
                     continue;
                 };
-
                 if active_conn.connection_version != connection_version {
                     // Connection has been re-established since it was marked as unused.
                     continue;
                 }
+                if !active_conn
+                    .multiplexed_remote_peer_identity_with_stake
+                    .is_empty()
+                {
+                    // If for some reason, the connection is still active and has multiplexed peers,
+                    // this orphan entry is stale.
+                    continue;
+                }
+                let Some(active_conn) = self.connection_map.remove(&remote_peer_addr) else {
+                    continue;
+                };
 
                 assert!(
                     active_conn
@@ -3648,6 +3668,33 @@ mod orphan_connect_set_test {
         set.remove(&info3.remote_peer_addr, info3.connection_version);
         assert!(set.pop().is_none());
         assert_eq!(set.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod connection_eviction_set_test {
+    use {super::ConnectionEvictionSet, crate::core::ConnectionEviction};
+
+    #[test]
+    fn remove_keeps_socket_addr_index_if_another_version_exists() {
+        let mut set = ConnectionEvictionSet::default();
+        let addr = "127.0.0.1:9999".parse().unwrap();
+        let ev1 = ConnectionEviction {
+            remote_peer_addr: addr,
+            connection_version: 1,
+        };
+        let ev2 = ConnectionEviction {
+            remote_peer_addr: addr,
+            connection_version: 2,
+        };
+
+        assert!(set.insert(ev1.clone()));
+        assert!(set.insert(ev2.clone()));
+        assert!(set.contains_socket_addr(&addr));
+
+        assert!(set.remove(&ev1));
+        assert!(set.contains_socket_addr(&addr));
+        assert!(set.contains(&ev2));
     }
 }
 
