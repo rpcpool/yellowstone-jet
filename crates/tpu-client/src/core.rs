@@ -514,6 +514,7 @@ pub struct ConnectionEviction {
 }
 
 pub struct ActiveConnection {
+    remote_peer_addr: SocketAddr,
     conn: Arc<Connection>,
     connection_version: u64,
     multiplexed_remote_peer_identity_with_stake: HashMap<Pubkey, u64>,
@@ -855,6 +856,7 @@ impl ConnectingTask {
 /// benchmarks conducted by the Anza team indicate that this approach degrades performance rather than improving it.
 struct QuicTxSenderWorker<CB> {
     remote_peer: Pubkey,
+    remote_peer_addr: SocketAddr,
     connection: Arc<Connection>,
     /// The current client identity being used for the connection
     current_client_identity: Pubkey,
@@ -907,7 +909,7 @@ where
         attempt: usize,
     ) -> Option<TxSenderWorkerError> {
         let result = self.send_tx(tx.wire.as_ref()).await;
-        let remote_addr = self.connection.remote_address();
+        let remote_addr = self.remote_peer_addr;
         let tx_sig = tx.tx_sig;
         match result {
             Ok(sent_ok) => {
@@ -957,7 +959,7 @@ where
                     );
                     let resp = TxFailed {
                         remote_peer_identity: self.remote_peer,
-                        remote_peer_addr: self.connection.remote_address(),
+                        remote_peer_addr: self.remote_peer_addr,
                         failure_reason: e.to_string(),
                         tx_sig,
                     };
@@ -1907,7 +1909,7 @@ where
                         continue;
                     }
                     let connection_eviction = ConnectionEviction {
-                        remote_peer_addr: active_conn.conn.remote_address(),
+                        remote_peer_addr: active_conn.remote_peer_addr,
                         connection_version: active_conn.connection_version,
                     };
                     self.pending_connection_eviction_set
@@ -1969,6 +1971,7 @@ where
 
         let worker = QuicTxSenderWorker {
             remote_peer: remote_peer_identity,
+            remote_peer_addr,
             connection,
             current_client_identity: self.identity.pubkey(),
             incoming_rx: rx,
@@ -2093,6 +2096,7 @@ where
                         }
                         let conn = Arc::new(conn);
                         let active_connection = ActiveConnection {
+                            remote_peer_addr: remote_peer_address,
                             conn: Arc::clone(&conn),
                             connection_version: self.next_connection_version(),
                             multiplexed_remote_peer_identity_with_stake: Default::default(),
