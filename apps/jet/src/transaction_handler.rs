@@ -34,6 +34,18 @@ pub enum TransactionHandlerError {
     UnsupportedEncoding,
 }
 
+impl TransactionHandlerError {
+    pub const fn variant_name(&self) -> &'static str {
+        match self {
+            TransactionHandlerError::InvalidTransaction(_) => "InvalidTransaction",
+            TransactionHandlerError::SerializationFailed(_) => "SerializationFailed",
+            TransactionHandlerError::PreflightNotSupported => "PreflightNotSupported",
+            TransactionHandlerError::InvalidParams(_) => "InvalidParams",
+            TransactionHandlerError::UnsupportedEncoding => "UnsupportedEncoding",
+        }
+    }
+}
+
 impl From<ErrorObjectOwned> for TransactionHandlerError {
     fn from(err: ErrorObjectOwned) -> Self {
         TransactionHandlerError::InvalidParams(err.message().to_string())
@@ -82,16 +94,13 @@ impl TransactionHandler {
             .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         let signature = transaction.signatures[0];
-        let mut wire_transaction = bincode::serialize(&transaction)?;
+        let wire_transaction = bincode::serialize(&transaction)?;
         if wire_transaction.len() > PACKET_DATA_SIZE {
-            wire_transaction.shrink_to_fit();
-            if wire_transaction.len() > PACKET_DATA_SIZE {
-                return Err(TransactionHandlerError::InvalidTransaction(format!(
-                    "transaction size {} exceeds maximum allowed size of {} bytes",
-                    wire_transaction.len(),
-                    PACKET_DATA_SIZE
-                )));
-            }
+            return Err(TransactionHandlerError::InvalidTransaction(format!(
+                "transaction size {} exceeds maximum allowed size of {} bytes",
+                wire_transaction.len(),
+                PACKET_DATA_SIZE
+            )));
         }
 
         self.transaction_sink

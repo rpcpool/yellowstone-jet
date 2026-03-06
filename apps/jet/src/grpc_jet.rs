@@ -85,9 +85,16 @@ impl GrpcTransactionHandler {
         transaction: SubscribeTransaction,
     ) -> Result<(), TransactionHandlerError> {
         let payload = TransactionPayload::try_from(transaction)
+            .inspect_err(|e| {
+                error!(?e, "failed to parse transaction payload");
+                metrics::jet::increment_transaction_deserialize_error(e.variant_name());
+            })
             .map_err(|e| TransactionHandlerError::PayloadParseError(e.to_string()))?;
 
         let (transaction, config_option) = TransactionDecoder::decode(&payload)
+            .inspect_err(|e| {
+                metrics::jet::increment_transaction_decode_error(e.variant_name());
+            })
             .map_err(|e| TransactionHandlerError::DecodeError(e.to_string()))?;
 
         let config = config_option.unwrap_or_default();

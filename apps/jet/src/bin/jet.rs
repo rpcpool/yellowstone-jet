@@ -430,6 +430,7 @@ async fn run_jet(
         config.listen_solana_like.bind[0],
         RpcServerType::SolanaLike {
             tx_handler: tx_handler.clone(),
+            log_invalid_txn: config.log_invalid_txn,
         },
     )
     .await;
@@ -447,7 +448,10 @@ async fn run_jet(
                 info!("starting jet-gateway listener");
                 let stake_info = stake_info_map.clone();
                 let jet_gw_identity = initial_identity.insecure_clone();
-                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(tx_handler);
+                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(
+                    tx_handler,
+                    config.log_invalid_txn,
+                );
                 let (jet_gw_identity_updater, jet_gw_fut) = spawn_jet_gw_listener(
                     stake_info,
                     jet_gw_config,
