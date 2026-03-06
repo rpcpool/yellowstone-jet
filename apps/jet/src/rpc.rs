@@ -36,6 +36,7 @@ pub enum RpcServerType {
 
     SolanaLike {
         tx_handler: TransactionHandler,
+        log_invalid_txn: bool,
     },
 }
 
@@ -113,10 +114,14 @@ impl RpcServer {
                         )
                     })
             }
-            RpcServerType::SolanaLike { tx_handler } => {
+            RpcServerType::SolanaLike {
+                tx_handler,
+                log_invalid_txn,
+            } => {
                 use rpc_solana_like::RpcServer;
 
-                let rpc_server_impl = Self::create_solana_like_rpc_server_impl(tx_handler);
+                let rpc_server_impl =
+                    Self::create_solana_like_rpc_server_impl(tx_handler, log_invalid_txn);
                 let server_config = ServerConfigBuilder::default()
                     .max_request_body_size(MAX_REQUEST_BODY_SIZE)
                     .build();
@@ -138,8 +143,12 @@ impl RpcServer {
 
     pub const fn create_solana_like_rpc_server_impl(
         tx_handler: TransactionHandler,
+        log_invalid_txn: bool,
     ) -> rpc_solana_like::RpcServerImpl {
-        rpc_solana_like::RpcServerImpl { tx_handler }
+        rpc_solana_like::RpcServerImpl {
+            tx_handler,
+            log_invalid_txn,
+        }
     }
 
     pub fn shutdown(self) {
@@ -281,7 +290,7 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            payload::JetRpcSendTransactionConfig, rpc::invalid_params,
+            metrics, payload::JetRpcSendTransactionConfig, rpc::invalid_params,
             solana::decode_and_deserialize, transaction_handler::TransactionHandler,
         },
         jsonrpsee::{
@@ -309,6 +318,7 @@ pub mod rpc_solana_like {
 
     #[derive(Clone)]
     pub struct RpcServerImpl {
+        pub log_invalid_txn: bool,
         pub tx_handler: TransactionHandler,
     }
 
@@ -320,10 +330,23 @@ pub mod rpc_solana_like {
             config: JetRpcSendTransactionConfig,
         ) -> RpcResult<String /* Signature */> {
             debug!("handling internal versioned transaction");
-
+            let maybe_txn_sig = transaction.signatures.first().cloned();
             self.tx_handler
                 .handle_versioned_transaction(transaction, config)
                 .await
+                .inspect_err(|e| {
+                    let name = e.variant_name();
+                    if self.log_invalid_txn
+                        && let Some(signature) = maybe_txn_sig
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            signature = signature.to_string(),
+                            category = "txn_handle_error",
+                        );
+                    }
+                    metrics::jet::incr_versioned_txn_handler_error(name);
+                })
                 .map_err(Into::into)
         }
     }

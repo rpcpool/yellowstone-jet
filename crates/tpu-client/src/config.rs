@@ -226,6 +226,7 @@ impl TpuSenderConfig {
     /// This function enables sending transactions of arbitrary size, which may lead to unexpected behavior or security vulnerabilities.
     /// It should only be used in controlled testing environments.
     ///
+    #[allow(unreachable_code)]
     pub unsafe fn allow_arbitrary_txn_size(&mut self) {
         #[cfg(not(feature = "intg-testing"))]
         {

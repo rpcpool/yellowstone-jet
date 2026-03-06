@@ -243,6 +243,11 @@ pub mod jet {
                 ])
         ).unwrap();
 
+
+        static ref VERSIONED_TXN_HANDLE_ERROR: IntCounterVec = IntCounterVec::new(
+            Opts::new("transaction_handler_error_total", "Number of errors in transaction handler by type"),
+            &["error"]
+        ).unwrap();
     }
 
     pub fn init() {
@@ -291,10 +296,17 @@ pub mod jet {
             register!(BLOCK_META_EMISSIONS_COUNT);
             register!(GRPC_MESSAGES_PROCESSED_RATE);
             register!(NEW_SLOT_ARRIVAL_INTERVAL);
+            register!(VERSIONED_TXN_HANDLE_ERROR);
 
             yellowstone_jet_tpu_client::prom::register_metrics(&REGISTRY);
             grpc_lewis::prom::register_metrics(&REGISTRY);
         });
+    }
+
+    pub fn incr_versioned_txn_handler_error(error_type: &str) {
+        VERSIONED_TXN_HANDLE_ERROR
+            .with_label_values(&[error_type])
+            .inc();
     }
 
     pub fn incr_send_tx_attempt(leader: Pubkey) {

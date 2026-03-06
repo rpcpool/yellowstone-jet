@@ -95,6 +95,21 @@ pub enum PayloadError {
     ProtoConversionError(String),
 }
 
+impl PayloadError {
+    pub const fn variant_name(&self) -> &'static str {
+        match self {
+            PayloadError::EmptyPayload => "EmptyPayload",
+            PayloadError::LegacyDeserialize(_) => "LegacyDeserialize",
+            PayloadError::Base58Decode(_) => "Base58Decode",
+            PayloadError::Base64Decode(_) => "Base64Decode",
+            PayloadError::UnsupportedEncoding => "UnsupportedEncoding",
+            PayloadError::BincodeError(_) => "BincodeError",
+            PayloadError::InvalidPubkey(_) => "InvalidPubkey",
+            PayloadError::ProtoConversionError(_) => "ProtoConversionError",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LegacyPayload {
     pub transaction: String, // base58/base64 encoded transaction

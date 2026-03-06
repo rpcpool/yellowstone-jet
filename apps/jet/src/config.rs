@@ -83,6 +83,11 @@ pub struct ConfigJet {
     /// Shield Program ID (Optional, default to yellowstone-shield-store default)
     #[serde(default, deserialize_with = "ConfigJet::deserialize_maybe_program_id")]
     pub program_id: Option<Pubkey>,
+
+    /// Whether to log invalid transactions in RPC handler
+    /// This is useful for debugging transaction handling errors, but may cause log spam if there are many invalid transactions.
+    #[serde(default)]
+    pub log_invalid_txn: bool,
 }
 
 impl ConfigJet {
