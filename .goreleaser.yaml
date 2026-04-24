@@ -8,6 +8,15 @@
 
 version: 2
 
+before:
+    hooks:
+        # Ubuntu 24.04 puts arch-specific OpenSSL headers (opensslconf.h, configuration.h)
+        # only in /usr/include/x86_64-linux-gnu/openssl/. zig cc doesn't add that as a
+        # system search path unlike stock gcc, so openssl-sys can't find them. Symlink all
+        # arch-specific headers into /usr/include/openssl/ to fix without polluting CFLAGS
+        # globally (which breaks zstd-sys via zig's bundled glibc stubs).
+        - bash -c 'for f in /usr/include/x86_64-linux-gnu/openssl/*; do sudo ln -sf "$f" "/usr/include/openssl/$(basename "$f")"; done'
+
 builds:
     - id: jet
       builder: rust
@@ -21,7 +30,6 @@ builds:
       env:
           - OPENSSL_INCLUDE_DIR=/usr/include
           - OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu
-          - CFLAGS_x86_64_unknown_linux_gnu=-I/usr/include/x86_64-linux-gnu
 
 archives:
     - id: jet
