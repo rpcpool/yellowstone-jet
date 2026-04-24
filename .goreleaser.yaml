@@ -31,7 +31,10 @@ archives:
           - jet
 
 release:
-    disable: "{{ .Prerelease }}"
+    github:
+        owner: rpcpool
+        name: yellowstone-jet
+    draft: true
     header: |
         rust {{ .Env.RUST_VERSION }}
 
