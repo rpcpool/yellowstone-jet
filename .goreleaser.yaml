@@ -19,7 +19,7 @@ builds:
           - --package=yellowstone-jet
           - --bin=jet
       env:
-          - OPENSSL_INCLUDE_DIR=/usr/include/x86_64-linux-gnu
+          - OPENSSL_INCLUDE_DIR=/usr/include
           - OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu
 
 archives:
