@@ -21,6 +21,7 @@ builds:
       env:
           - OPENSSL_INCLUDE_DIR=/usr/include
           - OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu
+          - CFLAGS_x86_64_unknown_linux_gnu=-I/usr/include/x86_64-linux-gnu
 
 archives:
     - id: jet
