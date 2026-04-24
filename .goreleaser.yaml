@@ -16,6 +16,7 @@ builds:
           - x86_64-unknown-linux-gnu
       flags:
           - --release
+          - --package=yellowstone-jet
           - --bin=jet
 
 archives:
