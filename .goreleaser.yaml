@@ -1,0 +1,43 @@
+# .goreleaser.yaml for rpcpool/yellowstone-jet
+#
+# This file must be committed to the root of the yellowstone-jet source
+# repo. GCS upload, cosigning, and GitHub Release publishing are injected via
+# ci/goreleaser-patch.yaml in Binaries-ci at build time.
+#
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+
+version: 2
+
+builds:
+    - id: jet
+      builder: rust
+      binary: jet
+      targets:
+          - x86_64-unknown-linux-gnu
+      flags:
+          - --release
+          - --package=yellowstone-jet
+          - --bin=jet
+      env:
+          - OPENSSL_INCLUDE_DIR=/usr/include
+          - OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu
+          - CFLAGS_x86_64_unknown_linux_gnu=-isystem /usr/include/x86_64-linux-gnu
+
+archives:
+    - id: jet
+      name_template: jet-linux-amd64
+      formats: [binary]
+      ids:
+          - jet
+
+release:
+    github:
+        owner: rpcpool
+        name: yellowstone-jet
+    draft: true
+    header: |
+        rust {{ .Env.RUST_VERSION }}
+
+changelog:
+    sort: asc
+    use: github
