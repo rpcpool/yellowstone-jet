@@ -61,7 +61,7 @@ impl QueryParams {
         })
     }
 
-    fn encoding_label(&self) -> &'static str {
+    const fn encoding_label(&self) -> &'static str {
         match self.encoding {
             UiTransactionEncoding::Base64 => "base64",
             UiTransactionEncoding::Base58 => "base58",
@@ -179,7 +179,7 @@ pub struct HttpTxMiddleware<S> {
 }
 
 impl<S> HttpTxMiddleware<S> {
-    pub fn new(service: S, handler: HttpTransactionHandler) -> Self {
+    pub const fn new(service: S, handler: HttpTransactionHandler) -> Self {
         Self { service, handler }
     }
 }
