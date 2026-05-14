@@ -248,6 +248,16 @@ pub mod jet {
             Opts::new("transaction_handler_error_total", "Number of errors in transaction handler by type"),
             &["error"]
         ).unwrap();
+
+        static ref HTTP_TX_REQUESTS: IntCounterVec = IntCounterVec::new(
+            Opts::new("http_tx_requests_total", "Total HTTP transaction endpoint requests"),
+            &["status", "encoding"]
+        ).unwrap();
+
+        static ref HTTP_TX_REQUEST_DURATION: Histogram = Histogram::with_opts(
+            HistogramOpts::new("http_tx_request_duration_seconds", "HTTP transaction endpoint request duration in seconds")
+                .buckets(vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0])
+        ).unwrap();
     }
 
     pub fn init() {
@@ -297,6 +307,8 @@ pub mod jet {
             register!(GRPC_MESSAGES_PROCESSED_RATE);
             register!(NEW_SLOT_ARRIVAL_INTERVAL);
             register!(VERSIONED_TXN_HANDLE_ERROR);
+            register!(HTTP_TX_REQUESTS);
+            register!(HTTP_TX_REQUEST_DURATION);
 
             yellowstone_jet_tpu_client::prom::register_metrics(&REGISTRY);
             grpc_lewis::prom::register_metrics(&REGISTRY);
@@ -569,5 +581,15 @@ pub mod jet {
 
     pub fn observe_new_slot_arrival_interval(duration: Duration) {
         NEW_SLOT_ARRIVAL_INTERVAL.observe(duration.as_millis() as f64);
+    }
+
+    pub fn http_tx_requests_inc(status: &str, encoding: &str) {
+        HTTP_TX_REQUESTS
+            .with_label_values(&[status, encoding])
+            .inc();
+    }
+
+    pub fn http_tx_request_duration(duration: Duration) {
+        HTTP_TX_REQUEST_DURATION.observe(duration.as_secs_f64());
     }
 }

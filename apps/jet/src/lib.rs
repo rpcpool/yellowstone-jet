@@ -15,6 +15,7 @@ pub mod crypto_provider;
 pub mod feature_flags;
 pub mod grpc_geyser;
 pub mod grpc_jet;
+pub mod http_tx_handler;
 pub mod grpc_lewis;
 pub mod identity;
 pub mod jet_gateway;
