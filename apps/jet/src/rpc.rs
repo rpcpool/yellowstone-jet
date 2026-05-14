@@ -126,12 +126,10 @@ impl RpcServer {
 
                 let rpc_server_impl =
                     Self::create_solana_like_rpc_server_impl(tx_handler.clone(), log_invalid_txn);
-                let http_tx_handler =
-                    HttpTransactionHandler::new(tx_handler, log_invalid_txn);
-                let server_middleware = tower::ServiceBuilder::new()
-                    .layer_fn(move |service| {
-                        HttpTxMiddleware::new(service, http_tx_handler.clone())
-                    });
+                let http_tx_handler = HttpTransactionHandler::new(tx_handler, log_invalid_txn);
+                let server_middleware = tower::ServiceBuilder::new().layer_fn(move |service| {
+                    HttpTxMiddleware::new(service, http_tx_handler.clone())
+                });
                 let server_config = ServerConfigBuilder::default()
                     .max_request_body_size(MAX_REQUEST_BODY_SIZE)
                     .build();

@@ -1,7 +1,6 @@
 use {
     crate::{
-        metrics::jet as metrics,
-        payload::JetRpcSendTransactionConfig,
+        metrics::jet as metrics, payload::JetRpcSendTransactionConfig,
         transaction_handler::TransactionHandler,
     },
     futures::future::{BoxFuture, FutureExt},
@@ -147,10 +146,7 @@ impl HttpTransactionHandler {
                     elapsed_ms = elapsed.as_millis(),
                     "HTTP transaction submitted"
                 );
-                json_response(
-                    StatusCode::OK,
-                    &format!(r#"{{"signature":"{signature}"}}"#),
-                )
+                json_response(StatusCode::OK, &format!(r#"{{"signature":"{signature}"}}"#))
             }
             Err(e) => {
                 metrics::http_tx_requests_inc("error", encoding_label);
