@@ -81,9 +81,9 @@ impl HttpTransactionHandler {
 
         if req.method() != hyper::Method::POST {
             metrics::http_tx_requests_inc("error", "unknown");
-            return json_response(
+            return text_response(
                 StatusCode::METHOD_NOT_ALLOWED,
-                r#"{"error":"method not allowed, use POST"}"#,
+                "method not allowed, use POST",
             );
         }
 
@@ -92,7 +92,7 @@ impl HttpTransactionHandler {
             Ok(enc) => enc,
             Err(msg) => {
                 metrics::http_tx_requests_inc("error", "unknown");
-                return json_error_response(StatusCode::BAD_REQUEST, msg);
+                return text_response(StatusCode::BAD_REQUEST, msg);
             }
         };
         let encoding_label = Self::encoding_label(encoding);
@@ -102,7 +102,7 @@ impl HttpTransactionHandler {
             Ok(collected) => collected.to_bytes(),
             Err(e) => {
                 metrics::http_tx_requests_inc("error", encoding_label);
-                return json_error_response(
+                return text_response(
                     StatusCode::BAD_REQUEST,
                     &format!("failed to read request body: {e}"),
                 );
@@ -113,7 +113,7 @@ impl HttpTransactionHandler {
             Ok(s) => s.trim().to_owned(),
             Err(_) => {
                 metrics::http_tx_requests_inc("error", encoding_label);
-                return json_error_response(
+                return text_response(
                     StatusCode::BAD_REQUEST,
                     "request body must be valid UTF-8",
                 );
@@ -122,7 +122,7 @@ impl HttpTransactionHandler {
 
         if data.is_empty() {
             metrics::http_tx_requests_inc("error", encoding_label);
-            return json_error_response(StatusCode::BAD_REQUEST, "empty transaction body");
+            return text_response(StatusCode::BAD_REQUEST, "empty transaction body");
         }
 
         let config = JetRpcSendTransactionConfig {
@@ -146,30 +146,25 @@ impl HttpTransactionHandler {
                     elapsed_ms = elapsed.as_millis(),
                     "HTTP transaction submitted"
                 );
-                json_response(StatusCode::OK, &format!(r#"{{"signature":"{signature}"}}"#))
+                text_response(StatusCode::OK, &signature)
             }
             Err(e) => {
                 metrics::http_tx_requests_inc("error", encoding_label);
                 if self.log_invalid_txn {
                     warn!(error = %e, "HTTP transaction submission failed");
                 }
-                json_error_response(StatusCode::BAD_REQUEST, &e.to_string())
+                text_response(StatusCode::BAD_REQUEST, &e.to_string())
             }
         }
     }
 }
 
-fn json_response(status: StatusCode, body: &str) -> Response<Body> {
+fn text_response(status: StatusCode, body: &str) -> Response<Body> {
     Response::builder()
         .status(status)
-        .header("content-type", "application/json")
+        .header("content-type", "text/plain")
         .body(Body::new(body.to_owned()))
         .expect("failed to build response")
-}
-
-fn json_error_response(status: StatusCode, message: &str) -> Response<Body> {
-    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
-    json_response(status, &format!(r#"{{"error":"{escaped}"}}"#))
 }
 
 /// Tower middleware that intercepts POST requests to /api/v1/transactions
