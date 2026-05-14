@@ -11,6 +11,8 @@ version: 2
 builds:
     - id: jet
       builder: rust
+      # Native Linux build on the Ubuntu runner; avoid cargo-zigbuild.
+      command: build
       binary: jet
       targets:
           - x86_64-unknown-linux-gnu
@@ -18,10 +20,6 @@ builds:
           - --release
           - --package=yellowstone-jet
           - --bin=jet
-      env:
-          - OPENSSL_INCLUDE_DIR=/usr/include
-          - OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu
-          - CFLAGS_x86_64_unknown_linux_gnu=-isystem /usr/include/x86_64-linux-gnu
 
 archives:
     - id: jet
