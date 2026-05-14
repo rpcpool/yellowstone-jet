@@ -44,9 +44,7 @@ impl QueryParams {
                         "base58" => UiTransactionEncoding::Base58,
                         other => {
                             warn!(encoding = other, "unsupported encoding in HTTP tx request");
-                            return Err(
-                                "unsupported encoding: must be 'base64' or 'base58'",
-                            );
+                            return Err("unsupported encoding: must be 'base64' or 'base58'");
                         }
                     };
                 }
@@ -121,10 +119,7 @@ impl HttpTransactionHandler {
             Ok(s) => s.trim().to_owned(),
             Err(_) => {
                 metrics::http_tx_requests_inc("error", encoding_label);
-                return text_response(
-                    StatusCode::BAD_REQUEST,
-                    "request body must be valid UTF-8",
-                );
+                return text_response(StatusCode::BAD_REQUEST, "request body must be valid UTF-8");
             }
         };
 
