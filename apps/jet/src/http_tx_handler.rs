@@ -19,6 +19,59 @@ use {
 
 const API_TX_PATH: &str = "/api/v1/transactions";
 
+struct QueryParams {
+    encoding: UiTransactionEncoding,
+    max_retries: Option<usize>,
+}
+
+impl QueryParams {
+    fn parse(query: Option<&str>) -> Result<Self, &'static str> {
+        let Some(query) = query else {
+            return Ok(Self {
+                encoding: UiTransactionEncoding::Base64,
+                max_retries: None,
+            });
+        };
+
+        let mut encoding = UiTransactionEncoding::Base64;
+        let mut max_retries = None;
+
+        for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+            match key.as_ref() {
+                "encoding" => {
+                    encoding = match value.as_ref() {
+                        "base64" => UiTransactionEncoding::Base64,
+                        "base58" => UiTransactionEncoding::Base58,
+                        other => {
+                            warn!(encoding = other, "unsupported encoding in HTTP tx request");
+                            return Err(
+                                "unsupported encoding: must be 'base64' or 'base58'",
+                            );
+                        }
+                    };
+                }
+                "max_retries" => {
+                    max_retries = value.parse().ok();
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Self {
+            encoding,
+            max_retries,
+        })
+    }
+
+    fn encoding_label(&self) -> &'static str {
+        match self.encoding {
+            UiTransactionEncoding::Base64 => "base64",
+            UiTransactionEncoding::Base58 => "base58",
+            _ => "unknown",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct HttpTransactionHandler {
     tx_handler: TransactionHandler,
@@ -33,49 +86,6 @@ impl HttpTransactionHandler {
         }
     }
 
-    fn parse_encoding(query: Option<&str>) -> Result<UiTransactionEncoding, &'static str> {
-        let Some(query) = query else {
-            return Ok(UiTransactionEncoding::Base64);
-        };
-        for pair in query.split('&') {
-            let mut kv = pair.splitn(2, '=');
-            let key = kv.next().unwrap_or("");
-            let value = kv.next().unwrap_or("");
-            if key == "encoding" {
-                return match value {
-                    "base64" => Ok(UiTransactionEncoding::Base64),
-                    "base58" => Ok(UiTransactionEncoding::Base58),
-                    other => {
-                        warn!(encoding = other, "unsupported encoding in HTTP tx request");
-                        Err("unsupported encoding: must be 'base64' or 'base58'")
-                    }
-                };
-            }
-        }
-        Ok(UiTransactionEncoding::Base64)
-    }
-
-    fn parse_max_retries(query: Option<&str>) -> Option<usize> {
-        let query = query?;
-        for pair in query.split('&') {
-            let mut kv = pair.splitn(2, '=');
-            let key = kv.next().unwrap_or("");
-            let value = kv.next().unwrap_or("");
-            if key == "max_retries" {
-                return value.parse().ok();
-            }
-        }
-        None
-    }
-
-    fn encoding_label(encoding: UiTransactionEncoding) -> &'static str {
-        match encoding {
-            UiTransactionEncoding::Base64 => "base64",
-            UiTransactionEncoding::Base58 => "base58",
-            _ => "unknown",
-        }
-    }
-
     async fn handle_request(self, req: Request<Body>) -> Response<Body> {
         let start = Instant::now();
 
@@ -87,16 +97,14 @@ impl HttpTransactionHandler {
             );
         }
 
-        let query = req.uri().query().map(|q| q.to_owned());
-        let encoding = match Self::parse_encoding(query.as_deref()) {
-            Ok(enc) => enc,
+        let params = match QueryParams::parse(req.uri().query()) {
+            Ok(p) => p,
             Err(msg) => {
                 metrics::http_tx_requests_inc("error", "unknown");
                 return text_response(StatusCode::BAD_REQUEST, msg);
             }
         };
-        let encoding_label = Self::encoding_label(encoding);
-        let max_retries = Self::parse_max_retries(query.as_deref());
+        let encoding_label = params.encoding_label();
 
         let body_bytes = match http_body_util::BodyExt::collect(req.into_body()).await {
             Ok(collected) => collected.to_bytes(),
@@ -128,8 +136,8 @@ impl HttpTransactionHandler {
         let config = JetRpcSendTransactionConfig {
             config: RpcSendTransactionConfig {
                 skip_preflight: true,
-                encoding: Some(encoding),
-                max_retries,
+                encoding: Some(params.encoding),
+                max_retries: params.max_retries,
                 ..Default::default()
             },
             forwarding_policies: vec![],
@@ -212,68 +220,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_encoding_default() {
-        assert_eq!(
-            HttpTransactionHandler::parse_encoding(None).unwrap(),
-            UiTransactionEncoding::Base64
-        );
+    fn test_parse_defaults() {
+        let p = QueryParams::parse(None).unwrap();
+        assert_eq!(p.encoding, UiTransactionEncoding::Base64);
+        assert_eq!(p.max_retries, None);
     }
 
     #[test]
     fn test_parse_encoding_base64() {
-        assert_eq!(
-            HttpTransactionHandler::parse_encoding(Some("encoding=base64")).unwrap(),
-            UiTransactionEncoding::Base64
-        );
+        let p = QueryParams::parse(Some("encoding=base64")).unwrap();
+        assert_eq!(p.encoding, UiTransactionEncoding::Base64);
     }
 
     #[test]
     fn test_parse_encoding_base58() {
-        assert_eq!(
-            HttpTransactionHandler::parse_encoding(Some("encoding=base58")).unwrap(),
-            UiTransactionEncoding::Base58
-        );
+        let p = QueryParams::parse(Some("encoding=base58")).unwrap();
+        assert_eq!(p.encoding, UiTransactionEncoding::Base58);
     }
 
     #[test]
     fn test_parse_encoding_invalid() {
-        assert!(HttpTransactionHandler::parse_encoding(Some("encoding=json")).is_err());
+        assert!(QueryParams::parse(Some("encoding=json")).is_err());
     }
 
     #[test]
-    fn test_parse_encoding_with_other_params() {
-        assert_eq!(
-            HttpTransactionHandler::parse_encoding(Some("foo=bar&encoding=base58&baz=1")).unwrap(),
-            UiTransactionEncoding::Base58
-        );
+    fn test_parse_multiple_params() {
+        let p = QueryParams::parse(Some("encoding=base58&max_retries=3")).unwrap();
+        assert_eq!(p.encoding, UiTransactionEncoding::Base58);
+        assert_eq!(p.max_retries, Some(3));
     }
 
     #[test]
-    fn test_parse_encoding_missing_param() {
-        assert_eq!(
-            HttpTransactionHandler::parse_encoding(Some("foo=bar")).unwrap(),
-            UiTransactionEncoding::Base64
-        );
+    fn test_parse_unknown_params_ignored() {
+        let p = QueryParams::parse(Some("foo=bar&encoding=base58&baz=1")).unwrap();
+        assert_eq!(p.encoding, UiTransactionEncoding::Base58);
     }
 
     #[test]
-    fn test_parse_max_retries() {
-        assert_eq!(HttpTransactionHandler::parse_max_retries(None), None);
-        assert_eq!(
-            HttpTransactionHandler::parse_max_retries(Some("max_retries=5")),
-            Some(5)
-        );
-        assert_eq!(
-            HttpTransactionHandler::parse_max_retries(Some("encoding=base64&max_retries=3")),
-            Some(3)
-        );
-        assert_eq!(
-            HttpTransactionHandler::parse_max_retries(Some("encoding=base64")),
-            None
-        );
-        assert_eq!(
-            HttpTransactionHandler::parse_max_retries(Some("max_retries=abc")),
-            None
-        );
+    fn test_parse_max_retries_invalid_ignored() {
+        let p = QueryParams::parse(Some("max_retries=abc")).unwrap();
+        assert_eq!(p.max_retries, None);
     }
 }
