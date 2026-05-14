@@ -19,6 +19,7 @@ bs58 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["cargo", "derive", "env"] }
 derive_more = { workspace = true, features = ["display"] }
+form_urlencoded = "1"
 futures = { workspace = true }
 hostname = { workspace = true }
 http-body-util = { workspace = true }

@@ -1,5 +1,9 @@
 use {
-    crate::{cluster_tpu_info::ClusterTpuInfoProvider, transaction_handler::TransactionHandler},
+    crate::{
+        cluster_tpu_info::ClusterTpuInfoProvider,
+        http_tx_handler::{HttpTransactionHandler, HttpTxMiddleware},
+        transaction_handler::TransactionHandler,
+    },
     anyhow::Context as _,
     futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
     hyper::{Request, Response, StatusCode},
@@ -121,11 +125,16 @@ impl RpcServer {
                 use rpc_solana_like::RpcServer;
 
                 let rpc_server_impl =
-                    Self::create_solana_like_rpc_server_impl(tx_handler, log_invalid_txn);
+                    Self::create_solana_like_rpc_server_impl(tx_handler.clone(), log_invalid_txn);
+                let http_tx_handler = HttpTransactionHandler::new(tx_handler, log_invalid_txn);
+                let server_middleware = tower::ServiceBuilder::new().layer_fn(move |service| {
+                    HttpTxMiddleware::new(service, http_tx_handler.clone())
+                });
                 let server_config = ServerConfigBuilder::default()
                     .max_request_body_size(MAX_REQUEST_BODY_SIZE)
                     .build();
                 ServerBuilder::new()
+                    .set_http_middleware(server_middleware)
                     .set_config(server_config)
                     .build(addr)
                     .await
