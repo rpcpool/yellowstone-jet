@@ -27,6 +27,7 @@ enum ResponseMode {
 
 struct QueryParams {
     encoding: UiTransactionEncoding,
+    encoding_explicit: bool,
     max_retries: Option<usize>,
     response: ResponseMode,
 }
@@ -36,18 +37,21 @@ impl QueryParams {
         let Some(query) = query else {
             return Ok(Self {
                 encoding: UiTransactionEncoding::Base58,
+                encoding_explicit: false,
                 max_retries: None,
                 response: ResponseMode::None,
             });
         };
 
         let mut encoding = UiTransactionEncoding::Base58;
+        let mut encoding_explicit = false;
         let mut max_retries = None;
         let mut response = ResponseMode::None;
 
         for (key, value) in form_urlencoded::parse(query.as_bytes()) {
             match key.as_ref() {
                 "encoding" => {
+                    encoding_explicit = true;
                     encoding = match value.as_ref() {
                         "base64" => UiTransactionEncoding::Base64,
                         "base58" => UiTransactionEncoding::Base58,
@@ -75,6 +79,7 @@ impl QueryParams {
 
         Ok(Self {
             encoding,
+            encoding_explicit,
             max_retries,
             response,
         })
@@ -127,6 +132,14 @@ impl HttpTransactionHandler {
             .get(hyper::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.starts_with("application/octet-stream"));
+
+        if is_raw && params.encoding_explicit {
+            metrics::http_tx_requests_inc("error", "raw");
+            return text_response(
+                StatusCode::BAD_REQUEST,
+                "encoding parameter cannot be used with application/octet-stream content type",
+            );
+        }
 
         let encoding_label = if is_raw {
             "raw"
@@ -351,5 +364,17 @@ mod tests {
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
         assert_eq!(p.max_retries, Some(5));
         assert_eq!(p.response, ResponseMode::Signature);
+    }
+
+    #[test]
+    fn test_encoding_explicit_flag() {
+        let p = QueryParams::parse(Some("encoding=base64")).unwrap();
+        assert!(p.encoding_explicit);
+
+        let p = QueryParams::parse(Some("max_retries=3")).unwrap();
+        assert!(!p.encoding_explicit);
+
+        let p = QueryParams::parse(None).unwrap();
+        assert!(!p.encoding_explicit);
     }
 }
