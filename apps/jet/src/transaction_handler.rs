@@ -116,6 +116,41 @@ impl TransactionHandler {
         Ok(signature.to_string())
     }
 
+    pub async fn handle_raw_transaction(
+        &self,
+        wire_transaction: Vec<u8>,
+        config_with_forwarding_policies: JetRpcSendTransactionConfig,
+    ) -> Result<String /* Signature */, TransactionHandlerError> {
+        if wire_transaction.len() > PACKET_DATA_SIZE {
+            return Err(TransactionHandlerError::InvalidTransaction(format!(
+                "transaction size {} exceeds maximum allowed size of {} bytes",
+                wire_transaction.len(),
+                PACKET_DATA_SIZE
+            )));
+        }
+
+        let transaction: VersionedTransaction = bincode::deserialize(&wire_transaction)
+            .map_err(|e| TransactionHandlerError::InvalidParams(format!("failed to deserialize transaction: {e}")))?;
+
+        transaction
+            .sanitize()
+            .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
+
+        let signature = transaction.signatures[0];
+
+        self.transaction_sink
+            .send(Arc::new(SendTransactionRequest {
+                signature,
+                transaction,
+                wire_transaction,
+                max_retries: config_with_forwarding_policies.config.max_retries,
+                policies: config_with_forwarding_policies.forwarding_policies,
+            }))
+            .expect("transaction sink closed");
+
+        Ok(signature.to_string())
+    }
+
     pub async fn handle_transaction(
         &self,
         data: String,

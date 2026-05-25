@@ -19,9 +19,16 @@ use {
 
 const API_TX_PATH: &str = "/api/v1/transactions";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseMode {
+    None,
+    Signature,
+}
+
 struct QueryParams {
     encoding: UiTransactionEncoding,
     max_retries: Option<usize>,
+    response: ResponseMode,
 }
 
 impl QueryParams {
@@ -30,11 +37,13 @@ impl QueryParams {
             return Ok(Self {
                 encoding: UiTransactionEncoding::Base64,
                 max_retries: None,
+                response: ResponseMode::None,
             });
         };
 
         let mut encoding = UiTransactionEncoding::Base64;
         let mut max_retries = None;
+        let mut response = ResponseMode::None;
 
         for (key, value) in form_urlencoded::parse(query.as_bytes()) {
             match key.as_ref() {
@@ -51,6 +60,15 @@ impl QueryParams {
                 "max_retries" => {
                     max_retries = value.parse().ok();
                 }
+                "response" => {
+                    response = match value.as_ref() {
+                        "signature" => ResponseMode::Signature,
+                        "none" => ResponseMode::None,
+                        _ => {
+                            return Err("unsupported response mode: must be 'signature' or 'none'");
+                        }
+                    };
+                }
                 _ => {}
             }
         }
@@ -58,6 +76,7 @@ impl QueryParams {
         Ok(Self {
             encoding,
             max_retries,
+            response,
         })
     }
 
@@ -102,7 +121,18 @@ impl HttpTransactionHandler {
                 return text_response(StatusCode::BAD_REQUEST, msg);
             }
         };
-        let encoding_label = params.encoding_label();
+
+        let is_raw = req
+            .headers()
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("application/octet-stream"));
+
+        let encoding_label = if is_raw {
+            "raw"
+        } else {
+            params.encoding_label()
+        };
 
         let body_bytes = match http_body_util::BodyExt::collect(req.into_body()).await {
             Ok(collected) => collected.to_bytes(),
@@ -115,30 +145,53 @@ impl HttpTransactionHandler {
             }
         };
 
-        let data = match String::from_utf8(body_bytes.to_vec()) {
-            Ok(s) => s.trim().to_owned(),
-            Err(_) => {
-                metrics::http_tx_requests_inc("error", encoding_label);
-                return text_response(StatusCode::BAD_REQUEST, "request body must be valid UTF-8");
-            }
-        };
-
-        if data.is_empty() {
+        if body_bytes.is_empty() {
             metrics::http_tx_requests_inc("error", encoding_label);
             return text_response(StatusCode::BAD_REQUEST, "empty transaction body");
         }
 
-        let config = JetRpcSendTransactionConfig {
-            config: RpcSendTransactionConfig {
-                skip_preflight: true,
-                encoding: Some(params.encoding),
-                max_retries: params.max_retries,
-                ..Default::default()
-            },
-            forwarding_policies: vec![],
+        let result = if is_raw {
+            let config = JetRpcSendTransactionConfig {
+                config: RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    max_retries: params.max_retries,
+                    ..Default::default()
+                },
+                forwarding_policies: vec![],
+            };
+            self.tx_handler
+                .handle_raw_transaction(body_bytes.to_vec(), config)
+                .await
+        } else {
+            let data = match String::from_utf8(body_bytes.to_vec()) {
+                Ok(s) => s.trim().to_owned(),
+                Err(_) => {
+                    metrics::http_tx_requests_inc("error", encoding_label);
+                    return text_response(
+                        StatusCode::BAD_REQUEST,
+                        "request body must be valid UTF-8",
+                    );
+                }
+            };
+
+            if data.is_empty() {
+                metrics::http_tx_requests_inc("error", encoding_label);
+                return text_response(StatusCode::BAD_REQUEST, "empty transaction body");
+            }
+
+            let config = JetRpcSendTransactionConfig {
+                config: RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    encoding: Some(params.encoding),
+                    max_retries: params.max_retries,
+                    ..Default::default()
+                },
+                forwarding_policies: vec![],
+            };
+            self.tx_handler.handle_transaction(data, Some(config)).await
         };
 
-        match self.tx_handler.handle_transaction(data, Some(config)).await {
+        match result {
             Ok(signature) => {
                 let elapsed = start.elapsed();
                 metrics::http_tx_requests_inc("success", encoding_label);
@@ -149,7 +202,10 @@ impl HttpTransactionHandler {
                     elapsed_ms = elapsed.as_millis(),
                     "HTTP transaction submitted"
                 );
-                text_response(StatusCode::OK, &signature)
+                match params.response {
+                    ResponseMode::Signature => text_response(StatusCode::OK, &signature),
+                    ResponseMode::None => empty_response(StatusCode::OK),
+                }
             }
             Err(e) => {
                 metrics::http_tx_requests_inc("error", encoding_label);
@@ -167,6 +223,13 @@ fn text_response(status: StatusCode, body: &str) -> Response<Body> {
         .status(status)
         .header("content-type", "text/plain")
         .body(Body::new(body.to_owned()))
+        .expect("failed to build response")
+}
+
+fn empty_response(status: StatusCode) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .body(Body::new(String::new()))
         .expect("failed to build response")
 }
 
@@ -219,6 +282,7 @@ mod tests {
         let p = QueryParams::parse(None).unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base64);
         assert_eq!(p.max_retries, None);
+        assert_eq!(p.response, ResponseMode::None);
     }
 
     #[test]
@@ -255,5 +319,37 @@ mod tests {
     fn test_parse_max_retries_invalid_ignored() {
         let p = QueryParams::parse(Some("max_retries=abc")).unwrap();
         assert_eq!(p.max_retries, None);
+    }
+
+    #[test]
+    fn test_parse_response_signature() {
+        let p = QueryParams::parse(Some("response=signature")).unwrap();
+        assert_eq!(p.response, ResponseMode::Signature);
+    }
+
+    #[test]
+    fn test_parse_response_none() {
+        let p = QueryParams::parse(Some("response=none")).unwrap();
+        assert_eq!(p.response, ResponseMode::None);
+    }
+
+    #[test]
+    fn test_parse_response_default_is_none() {
+        let p = QueryParams::parse(Some("encoding=base64")).unwrap();
+        assert_eq!(p.response, ResponseMode::None);
+    }
+
+    #[test]
+    fn test_parse_response_invalid() {
+        assert!(QueryParams::parse(Some("response=full")).is_err());
+    }
+
+    #[test]
+    fn test_parse_all_params() {
+        let p =
+            QueryParams::parse(Some("encoding=base58&max_retries=5&response=signature")).unwrap();
+        assert_eq!(p.encoding, UiTransactionEncoding::Base58);
+        assert_eq!(p.max_retries, Some(5));
+        assert_eq!(p.response, ResponseMode::Signature);
     }
 }
