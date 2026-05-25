@@ -35,13 +35,13 @@ impl QueryParams {
     fn parse(query: Option<&str>) -> Result<Self, &'static str> {
         let Some(query) = query else {
             return Ok(Self {
-                encoding: UiTransactionEncoding::Base64,
+                encoding: UiTransactionEncoding::Base58,
                 max_retries: None,
                 response: ResponseMode::None,
             });
         };
 
-        let mut encoding = UiTransactionEncoding::Base64;
+        let mut encoding = UiTransactionEncoding::Base58;
         let mut max_retries = None;
         let mut response = ResponseMode::None;
 
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn test_parse_defaults() {
         let p = QueryParams::parse(None).unwrap();
-        assert_eq!(p.encoding, UiTransactionEncoding::Base64);
+        assert_eq!(p.encoding, UiTransactionEncoding::Base58);
         assert_eq!(p.max_retries, None);
         assert_eq!(p.response, ResponseMode::None);
     }

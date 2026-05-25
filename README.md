@@ -9,6 +9,7 @@ Implements the Solana QUIC protocol for sending transactions.
 - Efficient transaction sending, implementing the Solana TPU client in proxy format
 - Detailed configuration of all QUIC related parameters
 - Solana JSONRPC support, with an rpc server that supports sendTransaction
+- HTTP transaction submission API (`POST /api/v1/transactions`) with raw bytes, base58, and base64 support
 - Full support for SwQoS
 - Simulation and transaction sanitization support via external RPC
 - Prometheus metrics
@@ -46,6 +47,52 @@ sudo cp systemd/yellowstone-jet.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now yellowstone-jet
 ```
+
+## HTTP Transaction API
+
+Jet exposes a lightweight HTTP endpoint for transaction submission alongside the JSON-RPC interface:
+
+```
+POST /api/v1/transactions
+```
+
+### Query parameters
+
+| Parameter | Values | Default | Description |
+|-----------|--------|---------|-------------|
+| `encoding` | `base58`, `base64` | `base58` | Encoding of the text body (ignored for raw bytes) |
+| `max_retries` | integer | none | Maximum retry attempts |
+| `response` | `signature`, `none` | `none` | What to return on success |
+
+### Content types
+
+| Content-Type | Body format | Description |
+|---|---|---|
+| `application/octet-stream` | Raw wire bytes | Fastest path — zero encode/decode overhead |
+| `text/plain` (or absent) | Encoded text | base58 or base64 encoded transaction string |
+
+### Examples
+
+```bash
+# Raw bytes — fastest, no encoding overhead
+curl -X POST /api/v1/transactions \
+  -H 'Content-Type: application/octet-stream' \
+  --data-binary @transaction.bin
+
+# Base58 (default encoding), return signature
+curl -X POST '/api/v1/transactions?response=signature' \
+  -d '<base58-encoded-tx>'
+
+# Base64 with signature
+curl -X POST '/api/v1/transactions?encoding=base64&response=signature' \
+  -d '<base64-encoded-tx>'
+```
+
+### Response
+
+- **Success**: `200 OK` — empty body by default, or transaction signature if `?response=signature`
+- **Error**: `400 Bad Request` — plain text error message
+- **Wrong method**: `405 Method Not Allowed`
 
 ## Attribution
 
