@@ -56,25 +56,16 @@ Jet exposes a lightweight HTTP endpoint for transaction submission alongside the
 POST /api/v1/transactions
 ```
 
-### Query parameters
-
-| Parameter | Values | Default | Description |
-|-----------|--------|---------|-------------|
-| `encoding` | `base58`, `base64` | `base58` | Encoding of the text body (ignored for raw bytes) |
-| `max_retries` | integer | none | Maximum retry attempts |
-| `forwarding_policies` | comma-separated pubkeys | none | Restrict forwarding to leaders allowed by these policies |
-| `response` | `signature`, `none` | `none` | What to return on success |
-
 ### Optional headers
 
-These are mainly useful for `application/octet-stream` clients that want to avoid putting per-request config in the URL.
+All per-request configuration for this endpoint is carried in headers.
 
 | Header | Values | Description |
 |--------|--------|-------------|
-| `x-jet-max-retries` | integer | Overrides `max_retries` |
-| `x-jet-forwarding-policies` | comma-separated pubkeys | Overrides `forwarding_policies` |
-
-If both query params and headers are present for the same field, the header value wins.
+| `x-jet-encoding` | `base58`, `base64` | Encoding of the text body. Ignored for raw bytes |
+| `x-jet-max-retries` | integer | Maximum retry attempts |
+| `x-jet-forwarding-policies` | comma-separated pubkeys | Restrict forwarding to leaders allowed by these policies |
+| `x-jet-response` | `signature`, `none` | What to return on success |
 
 ### Content types
 
@@ -92,24 +83,28 @@ curl -X POST /api/v1/transactions \
   --data-binary @transaction.bin
 
 # Raw bytes with retry/policy overrides in headers, return signature
-curl -X POST '/api/v1/transactions?response=signature' \
+curl -X POST /api/v1/transactions \
   -H 'Content-Type: application/octet-stream' \
   -H 'x-jet-max-retries: 3' \
   -H 'x-jet-forwarding-policies: 11111111111111111111111111111111' \
+  -H 'x-jet-response: signature' \
   --data-binary @transaction.bin
 
 # Base58 (default encoding), return signature
-curl -X POST '/api/v1/transactions?response=signature' \
+curl -X POST /api/v1/transactions \
+  -H 'x-jet-response: signature' \
   -d '<base58-encoded-tx>'
 
 # Base64 with signature
-curl -X POST '/api/v1/transactions?encoding=base64&response=signature' \
+curl -X POST /api/v1/transactions \
+  -H 'x-jet-encoding: base64' \
+  -H 'x-jet-response: signature' \
   -d '<base64-encoded-tx>'
 ```
 
 ### Response
 
-- **Success**: `200 OK` — empty body by default, or transaction signature if `?response=signature`
+- **Success**: `200 OK` — empty body by default, or transaction signature if `x-jet-response: signature`
 - **Error**: `400 Bad Request` — plain text error message
 - **Wrong method**: `405 Method Not Allowed`
 
