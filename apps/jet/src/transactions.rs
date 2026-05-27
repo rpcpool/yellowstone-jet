@@ -184,7 +184,7 @@ impl GrpcRootedTxReceiver {
 pub struct SendTransactionRequest {
     pub signature: Signature,
     pub transaction: VersionedTransaction,
-    pub wire_transaction: Vec<u8>,
+    pub wire_transaction: Bytes,
     pub max_retries: Option<usize>,
     pub policies: Vec<Pubkey>,
 }
@@ -772,7 +772,7 @@ impl TransactionFanout {
             let next_leaders = leader_schedule_service.leader_lookahead(fanout_count);
             let mut sent_mask = Vec::with_capacity(next_leaders.capacity());
             sent_mask.resize(next_leaders.len(), false);
-            let txn_wire = Bytes::from_owner(tx.wire_transaction);
+            let txn_wire = tx.wire_transaction.clone();
             for (i, dest) in next_leaders.iter().enumerate() {
                 if !policy_store_service.is_allowed(&tx.policies, dest)? {
                     // Report skip to Lewis

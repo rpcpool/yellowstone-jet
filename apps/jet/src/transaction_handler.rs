@@ -4,6 +4,7 @@ use {
         transactions::SendTransactionRequest,
     },
     anyhow::Result,
+    bytes::Bytes,
     jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE},
     solana_client::rpc_response::RpcVersionInfo,
     solana_rpc_client_api::config::RpcSendTransactionConfig,
@@ -107,7 +108,7 @@ impl TransactionHandler {
             .send(Arc::new(SendTransactionRequest {
                 signature,
                 transaction,
-                wire_transaction,
+                wire_transaction: wire_transaction.into(),
                 max_retries: config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
             }))
@@ -118,7 +119,7 @@ impl TransactionHandler {
 
     pub async fn handle_raw_transaction(
         &self,
-        wire_transaction: Vec<u8>,
+        wire_transaction: Bytes,
         config_with_forwarding_policies: JetRpcSendTransactionConfig,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         if wire_transaction.len() > PACKET_DATA_SIZE {
@@ -129,8 +130,12 @@ impl TransactionHandler {
             )));
         }
 
-        let transaction: VersionedTransaction = bincode::deserialize(&wire_transaction)
-            .map_err(|e| TransactionHandlerError::InvalidParams(format!("failed to deserialize transaction: {e}")))?;
+        let transaction: VersionedTransaction = bincode::deserialize(wire_transaction.as_ref())
+            .map_err(|e| {
+                TransactionHandlerError::InvalidParams(format!(
+                    "failed to deserialize transaction: {e}"
+                ))
+            })?;
 
         transaction
             .sanitize()
@@ -166,7 +171,7 @@ impl TransactionHandler {
             .send(Arc::new(SendTransactionRequest {
                 signature,
                 transaction,
-                wire_transaction,
+                wire_transaction: wire_transaction.into(),
                 max_retries: config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
             }))

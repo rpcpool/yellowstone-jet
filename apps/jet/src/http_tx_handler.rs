@@ -3,13 +3,16 @@ use {
         metrics::jet as metrics, payload::JetRpcSendTransactionConfig,
         transaction_handler::TransactionHandler,
     },
+    bytes::Bytes,
     futures::future::{BoxFuture, FutureExt},
-    hyper::{Request, Response, StatusCode},
+    hyper::{HeaderMap, Request, Response, StatusCode},
     jsonrpsee::core::http_helpers::Body,
+    solana_pubkey::Pubkey,
     solana_rpc_client_api::config::RpcSendTransactionConfig,
     solana_transaction_status_client_types::UiTransactionEncoding,
     std::{
         error::Error,
+        str::FromStr,
         task::{Context, Poll},
         time::Instant,
     },
@@ -18,6 +21,8 @@ use {
 };
 
 const API_TX_PATH: &str = "/api/v1/transactions";
+const X_JET_MAX_RETRIES: &str = "x-jet-max-retries";
+const X_JET_FORWARDING_POLICIES: &str = "x-jet-forwarding-policies";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResponseMode {
@@ -25,27 +30,30 @@ enum ResponseMode {
     Signature,
 }
 
-struct QueryParams {
+struct RequestParams {
     encoding: UiTransactionEncoding,
     encoding_explicit: bool,
     max_retries: Option<usize>,
+    forwarding_policies: Vec<Pubkey>,
     response: ResponseMode,
 }
 
-impl QueryParams {
-    fn parse(query: Option<&str>) -> Result<Self, &'static str> {
+impl RequestParams {
+    fn parse(query: Option<&str>, headers: &HeaderMap) -> Result<Self, &'static str> {
         let Some(query) = query else {
-            return Ok(Self {
+            let mut params = Self {
                 encoding: UiTransactionEncoding::Base58,
                 encoding_explicit: false,
                 max_retries: None,
+                forwarding_policies: vec![],
                 response: ResponseMode::None,
-            });
+            };
+            params.apply_headers(headers)?;
+            return Ok(params);
         };
 
         let mut encoding = UiTransactionEncoding::Base58;
         let mut encoding_explicit = false;
-        let mut max_retries = None;
         let mut response = ResponseMode::None;
 
         for (key, value) in form_urlencoded::parse(query.as_bytes()) {
@@ -61,9 +69,6 @@ impl QueryParams {
                         }
                     };
                 }
-                "max_retries" => {
-                    max_retries = value.parse().ok();
-                }
                 "response" => {
                     response = match value.as_ref() {
                         "signature" => ResponseMode::Signature,
@@ -77,12 +82,15 @@ impl QueryParams {
             }
         }
 
-        Ok(Self {
+        let mut params = Self {
             encoding,
             encoding_explicit,
-            max_retries,
+            max_retries: None,
+            forwarding_policies: vec![],
             response,
-        })
+        };
+        params.apply_headers(headers)?;
+        Ok(params)
     }
 
     const fn encoding_label(&self) -> &'static str {
@@ -92,6 +100,30 @@ impl QueryParams {
             _ => "unknown",
         }
     }
+
+    fn apply_headers(&mut self, headers: &HeaderMap) -> Result<(), &'static str> {
+        if let Some(value) = headers.get(X_JET_MAX_RETRIES) {
+            self.max_retries = value.to_str().ok().and_then(|v| v.parse().ok());
+        }
+
+        if let Some(value) = headers.get(X_JET_FORWARDING_POLICIES) {
+            let value = value
+                .to_str()
+                .map_err(|_| "invalid x-jet-forwarding-policies header: must be valid UTF-8")?;
+            self.forwarding_policies = parse_forwarding_policies(value);
+        }
+
+        Ok(())
+    }
+}
+
+fn parse_forwarding_policies(value: &str) -> Vec<Pubkey> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .filter_map(|v| Pubkey::from_str(v).ok())
+        .collect()
 }
 
 #[derive(Clone)]
@@ -119,7 +151,7 @@ impl HttpTransactionHandler {
             );
         }
 
-        let params = match QueryParams::parse(req.uri().query()) {
+        let params = match RequestParams::parse(req.uri().query(), req.headers()) {
             Ok(p) => p,
             Err(msg) => {
                 metrics::http_tx_requests_inc("error", "unknown");
@@ -170,10 +202,10 @@ impl HttpTransactionHandler {
                     max_retries: params.max_retries,
                     ..Default::default()
                 },
-                forwarding_policies: vec![],
+                forwarding_policies: params.forwarding_policies.clone(),
             };
             self.tx_handler
-                .handle_raw_transaction(body_bytes.to_vec(), config)
+                .handle_raw_transaction(Bytes::clone(&body_bytes), config)
                 .await
         } else {
             let data = match String::from_utf8(body_bytes.to_vec()) {
@@ -199,7 +231,7 @@ impl HttpTransactionHandler {
                     max_retries: params.max_retries,
                     ..Default::default()
                 },
-                forwarding_policies: vec![],
+                forwarding_policies: params.forwarding_policies.clone(),
             };
             self.tx_handler.handle_transaction(data, Some(config)).await
         };
@@ -289,78 +321,89 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::header::HeaderValue;
+
+    fn headers(values: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (key, value) in values {
+            headers.insert(*key, HeaderValue::from_str(value).unwrap());
+        }
+        headers
+    }
 
     #[test]
     fn test_parse_defaults() {
-        let p = QueryParams::parse(None).unwrap();
+        let p = RequestParams::parse(None, &HeaderMap::new()).unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
         assert_eq!(p.max_retries, None);
+        assert!(p.forwarding_policies.is_empty());
         assert_eq!(p.response, ResponseMode::None);
     }
 
     #[test]
     fn test_parse_encoding_base64() {
-        let p = QueryParams::parse(Some("encoding=base64")).unwrap();
+        let p = RequestParams::parse(Some("encoding=base64"), &HeaderMap::new()).unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base64);
     }
 
     #[test]
     fn test_parse_encoding_base58() {
-        let p = QueryParams::parse(Some("encoding=base58")).unwrap();
+        let p = RequestParams::parse(Some("encoding=base58"), &HeaderMap::new()).unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
     }
 
     #[test]
     fn test_parse_encoding_invalid() {
-        assert!(QueryParams::parse(Some("encoding=json")).is_err());
+        assert!(RequestParams::parse(Some("encoding=json"), &HeaderMap::new()).is_err());
     }
 
     #[test]
-    fn test_parse_multiple_params() {
-        let p = QueryParams::parse(Some("encoding=base58&max_retries=3")).unwrap();
+    fn test_parse_multiple_headers() {
+        let p = RequestParams::parse(
+            Some("encoding=base58"),
+            &headers(&[(X_JET_MAX_RETRIES, "3")]),
+        )
+        .unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
         assert_eq!(p.max_retries, Some(3));
     }
 
     #[test]
-    fn test_parse_unknown_params_ignored() {
-        let p = QueryParams::parse(Some("foo=bar&encoding=base58&baz=1")).unwrap();
-        assert_eq!(p.encoding, UiTransactionEncoding::Base58);
-    }
-
-    #[test]
     fn test_parse_max_retries_invalid_ignored() {
-        let p = QueryParams::parse(Some("max_retries=abc")).unwrap();
+        let p = RequestParams::parse(None, &headers(&[(X_JET_MAX_RETRIES, "abc")])).unwrap();
         assert_eq!(p.max_retries, None);
     }
 
     #[test]
     fn test_parse_response_signature() {
-        let p = QueryParams::parse(Some("response=signature")).unwrap();
+        let p = RequestParams::parse(Some("response=signature"), &HeaderMap::new()).unwrap();
         assert_eq!(p.response, ResponseMode::Signature);
     }
 
     #[test]
     fn test_parse_response_none() {
-        let p = QueryParams::parse(Some("response=none")).unwrap();
+        let p = RequestParams::parse(Some("response=none"), &HeaderMap::new()).unwrap();
         assert_eq!(p.response, ResponseMode::None);
     }
 
     #[test]
     fn test_parse_response_default_is_none() {
-        let p = QueryParams::parse(Some("encoding=base64")).unwrap();
+        let p = RequestParams::parse(Some("encoding=base64"), &HeaderMap::new()).unwrap();
         assert_eq!(p.response, ResponseMode::None);
     }
 
     #[test]
     fn test_parse_response_invalid() {
-        assert!(QueryParams::parse(Some("response=full")).is_err());
+        assert!(RequestParams::parse(Some("response=full"), &HeaderMap::new()).is_err());
     }
 
     #[test]
     fn test_parse_all_params() {
-        let p =
-            QueryParams::parse(Some("encoding=base58&max_retries=5&response=signature")).unwrap();
+        let p = RequestParams::parse(
+            Some("encoding=base58&response=signature"),
+            &headers(&[(X_JET_MAX_RETRIES, "5")]),
+        )
+        .unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
         assert_eq!(p.max_retries, Some(5));
         assert_eq!(p.response, ResponseMode::Signature);
@@ -368,13 +411,26 @@ mod tests {
 
     #[test]
     fn test_encoding_explicit_flag() {
-        let p = QueryParams::parse(Some("encoding=base64")).unwrap();
+        let p = RequestParams::parse(Some("encoding=base64"), &HeaderMap::new()).unwrap();
         assert!(p.encoding_explicit);
 
-        let p = QueryParams::parse(Some("max_retries=3")).unwrap();
+        let p = RequestParams::parse(None, &headers(&[(X_JET_MAX_RETRIES, "3")])).unwrap();
         assert!(!p.encoding_explicit);
 
-        let p = QueryParams::parse(None).unwrap();
+        let p = RequestParams::parse(None, &HeaderMap::new()).unwrap();
         assert!(!p.encoding_explicit);
+    }
+
+    #[test]
+    fn test_parse_forwarding_policies_header() {
+        let p = RequestParams::parse(
+            None,
+            &headers(&[(
+                X_JET_FORWARDING_POLICIES,
+                "11111111111111111111111111111111,invalid",
+            )]),
+        )
+        .unwrap();
+        assert_eq!(p.forwarding_policies.len(), 1);
     }
 }
