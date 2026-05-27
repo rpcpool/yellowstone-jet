@@ -21,10 +21,8 @@ use {
 };
 
 const API_TX_PATH: &str = "/api/v1/transactions";
-const X_JET_ENCODING: &str = "x-jet-encoding";
 const X_JET_MAX_RETRIES: &str = "x-jet-max-retries";
 const X_JET_FORWARDING_POLICIES: &str = "x-jet-forwarding-policies";
-const X_JET_RESPONSE: &str = "x-jet-response";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResponseMode {
@@ -41,13 +39,55 @@ struct RequestParams {
 }
 
 impl RequestParams {
-    fn parse(headers: &HeaderMap) -> Result<Self, &'static str> {
+    fn parse(query: Option<&str>, headers: &HeaderMap) -> Result<Self, &'static str> {
+        let Some(query) = query else {
+            let mut params = Self {
+                encoding: UiTransactionEncoding::Base58,
+                encoding_explicit: false,
+                max_retries: None,
+                forwarding_policies: vec![],
+                response: ResponseMode::None,
+            };
+            params.apply_headers(headers)?;
+            return Ok(params);
+        };
+
+        let mut encoding = UiTransactionEncoding::Base58;
+        let mut encoding_explicit = false;
+        let mut response = ResponseMode::None;
+
+        for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+            match key.as_ref() {
+                "encoding" => {
+                    encoding_explicit = true;
+                    encoding = match value.as_ref() {
+                        "base64" => UiTransactionEncoding::Base64,
+                        "base58" => UiTransactionEncoding::Base58,
+                        other => {
+                            warn!(encoding = other, "unsupported encoding in HTTP tx request");
+                            return Err("unsupported encoding: must be 'base64' or 'base58'");
+                        }
+                    };
+                }
+                "response" => {
+                    response = match value.as_ref() {
+                        "signature" => ResponseMode::Signature,
+                        "none" => ResponseMode::None,
+                        _ => {
+                            return Err("unsupported response mode: must be 'signature' or 'none'");
+                        }
+                    };
+                }
+                _ => {}
+            }
+        }
+
         let mut params = Self {
-            encoding: UiTransactionEncoding::Base58,
-            encoding_explicit: false,
+            encoding,
+            encoding_explicit,
             max_retries: None,
             forwarding_policies: vec![],
-            response: ResponseMode::None,
+            response,
         };
         params.apply_headers(headers)?;
         Ok(params)
@@ -62,19 +102,6 @@ impl RequestParams {
     }
 
     fn apply_headers(&mut self, headers: &HeaderMap) -> Result<(), &'static str> {
-        if let Some(value) = headers.get(X_JET_ENCODING) {
-            self.encoding_explicit = true;
-            self.encoding = match value.to_str().ok() {
-                Some("base64") => UiTransactionEncoding::Base64,
-                Some("base58") => UiTransactionEncoding::Base58,
-                Some(other) => {
-                    warn!(encoding = other, "unsupported encoding in HTTP tx request");
-                    return Err("unsupported encoding header: must be 'base64' or 'base58'");
-                }
-                None => return Err("invalid x-jet-encoding header: must be valid UTF-8"),
-            };
-        }
-
         if let Some(value) = headers.get(X_JET_MAX_RETRIES) {
             self.max_retries = value.to_str().ok().and_then(|v| v.parse().ok());
         }
@@ -84,17 +111,6 @@ impl RequestParams {
                 .to_str()
                 .map_err(|_| "invalid x-jet-forwarding-policies header: must be valid UTF-8")?;
             self.forwarding_policies = parse_forwarding_policies(value);
-        }
-
-        if let Some(value) = headers.get(X_JET_RESPONSE) {
-            self.response = match value.to_str().ok() {
-                Some("signature") => ResponseMode::Signature,
-                Some("none") => ResponseMode::None,
-                Some(_) => {
-                    return Err("unsupported response header: must be 'signature' or 'none'");
-                }
-                None => return Err("invalid x-jet-response header: must be valid UTF-8"),
-            };
         }
 
         Ok(())
@@ -135,7 +151,7 @@ impl HttpTransactionHandler {
             );
         }
 
-        let params = match RequestParams::parse(req.headers()) {
+        let params = match RequestParams::parse(req.uri().query(), req.headers()) {
             Ok(p) => p,
             Err(msg) => {
                 metrics::http_tx_requests_inc("error", "unknown");
@@ -317,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_parse_defaults() {
-        let p = RequestParams::parse(&HeaderMap::new()).unwrap();
+        let p = RequestParams::parse(None, &HeaderMap::new()).unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
         assert_eq!(p.max_retries, None);
         assert!(p.forwarding_policies.is_empty());
@@ -325,68 +341,68 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_encoding_header_base64() {
-        let p = RequestParams::parse(&headers(&[(X_JET_ENCODING, "base64")])).unwrap();
+    fn test_parse_encoding_base64() {
+        let p = RequestParams::parse(Some("encoding=base64"), &HeaderMap::new()).unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base64);
     }
 
     #[test]
-    fn test_parse_encoding_header_base58() {
-        let p = RequestParams::parse(&headers(&[(X_JET_ENCODING, "base58")])).unwrap();
+    fn test_parse_encoding_base58() {
+        let p = RequestParams::parse(Some("encoding=base58"), &HeaderMap::new()).unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
     }
 
     #[test]
-    fn test_parse_encoding_header_invalid() {
-        assert!(RequestParams::parse(&headers(&[(X_JET_ENCODING, "json")])).is_err());
+    fn test_parse_encoding_invalid() {
+        assert!(RequestParams::parse(Some("encoding=json"), &HeaderMap::new()).is_err());
     }
 
     #[test]
     fn test_parse_multiple_headers() {
-        let p = RequestParams::parse(&headers(&[
-            (X_JET_ENCODING, "base58"),
-            (X_JET_MAX_RETRIES, "3"),
-        ]))
+        let p = RequestParams::parse(
+            Some("encoding=base58"),
+            &headers(&[(X_JET_MAX_RETRIES, "3")]),
+        )
         .unwrap();
+        assert_eq!(p.encoding, UiTransactionEncoding::Base58);
         assert_eq!(p.max_retries, Some(3));
     }
 
     #[test]
     fn test_parse_max_retries_invalid_ignored() {
-        let p = RequestParams::parse(&headers(&[(X_JET_MAX_RETRIES, "abc")])).unwrap();
+        let p = RequestParams::parse(None, &headers(&[(X_JET_MAX_RETRIES, "abc")])).unwrap();
         assert_eq!(p.max_retries, None);
     }
 
     #[test]
     fn test_parse_response_signature() {
-        let p = RequestParams::parse(&headers(&[(X_JET_RESPONSE, "signature")])).unwrap();
+        let p = RequestParams::parse(Some("response=signature"), &HeaderMap::new()).unwrap();
         assert_eq!(p.response, ResponseMode::Signature);
     }
 
     #[test]
     fn test_parse_response_none() {
-        let p = RequestParams::parse(&headers(&[(X_JET_RESPONSE, "none")])).unwrap();
+        let p = RequestParams::parse(Some("response=none"), &HeaderMap::new()).unwrap();
         assert_eq!(p.response, ResponseMode::None);
     }
 
     #[test]
     fn test_parse_response_default_is_none() {
-        let p = RequestParams::parse(&headers(&[(X_JET_ENCODING, "base64")])).unwrap();
+        let p = RequestParams::parse(Some("encoding=base64"), &HeaderMap::new()).unwrap();
         assert_eq!(p.response, ResponseMode::None);
     }
 
     #[test]
     fn test_parse_response_invalid() {
-        assert!(RequestParams::parse(&headers(&[(X_JET_RESPONSE, "full")])).is_err());
+        assert!(RequestParams::parse(Some("response=full"), &HeaderMap::new()).is_err());
     }
 
     #[test]
-    fn test_parse_all_headers() {
-        let p = RequestParams::parse(&headers(&[
-            (X_JET_ENCODING, "base58"),
-            (X_JET_MAX_RETRIES, "5"),
-            (X_JET_RESPONSE, "signature"),
-        ]))
+    fn test_parse_all_params() {
+        let p = RequestParams::parse(
+            Some("encoding=base58&response=signature"),
+            &headers(&[(X_JET_MAX_RETRIES, "5")]),
+        )
         .unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
         assert_eq!(p.max_retries, Some(5));
@@ -395,22 +411,25 @@ mod tests {
 
     #[test]
     fn test_encoding_explicit_flag() {
-        let p = RequestParams::parse(&headers(&[(X_JET_ENCODING, "base64")])).unwrap();
+        let p = RequestParams::parse(Some("encoding=base64"), &HeaderMap::new()).unwrap();
         assert!(p.encoding_explicit);
 
-        let p = RequestParams::parse(&headers(&[(X_JET_MAX_RETRIES, "3")])).unwrap();
+        let p = RequestParams::parse(None, &headers(&[(X_JET_MAX_RETRIES, "3")])).unwrap();
         assert!(!p.encoding_explicit);
 
-        let p = RequestParams::parse(&HeaderMap::new()).unwrap();
+        let p = RequestParams::parse(None, &HeaderMap::new()).unwrap();
         assert!(!p.encoding_explicit);
     }
 
     #[test]
     fn test_parse_forwarding_policies_header() {
-        let p = RequestParams::parse(&headers(&[(
-            X_JET_FORWARDING_POLICIES,
-            "11111111111111111111111111111111,invalid",
-        )]))
+        let p = RequestParams::parse(
+            None,
+            &headers(&[(
+                X_JET_FORWARDING_POLICIES,
+                "11111111111111111111111111111111,invalid",
+            )]),
+        )
         .unwrap();
         assert_eq!(p.forwarding_policies.len(), 1);
     }
