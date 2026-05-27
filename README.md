@@ -62,7 +62,19 @@ POST /api/v1/transactions
 |-----------|--------|---------|-------------|
 | `encoding` | `base58`, `base64` | `base58` | Encoding of the text body (ignored for raw bytes) |
 | `max_retries` | integer | none | Maximum retry attempts |
+| `forwarding_policies` | comma-separated pubkeys | none | Restrict forwarding to leaders allowed by these policies |
 | `response` | `signature`, `none` | `none` | What to return on success |
+
+### Optional headers
+
+These are mainly useful for `application/octet-stream` clients that want to avoid putting per-request config in the URL.
+
+| Header | Values | Description |
+|--------|--------|-------------|
+| `x-jet-max-retries` | integer | Overrides `max_retries` |
+| `x-jet-forwarding-policies` | comma-separated pubkeys | Overrides `forwarding_policies` |
+
+If both query params and headers are present for the same field, the header value wins.
 
 ### Content types
 
@@ -77,6 +89,13 @@ POST /api/v1/transactions
 # Raw bytes — fastest, no encoding overhead
 curl -X POST /api/v1/transactions \
   -H 'Content-Type: application/octet-stream' \
+  --data-binary @transaction.bin
+
+# Raw bytes with retry/policy overrides in headers, return signature
+curl -X POST '/api/v1/transactions?response=signature' \
+  -H 'Content-Type: application/octet-stream' \
+  -H 'x-jet-max-retries: 3' \
+  -H 'x-jet-forwarding-policies: 11111111111111111111111111111111' \
   --data-binary @transaction.bin
 
 # Base58 (default encoding), return signature
