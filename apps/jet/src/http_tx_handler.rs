@@ -21,8 +21,7 @@ use {
 };
 
 const API_TX_PATH: &str = "/api/v1/transactions";
-const X_JET_MAX_RETRIES: &str = "x-jet-max-retries";
-const X_JET_FORWARDING_POLICIES: &str = "x-jet-forwarding-policies";
+const SOLANA_FORWARDING_POLICIES: &str = "solana-forwardingpolicies";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResponseMode {
@@ -54,6 +53,7 @@ impl RequestParams {
 
         let mut encoding = UiTransactionEncoding::Base58;
         let mut encoding_explicit = false;
+        let mut max_retries = None;
         let mut response = ResponseMode::None;
 
         for (key, value) in form_urlencoded::parse(query.as_bytes()) {
@@ -78,6 +78,11 @@ impl RequestParams {
                         }
                     };
                 }
+                "max_retries" => {
+                    if !value.is_empty() {
+                        max_retries = value.parse().ok();
+                    }
+                }
                 _ => {}
             }
         }
@@ -85,7 +90,7 @@ impl RequestParams {
         let mut params = Self {
             encoding,
             encoding_explicit,
-            max_retries: None,
+            max_retries,
             forwarding_policies: vec![],
             response,
         };
@@ -102,14 +107,10 @@ impl RequestParams {
     }
 
     fn apply_headers(&mut self, headers: &HeaderMap) -> Result<(), &'static str> {
-        if let Some(value) = headers.get(X_JET_MAX_RETRIES) {
-            self.max_retries = value.to_str().ok().and_then(|v| v.parse().ok());
-        }
-
-        if let Some(value) = headers.get(X_JET_FORWARDING_POLICIES) {
+        if let Some(value) = headers.get(SOLANA_FORWARDING_POLICIES) {
             let value = value
                 .to_str()
-                .map_err(|_| "invalid x-jet-forwarding-policies header: must be valid UTF-8")?;
+                .map_err(|_| "invalid solana-forwardingpolicies header: must be valid UTF-8")?;
             self.forwarding_policies = parse_forwarding_policies(value);
         }
 
@@ -360,8 +361,8 @@ mod tests {
     #[test]
     fn test_parse_multiple_headers() {
         let p = RequestParams::parse(
-            Some("encoding=base58"),
-            &headers(&[(X_JET_MAX_RETRIES, "3")]),
+            Some("encoding=base58&max_retries=3"),
+            &HeaderMap::new(),
         )
         .unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
@@ -370,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_parse_max_retries_invalid_ignored() {
-        let p = RequestParams::parse(None, &headers(&[(X_JET_MAX_RETRIES, "abc")])).unwrap();
+        let p = RequestParams::parse(Some("max_retries=abc"), &HeaderMap::new()).unwrap();
         assert_eq!(p.max_retries, None);
     }
 
@@ -400,8 +401,8 @@ mod tests {
     #[test]
     fn test_parse_all_params() {
         let p = RequestParams::parse(
-            Some("encoding=base58&response=signature"),
-            &headers(&[(X_JET_MAX_RETRIES, "5")]),
+            Some("encoding=base58&response=signature&max_retries=5"),
+            &HeaderMap::new(),
         )
         .unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
@@ -414,7 +415,7 @@ mod tests {
         let p = RequestParams::parse(Some("encoding=base64"), &HeaderMap::new()).unwrap();
         assert!(p.encoding_explicit);
 
-        let p = RequestParams::parse(None, &headers(&[(X_JET_MAX_RETRIES, "3")])).unwrap();
+        let p = RequestParams::parse(Some("max_retries=3"), &HeaderMap::new()).unwrap();
         assert!(!p.encoding_explicit);
 
         let p = RequestParams::parse(None, &HeaderMap::new()).unwrap();
@@ -426,7 +427,7 @@ mod tests {
         let p = RequestParams::parse(
             None,
             &headers(&[(
-                X_JET_FORWARDING_POLICIES,
+                SOLANA_FORWARDING_POLICIES,
                 "11111111111111111111111111111111,invalid",
             )]),
         )

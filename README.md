@@ -61,6 +61,7 @@ POST /api/v1/transactions
 | Parameter | Values | Default | Description |
 |-----------|--------|---------|-------------|
 | `encoding` | `base58`, `base64` | `base58` | Encoding of the text body (ignored for raw bytes) |
+| `max_retries` | integer | unset | Maximum retry attempts |
 | `response` | `signature`, `none` | `none` | What to return on success |
 
 ### Optional headers
@@ -69,8 +70,7 @@ These headers provide per-request overrides for retry and policy behavior.
 
 | Header | Values | Description |
 |--------|--------|-------------|
-| `x-jet-max-retries` | integer | Maximum retry attempts |
-| `x-jet-forwarding-policies` | comma-separated pubkeys | Restrict forwarding to leaders allowed by these policies |
+| `solana-forwardingpolicies` | comma-separated pubkeys | Restrict forwarding to leaders allowed by these policies |
 
 ### Content types
 
@@ -87,11 +87,10 @@ curl -X POST /api/v1/transactions \
   -H 'Content-Type: application/octet-stream' \
   --data-binary @transaction.bin
 
-# Raw bytes with retry/policy overrides in headers, return signature
-curl -X POST '/api/v1/transactions?response=signature' \
+# Raw bytes with retry in query and policy override in header, return signature
+curl -X POST '/api/v1/transactions?response=signature&max_retries=3' \
   -H 'Content-Type: application/octet-stream' \
-  -H 'x-jet-max-retries: 3' \
-  -H 'x-jet-forwarding-policies: 11111111111111111111111111111111' \
+  -H 'solana-forwardingpolicies: 11111111111111111111111111111111' \
   --data-binary @transaction.bin
 
 # Base58 (default encoding), return signature
