@@ -741,7 +741,7 @@ pub async fn create_yellowstone_tpu_sender_with_clients<CB>(
     config: YellowstoneTpuSenderConfig,
     initial_identity: Keypair,
     rpc_client: Arc<rpc_client::RpcClient>,
-    grpc_client: GeyserGrpcClient<impl yellowstone_grpc_client::Interceptor + Clone + 'static>,
+    grpc_client: GeyserGrpcClient<impl yellowstone_grpc_client::Interceptor + Clone + Send + 'static>,
     callback: Option<CB>,
 ) -> Result<NewYellowstoneTpuSender, CreateTpuSenderError>
 where
