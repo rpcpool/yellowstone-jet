@@ -4,7 +4,7 @@ use {
     std::{collections::HashMap, panic, sync::Arc},
     tokio::task::JoinHandle,
     tokio_stream::StreamExt,
-    yellowstone_grpc_client::{GeyserGrpcClientResult, Interceptor},
+    yellowstone_grpc_client::GeyserGrpcClientResult,
     yellowstone_grpc_proto::{
         geyser::{
             SubscribeRequest, SubscribeRequestFilterSlots, SubscribeUpdate,
@@ -94,11 +94,9 @@ where
 ///
 /// Creates an [`AtomicSlotTracker`] that tracks the latest slot from Yellowstone Geyser.
 ///
-pub async fn atomic_slot_tracker<I>(
-    mut geyser_client: yellowstone_grpc_client::GeyserGrpcClient<I>,
+pub async fn atomic_slot_tracker(
+    mut geyser_client: yellowstone_grpc_client::GeyserGrpcClient,
 ) -> GeyserGrpcClientResult<Option<YellowstoneSlotTrackerOk>>
-where
-    I: Interceptor + 'static,
 {
     let subscribe_request = get_yellowstone_slot_tracker_subscribe_request();
     let mut stream = geyser_client.subscribe_once(subscribe_request).await?;

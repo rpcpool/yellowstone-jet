@@ -705,7 +705,7 @@ impl GeyserSubscriber {
         }
     }
 
-    async fn validate_version(geyser: &mut GeyserGrpcClient<impl Interceptor>) -> Result<()> {
+    async fn validate_version(geyser: &mut GeyserGrpcClient) -> Result<()> {
         #[derive(Debug, Deserialize)]
         struct GrpcVersionOld {
             version: String,

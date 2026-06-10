@@ -1,11 +1,12 @@
 [package]
 name = "yellowstone-jet"
-version = "14.9.5"
+version = "15.0.0"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
+rust-version.workspace = true
 repository.workspace = true
 publish = false
 
@@ -56,6 +57,7 @@ tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
+wincode = { workspace = true }
 
 # Agave Monorepo
 solana-bincode = { workspace = true }
@@ -88,7 +90,7 @@ solana-quic-definitions = { workspace = true }
 solana-sdk-ids = { workspace = true }
 solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
-solana-transaction = { workspace = true }
+solana-transaction = { workspace = true, features = ["wincode", "serde"] }
 solana-transaction-error = { workspace = true }
 
 # Yellowstone

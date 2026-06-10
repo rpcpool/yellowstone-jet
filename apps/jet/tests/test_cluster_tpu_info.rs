@@ -35,6 +35,7 @@ const fn create_contact_info(pubkey: String) -> RpcContactInfo {
         version: None,
         feature_set: None,
         shred_version: None,
+        client_id: None
     }
 }
 

@@ -15,6 +15,7 @@ homepage = "https://triton.one"
 repository = "https://github.com/rpcpool/yellowstone-jet"
 license = "Apache-2.0"
 keywords = ["yellowstone", "solana", "rpc", "jet", "tpu", "triton"]
+rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
@@ -70,46 +71,47 @@ tracing = "0.1.40"
 tracing-subscriber = "0.3.1"
 uuid = "1.11.0"
 vergen = "9.0.1"
+wincode = "0.4.4"
 
 # Agave Monorepo
 solana-bincode = "3.0.0"
-solana-client = "3.0.0"
-solana-net-utils = "3.0.0"
-solana-rpc-client = "3.0.0"
-solana-rpc-client-api = "3.0.0"
-solana-streamer = "3.0.6"
+solana-client = "4.0.0"
+solana-net-utils = "4.0.0"
+solana-rpc-client = "4.0.0"
+solana-rpc-client-api = "4.0.0"
+solana-streamer = "4.0.0"
 solana-system-interface = "3.0.0"
-solana-tls-utils = "3.0.0"
-solana-transaction-status-client-types = "3.0.0"
+solana-tls-utils = "4.0.0"
+solana-transaction-status-client-types = "4.0.0"
 solana-version = "3.0.0"
 
 # Solana SDK
-solana-account = "3.0.0"
+solana-account = "4.0.0"
 solana-clock = "3.0.0"
 solana-commitment-config = "3.0.0"
 solana-compute-budget-interface = "3.0.0"
 solana-epoch-info = "3.0.0"
 solana-epoch-schedule = "3.0.0"
-solana-hash = "3.0.0"
+solana-hash = "4.0.0"
 solana-instruction = "3.0.0"
 solana-keypair = "3.0.0"
-solana-message = "3.0.0"
+solana-message = "4.0.0"
 solana-native-token = "3.0.0"
 solana-nonce = "3.0.0"
-solana-packet = "3.0.0"
-solana-program = "3.0.0"
-solana-pubkey = "3.0.0"
+solana-packet = "4.0.0"
+solana-program = "4.0.0"
+solana-pubkey = "4.0.0"
 solana-quic-definitions = "3.0.0"
 solana-sdk-ids = "3.0.0"
 solana-signature = "3.0.0"
 solana-signer = "3.0.0"
-solana-transaction = "3.0.0"
+solana-transaction = "4.0.0"
 solana-transaction-error = "3.0.0"
 
 # Yellowstone
-yellowstone-grpc-client = "10.2.0"
-yellowstone-grpc-proto = "10.1.1"
-yellowstone-jet-tpu-client = { path = "crates/tpu-client", version = "0.3.1" }
+yellowstone-grpc-client = "13.1.0"
+yellowstone-grpc-proto = "12.4.0"
+yellowstone-jet-tpu-client = { path = "crates/tpu-client", version = "0.4.0" }
 yellowstone-shield-store = "0.9.1"
 
 [workspace.lints.clippy]

@@ -1,11 +1,12 @@
 [package]
 name = "yellowstone-jet-tpu-client"
-version = "0.3.1"
+version = "0.4.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 description = "Triton One Yellowstone Jet TPU Client"
 keywords = ["yellowstone", "solana", "rpc", "tpu", "quic"]
 readme = "README.md"
@@ -40,6 +41,7 @@ examples = [
     "dep:solana-transaction",
     "dep:tracing-subscriber",
     "yellowstone-grpc",
+    "dep:wincode"
 ]
 yellowstone-grpc = [
     "dep:solana-rpc-client",
@@ -83,6 +85,7 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"], optional = true }
+wincode = { workspace = true, optional = true }
 
 # Agave Monorepo
 solana-client = { workspace = true }
@@ -107,7 +110,7 @@ solana-packet = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
-solana-transaction = { workspace = true, optional = true }
+solana-transaction = { workspace = true, optional = true, features = ["wincode"] }
 solana-transaction-error = { workspace = true }
 
 # Yellowstone

@@ -58,7 +58,7 @@ async fn send_lamports(
     .expect("try_new");
     let signature = transaction.signatures[0];
     tracing::info!("generate transaction {signature} with send lamports {lamports}");
-    let bincoded_txn = bincode::serialize(&transaction).expect("bincode::serialize");
+    let bincoded_txn = wincode::serialize(&transaction).expect("bincode::serialize");
 
     // Send the transaction to the current leader
     tpu_sender

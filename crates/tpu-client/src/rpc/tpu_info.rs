@@ -333,6 +333,7 @@ mod tests {
             version: None,
             feature_set: None,
             shred_version: None,
+            client_id: None,
         };
 
         let info3 = RpcContactInfo {
@@ -350,6 +351,7 @@ mod tests {
             version: None,
             feature_set: None,
             shred_version: None,
+            client_id: None,
         };
 
         let mut info1_prime = info1.clone();

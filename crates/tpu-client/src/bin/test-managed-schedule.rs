@@ -35,7 +35,7 @@ pub fn setup_tracing() {
 async fn build_geyser_client(
     endpoint: String,
     x_token: Option<String>,
-) -> GeyserGrpcClient<impl Interceptor + Clone + 'static> {
+) -> GeyserGrpcClient {
     GeyserGrpcBuilder::from_shared(endpoint)
         .expect("from_shared")
         .x_token(x_token)
