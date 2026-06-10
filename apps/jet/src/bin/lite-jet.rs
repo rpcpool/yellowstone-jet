@@ -431,6 +431,7 @@ pub async fn tpu_sender_loop(
             wire_transaction,
             max_retries: _,
             policies,
+            durable_nonce: _,
         } = request;
 
         let blocklist = shield.as_ref().map(|shield| ShieldBlockList {

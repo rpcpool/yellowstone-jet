@@ -1,6 +1,7 @@
 use {
     crate::{
-        payload::JetRpcSendTransactionConfig, solana::decode_and_deserialize,
+        payload::JetRpcSendTransactionConfig,
+        solana::{decode_and_deserialize, get_durable_nonce},
         transactions::SendTransactionRequest,
     },
     anyhow::Result,
@@ -95,6 +96,7 @@ impl TransactionHandler {
             .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         let signature = transaction.signatures[0];
+        let durable_nonce = get_durable_nonce(&transaction);
         let wire_transaction = bincode::serialize(&transaction)?;
         if wire_transaction.len() > PACKET_DATA_SIZE {
             return Err(TransactionHandlerError::InvalidTransaction(format!(
@@ -111,6 +113,7 @@ impl TransactionHandler {
                 wire_transaction: wire_transaction.into(),
                 max_retries: config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
+                durable_nonce,
             }))
             .expect("transaction sink closed");
 
@@ -142,6 +145,7 @@ impl TransactionHandler {
             .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         let signature = transaction.signatures[0];
+        let durable_nonce = get_durable_nonce(&transaction);
 
         self.transaction_sink
             .send(Arc::new(SendTransactionRequest {
@@ -150,6 +154,7 @@ impl TransactionHandler {
                 wire_transaction,
                 max_retries: config_with_forwarding_policies.config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
+                durable_nonce,
             }))
             .expect("transaction sink closed");
 
@@ -166,6 +171,7 @@ impl TransactionHandler {
 
         let (wire_transaction, transaction) = self.prepare_transaction(data, config).await?;
         let signature = transaction.signatures[0];
+        let durable_nonce = get_durable_nonce(&transaction);
 
         self.transaction_sink
             .send(Arc::new(SendTransactionRequest {
@@ -174,6 +180,7 @@ impl TransactionHandler {
                 wire_transaction: wire_transaction.into(),
                 max_retries: config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
+                durable_nonce,
             }))
             .expect("transaction sink closed");
 

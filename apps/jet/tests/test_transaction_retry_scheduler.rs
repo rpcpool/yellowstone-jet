@@ -21,6 +21,7 @@ use {
             TransactionRetrySchedulerDlqEvent, UpcomingLeaderSchedule,
             testkit::mock_rooted_tx_channel,
         },
+        util::CommitmentLevel,
     },
 };
 
@@ -47,9 +48,10 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
     SendTransactionRequest {
         max_retries: Some(max_resent),
         signature: tx.signatures[0],
-        wire_transaction,
+        wire_transaction: wire_transaction.into(),
         transaction: tx,
         policies: vec![],
+        durable_nonce: None,
     }
 }
 
@@ -161,4 +163,114 @@ async fn it_should_not_attempt_invalid_transaction() {
         dlq_ev,
         TransactionRetrySchedulerDlqEvent::ReachedMaxProcessingAge(_)
     ));
+}
+
+#[tokio::test]
+async fn it_should_retry_durable_nonce_transaction_without_blockhash_validation() {
+    let blockheight_service = MockBlockhashQueue::new();
+    let config = TransactionRetrySchedulerConfig {
+        max_retry: 10,
+        retry_rate: Duration::from_millis(10),
+        transaction_max_processing_age: 0,
+        ..Default::default()
+    };
+
+    let (_rooted_tx, rooted_rx) = mock_rooted_tx_channel();
+    let (dlq_tx, mut dlq_rx) = mpsc::unbounded_channel();
+    let TransactionRetryScheduler { sink, mut source } = TransactionRetryScheduler::new(
+        config,
+        Arc::new(blockheight_service.clone()),
+        Box::new(rooted_rx),
+        Some(dlq_tx),
+    );
+
+    let blockhash1 = Hash::new_unique();
+    let blockhash2 = Hash::new_unique();
+    blockheight_service.increase_block_height(blockhash1);
+    blockheight_service.increase_block_height(blockhash2);
+
+    let mut tx = create_send_transaction_request(blockhash1, 3);
+    tx.durable_nonce = Some(Pubkey::new_unique());
+    let tx = Arc::new(tx);
+    sink.send(Arc::clone(&tx)).unwrap();
+
+    for _ in 0..3 {
+        let request = source.recv().await.expect("Failed to receive request");
+        assert_eq!(request.signature, tx.signature);
+        assert_eq!(request.wire_transaction, tx.wire_transaction);
+    }
+
+    source.try_recv().expect_err("Expected no more requests");
+    let dlq_ev = dlq_rx
+        .recv()
+        .await
+        .expect("Expected transaction in dead letter queue");
+    assert!(matches!(
+        dlq_ev,
+        TransactionRetrySchedulerDlqEvent::ReachedMaxRetries(_)
+    ));
+}
+
+#[tokio::test]
+async fn it_should_skip_landed_durable_nonce_transaction() {
+    let blockheight_service = MockBlockhashQueue::new();
+    let config = TransactionRetrySchedulerConfig {
+        max_retry: 10,
+        retry_rate: Duration::from_millis(10),
+        transaction_max_processing_age: 0,
+        ..Default::default()
+    };
+
+    let (rooted_tx, rooted_rx) = mock_rooted_tx_channel();
+    let (dlq_tx, mut dlq_rx) = mpsc::unbounded_channel();
+    let TransactionRetryScheduler { sink, mut source } = TransactionRetryScheduler::new(
+        config,
+        Arc::new(blockheight_service),
+        Box::new(rooted_rx),
+        Some(dlq_tx),
+    );
+
+    let mut tx = create_send_transaction_request(Hash::new_unique(), 3);
+    tx.durable_nonce = Some(Pubkey::new_unique());
+    rooted_tx
+        .send(tx.signature, CommitmentLevel::Confirmed)
+        .await;
+    sink.send(Arc::new(tx)).unwrap();
+
+    let dlq_ev = tokio::time::timeout(Duration::from_secs(1), dlq_rx.recv())
+        .await
+        .expect("timed out waiting for already-landed event")
+        .expect("dead letter queue closed");
+    assert!(matches!(
+        dlq_ev,
+        TransactionRetrySchedulerDlqEvent::AlreadyLanded(_)
+    ));
+    source
+        .try_recv()
+        .expect_err("Expected no forwarded request");
+}
+
+#[tokio::test]
+async fn no_retry_scheduler_should_forward_durable_nonce_without_blockhash_validation() {
+    let blockheight_service = MockBlockhashQueue::new();
+    for _ in 0..200 {
+        blockheight_service.increase_block_height(Hash::new_unique());
+    }
+
+    let yellowstone_jet::transactions::TransactionNoRetryScheduler { sink, mut source } =
+        yellowstone_jet::transactions::TransactionNoRetryScheduler::new(Arc::new(
+            blockheight_service,
+        ));
+
+    let mut tx = create_send_transaction_request(Hash::new_unique(), 0);
+    tx.durable_nonce = Some(Pubkey::new_unique());
+    let tx = Arc::new(tx);
+    sink.send(Arc::clone(&tx)).unwrap();
+
+    let request = tokio::time::timeout(Duration::from_secs(1), source.recv())
+        .await
+        .expect("timed out waiting for durable nonce transaction")
+        .expect("scheduler source closed");
+    assert_eq!(request.signature, tx.signature);
+    assert_eq!(request.wire_transaction, tx.wire_transaction);
 }
