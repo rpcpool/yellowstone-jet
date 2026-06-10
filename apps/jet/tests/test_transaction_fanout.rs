@@ -46,7 +46,6 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
         wire_transaction: wire_transaction.into(),
         transaction: tx,
         policies: vec![],
-        durable_nonce: None,
     }
 }
 

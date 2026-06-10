@@ -6,7 +6,7 @@ use {
     solana_message::{VersionedMessage, v0},
     solana_pubkey::Pubkey,
     solana_signer::Signer,
-    solana_system_interface::instruction::transfer,
+    solana_system_interface::instruction::{advance_nonce_account, transfer},
     solana_transaction::versioned::VersionedTransaction,
     std::{
         sync::{Arc, RwLock as StdRwLock},
@@ -51,7 +51,47 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
         wire_transaction: wire_transaction.into(),
         transaction: tx,
         policies: vec![],
-        durable_nonce: None,
+    }
+}
+
+pub fn create_durable_nonce_txn_request(
+    stored_nonce: Hash,
+    max_resent: usize,
+    nonce_address: Pubkey,
+) -> SendTransactionRequest {
+    let fake_wallet_keypair1 = Keypair::new();
+    let fake_wallet_keypair2 = Keypair::new();
+    let instructions = vec![
+        advance_nonce_account(&nonce_address, &fake_wallet_keypair1.pubkey()),
+        transfer(
+            &fake_wallet_keypair1.pubkey(),
+            &fake_wallet_keypair2.pubkey(),
+            10,
+        ),
+    ];
+
+    let tx = VersionedTransaction::try_new(
+        VersionedMessage::V0(
+            v0::Message::try_compile(
+                &fake_wallet_keypair1.pubkey(),
+                &instructions,
+                &[],
+                stored_nonce,
+            )
+            .expect("try compile"),
+        ),
+        &[&fake_wallet_keypair1],
+    )
+    .expect("try new");
+
+    let wire_transaction = bincode::serialize(&tx).expect("Error getting wire_transaction");
+
+    SendTransactionRequest {
+        max_retries: Some(max_resent),
+        signature: tx.signatures[0],
+        wire_transaction: wire_transaction.into(),
+        transaction: tx,
+        policies: vec![],
     }
 }
 
@@ -189,8 +229,8 @@ async fn it_should_retry_durable_nonce_transaction_without_blockhash_validation(
     blockheight_service.increase_block_height(blockhash1);
     blockheight_service.increase_block_height(blockhash2);
 
-    let mut tx = create_send_transaction_request(blockhash1, 3);
-    tx.durable_nonce = Some(Pubkey::new_unique());
+    let durable_nonce_account = Pubkey::new_unique();
+    let tx = create_durable_nonce_txn_request(blockhash1, 3, durable_nonce_account);
     let tx = Arc::new(tx);
     sink.send(Arc::clone(&tx)).unwrap();
 
@@ -230,8 +270,8 @@ async fn it_should_skip_landed_durable_nonce_transaction() {
         Some(dlq_tx),
     );
 
-    let mut tx = create_send_transaction_request(Hash::new_unique(), 3);
-    tx.durable_nonce = Some(Pubkey::new_unique());
+    let durable_nonce_account = Pubkey::new_unique();
+    let tx = create_durable_nonce_txn_request(Hash::new_unique(), 3, durable_nonce_account);
     rooted_tx
         .send(tx.signature, CommitmentLevel::Confirmed)
         .await;
@@ -262,8 +302,8 @@ async fn no_retry_scheduler_should_forward_durable_nonce_without_blockhash_valid
             blockheight_service,
         ));
 
-    let mut tx = create_send_transaction_request(Hash::new_unique(), 0);
-    tx.durable_nonce = Some(Pubkey::new_unique());
+    let durable_nonce_account = Pubkey::new_unique();
+    let tx = create_durable_nonce_txn_request(Hash::new_unique(), 0, durable_nonce_account);
     let tx = Arc::new(tx);
     sink.send(Arc::clone(&tx)).unwrap();
 

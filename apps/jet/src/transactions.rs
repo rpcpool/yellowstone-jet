@@ -6,6 +6,7 @@ use {
         grpc_lewis::LewisEventHandler,
         metrics::jet as metrics,
         rooted_transaction_state::{RootedTxEffect, RootedTxEvent, RootedTxStateMachine},
+        solana::get_durable_nonce,
         util::CommitmentLevel,
     },
     bytes::Bytes,
@@ -187,7 +188,6 @@ pub struct SendTransactionRequest {
     pub wire_transaction: Bytes,
     pub max_retries: Option<usize>,
     pub policies: Vec<Pubkey>,
-    pub durable_nonce: Option<Pubkey>,
 }
 
 struct RetryableTx {
@@ -333,7 +333,8 @@ impl TransactionRetrySchedulerRuntime {
             .get_block_height_for_commitment(CommitmentLevel::Confirmed)
             .unwrap_or(0);
         self.last_known_block_height = current_block_height;
-        let last_valid_block_height = if let Some(durable_nonce) = tx.durable_nonce {
+        let durable_nonce = get_durable_nonce(&tx.transaction);
+        let last_valid_block_height = if let Some(durable_nonce) = durable_nonce {
             tracing::trace!(
                 %signature,
                 %durable_nonce,
@@ -465,7 +466,8 @@ impl TransactionNoRetryScheduler {
             };
             // Make sure to not double count this metric elsewhere.
             metrics::sts_received_inc();
-            if let Some(durable_nonce) = tx.durable_nonce {
+            let durable_nonce = get_durable_nonce(&tx.transaction);
+            if let Some(durable_nonce) = durable_nonce {
                 let signature = tx.signature;
                 tracing::trace!(
                     %signature,
