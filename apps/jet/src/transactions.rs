@@ -6,6 +6,7 @@ use {
         grpc_lewis::LewisEventHandler,
         metrics::jet as metrics,
         rooted_transaction_state::{RootedTxEffect, RootedTxEvent, RootedTxStateMachine},
+        solana::get_durable_nonce,
         util::CommitmentLevel,
     },
     bytes::Bytes,
@@ -325,19 +326,28 @@ impl TransactionRetrySchedulerRuntime {
         // Make sure to not double count this metric elsewhere.
         metrics::sts_received_inc();
         let max_retries = tx.max_retries.unwrap_or(0).min(self.max_retry);
+        let signature = tx.signature;
 
         let current_block_height = self
             .block_height_service
             .get_block_height_for_commitment(CommitmentLevel::Confirmed)
             .unwrap_or(0);
         self.last_known_block_height = current_block_height;
-        let last_valid_block_height = self
-            .block_height_service
-            .get_block_height(tx.transaction.message.recent_blockhash())
-            .map(|block_height| block_height + self.max_processing_age)
-            .unwrap_or(current_block_height + self.max_processing_age);
+        let durable_nonce = get_durable_nonce(&tx.transaction);
+        let last_valid_block_height = if let Some(durable_nonce) = durable_nonce {
+            tracing::trace!(
+                %signature,
+                %durable_nonce,
+                "durable nonce transaction skipping blockhash validation"
+            );
+            current_block_height + self.max_processing_age
+        } else {
+            self.block_height_service
+                .get_block_height(tx.transaction.message.recent_blockhash())
+                .map(|block_height| block_height + self.max_processing_age)
+                .unwrap_or(current_block_height + self.max_processing_age)
+        };
 
-        let signature = tx.signature;
         tracing::trace!(
             "received new transaction {signature}, max_retries: {max_retries}, last_valid_block_height: {last_valid_block_height}, current_block_height: {current_block_height}"
         );
@@ -456,6 +466,21 @@ impl TransactionNoRetryScheduler {
             };
             // Make sure to not double count this metric elsewhere.
             metrics::sts_received_inc();
+            let durable_nonce = get_durable_nonce(&tx.transaction);
+            if let Some(durable_nonce) = durable_nonce {
+                let signature = tx.signature;
+                tracing::trace!(
+                    %signature,
+                    %durable_nonce,
+                    "forwarding durable nonce transaction without blockhash validation"
+                );
+                if response_sink.send(tx).is_err() {
+                    tracing::trace!("response sink is closed, stopping transaction forwarding");
+                    break;
+                }
+                continue;
+            }
+
             let current_block_height = blockheight_service
                 .get_block_height_for_commitment(CommitmentLevel::Confirmed)
                 .unwrap_or(0);

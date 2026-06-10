@@ -43,7 +43,7 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
     SendTransactionRequest {
         max_retries: Some(max_resent),
         signature: tx.signatures[0],
-        wire_transaction,
+        wire_transaction: wire_transaction.into(),
         transaction: tx,
         policies: vec![],
     }

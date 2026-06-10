@@ -124,3 +124,37 @@ pub fn get_durable_nonce(tx: &VersionedTransaction) -> Option<Pubkey> {
         })
         .cloned()
 }
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::get_durable_nonce,
+        solana_hash::Hash,
+        solana_keypair::Keypair,
+        solana_message::{VersionedMessage, v0},
+        solana_signer::Signer,
+        solana_system_interface::instruction::{advance_nonce_account, transfer},
+        solana_transaction::versioned::VersionedTransaction,
+    };
+
+    #[test]
+    fn get_durable_nonce_returns_nonce_account() {
+        let payer = Keypair::new();
+        let nonce_account = Keypair::new();
+        let receiver = Keypair::new();
+        let instructions = [
+            advance_nonce_account(&nonce_account.pubkey(), &payer.pubkey()),
+            transfer(&payer.pubkey(), &receiver.pubkey(), 1),
+        ];
+        let tx = VersionedTransaction::try_new(
+            VersionedMessage::V0(
+                v0::Message::try_compile(&payer.pubkey(), &instructions, &[], Hash::new_unique())
+                    .expect("try compile"),
+            ),
+            &[&payer],
+        )
+        .expect("try new");
+
+        assert_eq!(get_durable_nonce(&tx), Some(nonce_account.pubkey()));
+    }
+}

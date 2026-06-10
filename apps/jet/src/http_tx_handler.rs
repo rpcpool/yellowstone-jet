@@ -321,8 +321,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyper::header::HeaderValue;
+    use {super::*, hyper::header::HeaderValue};
 
     fn headers(values: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -360,11 +359,8 @@ mod tests {
 
     #[test]
     fn test_parse_multiple_headers() {
-        let p = RequestParams::parse(
-            Some("encoding=base58&max_retries=3"),
-            &HeaderMap::new(),
-        )
-        .unwrap();
+        let p =
+            RequestParams::parse(Some("encoding=base58&max_retries=3"), &HeaderMap::new()).unwrap();
         assert_eq!(p.encoding, UiTransactionEncoding::Base58);
         assert_eq!(p.max_retries, Some(3));
     }
