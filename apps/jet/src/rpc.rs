@@ -299,10 +299,12 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            metrics, payload::JetRpcSendTransactionConfig, rpc::invalid_params,
-            solana::decode_and_deserialize, transaction_handler::TransactionHandler,
+            http_tx_handler::SimulationPerformed, metrics, payload::JetRpcSendTransactionConfig,
+            rpc::invalid_params, solana::decode_and_deserialize,
+            transaction_handler::TransactionHandler,
         },
         jsonrpsee::{
+            Extensions,
             core::{RpcResult, async_trait},
             proc_macros::rpc,
         },
@@ -317,7 +319,7 @@ pub mod rpc_solana_like {
         #[method(name = "getVersion")]
         fn get_version(&self) -> RpcResult<RpcVersionInfo>;
 
-        #[method(name = "sendTransaction")]
+        #[method(name = "sendTransaction", with_extensions)]
         async fn send_transaction(
             &self,
             data: String,
@@ -360,6 +362,15 @@ pub mod rpc_solana_like {
         }
     }
 
+    fn apply_simulation_performed(
+        config_with_policies: &mut JetRpcSendTransactionConfig,
+        extensions: &Extensions,
+    ) {
+        if extensions.get::<SimulationPerformed>().is_some() {
+            config_with_policies.config.skip_preflight = true;
+        }
+    }
+
     #[async_trait]
     impl RpcServer for RpcServerImpl {
         fn get_version(&self) -> RpcResult<RpcVersionInfo> {
@@ -369,11 +380,13 @@ pub mod rpc_solana_like {
 
         async fn send_transaction(
             &self,
+            extensions: &Extensions,
             data: String,
             config_with_forwarding_policies: Option<JetRpcSendTransactionConfig>,
         ) -> RpcResult<String /* Signature */> {
             debug!("send_transaction rpc request received");
-            let config_with_policies = config_with_forwarding_policies.unwrap_or_default();
+            let mut config_with_policies = config_with_forwarding_policies.unwrap_or_default();
+            apply_simulation_performed(&mut config_with_policies, extensions);
             let config = config_with_policies.config;
 
             let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
@@ -387,6 +400,44 @@ pub mod rpc_solana_like {
 
             self.handle_internal_transaction(transaction, config_with_policies)
                 .await
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use {super::*, solana_rpc_client_api::config::RpcSendTransactionConfig};
+
+        #[test]
+        fn simulation_performed_extension_allows_preflight_requested_config() {
+            let mut extensions = Extensions::new();
+            extensions.insert(SimulationPerformed);
+            let mut config = JetRpcSendTransactionConfig {
+                config: RpcSendTransactionConfig {
+                    skip_preflight: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            apply_simulation_performed(&mut config, &extensions);
+
+            assert!(config.config.skip_preflight);
+        }
+
+        #[test]
+        fn missing_simulation_performed_extension_preserves_config() {
+            let extensions = Extensions::new();
+            let mut config = JetRpcSendTransactionConfig {
+                config: RpcSendTransactionConfig {
+                    skip_preflight: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            apply_simulation_performed(&mut config, &extensions);
+
+            assert!(!config.config.skip_preflight);
         }
     }
 }

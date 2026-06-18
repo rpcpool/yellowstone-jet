@@ -21,7 +21,11 @@ use {
 };
 
 const API_TX_PATH: &str = "/api/v1/transactions";
+pub const SIMULATION_PERFORMED_HEADER: &str = "simulation-performed";
 const SOLANA_FORWARDING_POLICIES: &str = "solana-forwardingpolicies";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimulationPerformed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResponseMode {
@@ -125,6 +129,13 @@ fn parse_forwarding_policies(value: &str) -> Vec<Pubkey> {
         .filter(|v| !v.is_empty())
         .filter_map(|v| Pubkey::from_str(v).ok())
         .collect()
+}
+
+fn simulation_performed(headers: &HeaderMap) -> bool {
+    headers
+        .get(SIMULATION_PERFORMED_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
 }
 
 #[derive(Clone)]
@@ -313,6 +324,10 @@ where
             let handler = self.handler.clone();
             async move { Ok(handler.handle_request(request).await) }.boxed()
         } else {
+            let mut request = request;
+            if simulation_performed(request.headers()) {
+                request.extensions_mut().insert(SimulationPerformed);
+            }
             let fut = self.service.call(request);
             async move { fut.await.map_err(Into::into) }.boxed()
         }
@@ -429,5 +444,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.forwarding_policies.len(), 1);
+    }
+
+    #[test]
+    fn test_simulation_performed_header() {
+        assert!(!simulation_performed(&HeaderMap::new()));
+        assert!(!simulation_performed(&headers(&[(
+            SIMULATION_PERFORMED_HEADER,
+            "false",
+        )])));
+        assert!(simulation_performed(&headers(&[(
+            SIMULATION_PERFORMED_HEADER,
+            "true",
+        )])));
+        assert!(simulation_performed(&headers(&[(
+            SIMULATION_PERFORMED_HEADER,
+            "TRUE",
+        )])));
+        assert!(simulation_performed(&headers(&[(
+            SIMULATION_PERFORMED_HEADER,
+            "1",
+        )])));
     }
 }
