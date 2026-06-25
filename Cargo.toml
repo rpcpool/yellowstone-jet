@@ -106,6 +106,7 @@ solana-signature = "3.0.0"
 solana-signer = "3.0.0"
 solana-transaction = "4.0.0"
 solana-transaction-error = "3.0.0"
+solana-leader-schedule = "4.0.0"
 
 # Yellowstone
 yellowstone-grpc-client = "13.1.0"
