@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "14.9.8"
+version = "15.0.0"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
@@ -62,7 +62,7 @@ solana-bincode = { workspace = true }
 solana-client = { workspace = true }
 solana-rpc-client = { workspace = true }
 solana-rpc-client-api = { workspace = true }
-solana-streamer = { workspace = true }
+# solana-streamer = { workspace = true, features = ["agave-unstable-api"] }
 solana-system-interface = { workspace = true, features = ["bincode"] }
 solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
 solana-transaction-status-client-types = { workspace = true }
@@ -82,7 +82,6 @@ solana-message = { workspace = true }
 solana-native-token = { workspace = true }
 solana-nonce = { workspace = true }
 solana-packet = { workspace = true }
-solana-program = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-quic-definitions = { workspace = true }
 solana-sdk-ids = { workspace = true }
@@ -90,6 +89,7 @@ solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
 solana-transaction = { workspace = true }
 solana-transaction-error = { workspace = true }
+solana-leader-schedule = { workspace = true, features = ["agave-unstable-api"] }
 
 # Yellowstone
 yellowstone-grpc-client = { workspace = true }

@@ -40,6 +40,8 @@
 
 #[cfg(feature = "prometheus")]
 use crate::prom;
+#[allow(deprecated)]
+use solana_clock::NUM_CONSECUTIVE_LEADER_SLOTS;
 use {
     crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
     bytes::Bytes,
@@ -50,12 +52,11 @@ use {
         WriteError, crypto::rustls::QuicClientConfig,
     },
     rustls::{NamedGroup, crypto::CryptoProvider},
-    solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS},
+    solana_clock::DEFAULT_MS_PER_SLOT,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_signer::Signer,
-    solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
     solana_tls_utils::{QuicClientCertificate, SkipServerVerification, new_dummy_x509_certificate},
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -76,6 +77,9 @@ use {
         time::{Sleep, interval},
     },
 };
+
+/// This has been copy-pasted from `solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID`
+pub const ALPN_TPU_PROTOCOL_ID: &[u8] = b"solana-tpu";
 
 pub const PACKET_DATA_SIZE: usize = 1232;
 

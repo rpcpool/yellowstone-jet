@@ -73,7 +73,7 @@ impl TransactionHandler {
         let version = Version::default();
         RpcVersionInfo {
             solana_core: version.to_string(),
-            feature_set: Some(version.feature_set),
+            feature_set: Some(version.feature_set()),
         }
     }
 

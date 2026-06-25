@@ -129,31 +129,10 @@ pub mod jet {
             &["leader"]
         ).unwrap();
 
-        // Metrics for Investigating decrease of performance when using first_shred_received
-        // Lock acquisition time - shows thread contention
-        static ref CLUSTER_TPU_LOCK_ACQUISITION_TIME: HistogramVec = HistogramVec::new(
-            HistogramOpts::new("cluster_tpu_lock_acquisition_us", "Time to acquire read/write locks in ClusterTpuInfo in microseconds")
-                .buckets(vec![0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0]),
-            &["method", "lock_type"]
-        ).unwrap();
-
-
-        // HashMap lookup time for leader schedule
-        static ref LEADER_SCHEDULE_EXISTS_CHECK_TIME: Histogram = Histogram::with_opts(
-            HistogramOpts::new("leader_schedule_exists_check_us", "Time spent checking if slot exists in leader_schedule HashMap in microseconds")
-                .buckets(vec![0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0])
-        ).unwrap();
-
         // Time per slot update loop iteration
         static ref SLOT_UPDATE_LOOP_ITERATION_TIME: Histogram = Histogram::with_opts(
             HistogramOpts::new("slot_update_loop_iteration_us", "Time for one complete iteration of update_latest_slot_and_leader_schedule loop in microseconds")
                 .buckets(vec![10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 50000.0])
-        ).unwrap();
-
-        // Batch size - high values mean backpressure
-        static ref SLOT_UPDATES_DRAINED_COUNT: Histogram = Histogram::with_opts(
-            HistogramOpts::new("slot_updates_drained_count", "Number of pending slot updates consumed in one loop iteration")
-                .buckets(vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0])
         ).unwrap();
 
         // Rate of each slot status type
@@ -287,10 +266,7 @@ pub mod jet {
             register!(TRANSACTION_DECODE_ERRORS);
             register!(TRANSACTION_DESERIALIZE_ERRORS);
 
-            register!(CLUSTER_TPU_LOCK_ACQUISITION_TIME);
-            register!(LEADER_SCHEDULE_EXISTS_CHECK_TIME);
             register!(SLOT_UPDATE_LOOP_ITERATION_TIME);
-            register!(SLOT_UPDATES_DRAINED_COUNT);
             register!(SLOT_STATUS_RECEIVED_BY_TYPE);
             register!(LEADER_SCHEDULE_RPC_FETCH_TIME);
             register!(LEADER_SCHEDULE_RPC_ATTEMPTS);
@@ -495,22 +471,8 @@ pub mod jet {
         }
     }
 
-    pub fn observe_cluster_tpu_lock_time(method: &str, lock_type: &str, duration: Duration) {
-        CLUSTER_TPU_LOCK_ACQUISITION_TIME
-            .with_label_values(&[method, lock_type])
-            .observe(duration.as_micros() as f64);
-    }
-
-    pub fn observe_leader_schedule_exists_check_time(duration: Duration) {
-        LEADER_SCHEDULE_EXISTS_CHECK_TIME.observe(duration.as_micros() as f64);
-    }
-
     pub fn observe_slot_update_loop_iteration_time(duration: Duration) {
         SLOT_UPDATE_LOOP_ITERATION_TIME.observe(duration.as_micros() as f64);
-    }
-
-    pub fn observe_slot_updates_drained_count(count: usize) {
-        SLOT_UPDATES_DRAINED_COUNT.observe(count as f64);
     }
 
     pub fn incr_slot_status_received_by_type(status: &str) {
