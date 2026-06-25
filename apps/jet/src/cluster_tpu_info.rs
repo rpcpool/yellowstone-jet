@@ -1,7 +1,10 @@
+#[allow(deprecated)]
+use solana_clock::NUM_CONSECUTIVE_LEADER_SLOTS;
 use {
     crate::{
         grpc_geyser::SlotUpdateWithStatus,
         metrics::jet as metrics,
+        recent_leader_slot::{RecentLeaderSlots, SlotEvent},
         util::{IncrementalBackoff, SlotStatus},
     },
     futures::future::FutureExt,
@@ -10,7 +13,7 @@ use {
         nonblocking::rpc_client::RpcClient,
         rpc_response::{RpcContactInfo, RpcLeaderSchedule},
     },
-    solana_clock::{NUM_CONSECUTIVE_LEADER_SLOTS, Slot},
+    solana_clock::Slot,
     solana_epoch_schedule::EpochSchedule,
     solana_pubkey::Pubkey,
     std::{
@@ -185,13 +188,11 @@ impl ClusterTpuInfo {
     }
 
     pub fn latest_seen_slot(&self) -> Slot {
-        let start = Instant::now();
         let result = self
             .inner
             .read()
             .expect("rwlock schedule poisoned")
             .latest_seen_slot;
-        metrics::observe_cluster_tpu_lock_time("latest_seen_slot", "read", start.elapsed());
         result
     }
 
@@ -296,20 +297,26 @@ impl ClusterTpuInfo {
         };
         let mut last_slot_instant = Instant::now();
 
+        let mut current_slot_estimator = RecentLeaderSlots::new();
         loop {
             let iteration_start = Instant::now();
 
-            let mut new_latest_slot = tokio::select! {
+            tokio::select! {
                 message = slots_rx.recv() => match message {
                     Ok(slot_update) => {
-                        metrics::incr_slot_status_received_by_type(slot_update.slot_status.as_str());
-
-                        if [SlotStatus::SlotConfirmed, SlotStatus::SlotFinalized].contains(&slot_update.slot_status) {
-                            continue;
+                        match slot_update.slot_status {
+                            SlotStatus::SlotFirstShredReceived => {
+                                current_slot_estimator.record(SlotEvent::Start(slot_update.slot));
+                            }
+                            SlotStatus::SlotCompleted => {
+                                current_slot_estimator.record(SlotEvent::End(slot_update.slot));
+                            }
+                            _ => {
+                                continue;
+                            }
                         }
-
+                        metrics::incr_slot_status_received_by_type(slot_update.slot_status.as_str());
                         debug!("Received {} for slot {}", slot_update.slot_status.as_str(), slot_update.slot);
-                        slot_update.slot
                     },
                     Err(error) => {
                         anyhow::bail!("failed to receive slot: {error:?}");
@@ -318,42 +325,36 @@ impl ClusterTpuInfo {
             };
 
             // Consume all pending updates to get the highest slot
-            let mut updates_drained = 1;
             while let Ok(slot_update_next) = slots_rx.try_recv() {
-                updates_drained += 1;
                 metrics::incr_slot_status_received_by_type(slot_update_next.slot_status.as_str());
 
-                if ![SlotStatus::SlotConfirmed, SlotStatus::SlotFinalized]
-                    .contains(&slot_update_next.slot_status)
-                {
-                    new_latest_slot = new_latest_slot.max(slot_update_next.slot);
+                match slot_update_next.slot_status {
+                    SlotStatus::SlotFirstShredReceived => {
+                        current_slot_estimator.record(SlotEvent::Start(slot_update_next.slot));
+                    }
+                    SlotStatus::SlotCompleted => {
+                        current_slot_estimator.record(SlotEvent::End(slot_update_next.slot));
+                    }
+                    _ => {
+                        continue;
+                    }
                 }
             }
 
-            metrics::observe_slot_updates_drained_count(updates_drained);
+            metrics::observe_new_slot_arrival_interval(last_slot_instant.elapsed());
 
-            if max_slot >= new_latest_slot {
+            let estimated_current_slot = current_slot_estimator.estimate_current_slot();
+            if max_slot >= estimated_current_slot {
                 continue;
             }
-            metrics::observe_new_slot_arrival_interval(last_slot_instant.elapsed());
+            max_slot = estimated_current_slot;
             last_slot_instant = Instant::now();
 
-            max_slot = max_slot.max(new_latest_slot);
-
             let need_schedule_update = {
-                let check_start = Instant::now();
-                let lock_start = Instant::now();
                 let mut locked = inner.write().expect("rwlock schedule poisoned");
-                metrics::observe_cluster_tpu_lock_time(
-                    "update_and_check_schedule",
-                    "write",
-                    lock_start.elapsed(),
-                );
-
                 locked.latest_seen_slot = max_slot;
                 let need_update = !locked.leader_schedule.contains_key(&max_slot);
 
-                metrics::observe_leader_schedule_exists_check_time(check_start.elapsed());
                 metrics::set_leader_schedule_size(locked.leader_schedule.len());
 
                 need_update
@@ -379,16 +380,8 @@ impl ClusterTpuInfo {
                         Ok(Some(leader_schedule)) => {
                             metrics::observe_leader_schedule_rpc_fetch_time(rpc_start.elapsed());
 
-                            let parse_start = Instant::now();
-                            let lock_start = Instant::now();
                             let mut locked =
                                 inner.write().expect("rwlock epoch schedule is poisoned");
-                            metrics::observe_cluster_tpu_lock_time(
-                                "update_leader_schedule",
-                                "write",
-                                lock_start.elapsed(),
-                            );
-
                             // Track entries before cleanup
                             let entries_before = locked.leader_schedule.len();
 
@@ -442,10 +435,6 @@ impl ClusterTpuInfo {
                             );
 
                             drop(locked);
-                            metrics::observe_leader_schedule_parse_insert_time(
-                                parse_start.elapsed(),
-                            );
-
                             break;
                         }
                         Ok(None) => {
@@ -467,7 +456,6 @@ impl ClusterTpuInfo {
     }
 
     pub fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo> {
-        let start = Instant::now();
         let inner = self
             .inner
             .read()
@@ -480,7 +468,6 @@ impl ClusterTpuInfo {
             })
             .collect::<Vec<_>>();
 
-        metrics::observe_cluster_tpu_lock_time("get_leader_tpus", "read", start.elapsed());
         result
     }
 }

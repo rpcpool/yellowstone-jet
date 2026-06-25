@@ -23,6 +23,7 @@ use {
         task::{self, JoinHandle, JoinSet},
     },
     tokio_stream::{StreamExt, StreamMap, wrappers::ReceiverStream},
+    x509_parser::{asn1_rs::FromDer, certificate::X509Certificate, public_key::PublicKey},
     yellowstone_jet_tpu_client::{
         config::TpuSenderConfig,
         core::{
@@ -123,6 +124,25 @@ struct MockValidatorNotifiers {
     connection_established_notify: Option<mpsc::Sender<MockConnectionEstablished>>,
 }
 
+fn get_remote_pubkey_from_quic_connection(conn: &quinn::Connection) -> Option<Pubkey> {
+    conn.peer_identity()?
+        .downcast::<Vec<rustls::pki_types::CertificateDer>>()
+        .ok()
+        .filter(|certs| certs.len() == 1)?
+        .first()
+        .and_then(get_pubkey_from_tls_certificate)
+}
+
+pub fn get_pubkey_from_tls_certificate(
+    der_cert: &rustls::pki_types::CertificateDer,
+) -> Option<Pubkey> {
+    let (_, cert) = X509Certificate::from_der(der_cert.as_ref()).ok()?;
+    match cert.public_key().parsed().ok()? {
+        PublicKey::Unknown(key) => Pubkey::try_from(key).ok(),
+        _ => None,
+    }
+}
+
 ///
 /// MockedRemoteValidator is a mock implementation of a remote validator that
 ///
@@ -166,8 +186,8 @@ impl MockedRemoteValidator {
                 let new_connection_id = connection_id;
                 let conn = connecting.await.expect("quinn connection");
                 connection_id += 1;
-                let remote_key = solana_streamer::nonblocking::quic::get_remote_pubkey(&conn)
-                    .expect("get remote pubkey");
+                let remote_key =
+                    get_remote_pubkey_from_quic_connection(&conn).expect("get remote pubkey");
                 if let Some(tx) = notifiers.connection_established_notify.as_ref() {
                     let _ = tx
                         .send(MockConnectionEstablished {

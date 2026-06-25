@@ -2,14 +2,13 @@ use {
     quinn::crypto::rustls::QuicServerConfig,
     rand::Rng,
     solana_keypair::Keypair,
-    solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
     solana_tls_utils::{SkipClientVerification, new_dummy_x509_certificate},
     std::{
         net::{SocketAddr, TcpListener},
         sync::Arc,
     },
     tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt},
-    yellowstone_jet_tpu_client::core::crypto_provider,
+    yellowstone_jet_tpu_client::core::{ALPN_TPU_PROTOCOL_ID, crypto_provider},
 };
 
 #[allow(dead_code)]

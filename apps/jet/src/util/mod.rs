@@ -78,7 +78,7 @@ impl PartialOrd for CommitmentLevel {
 }
 
 // SlotStatus is used to represent the status of a slot in the gRPC API.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum SlotStatus {
     SlotProcessed,

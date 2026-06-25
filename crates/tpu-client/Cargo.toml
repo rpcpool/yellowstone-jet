@@ -1,11 +1,12 @@
 [package]
 name = "yellowstone-jet-tpu-client"
-version = "0.3.1"
+version = "0.4.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 description = "Triton One Yellowstone Jet TPU Client"
 keywords = ["yellowstone", "solana", "rpc", "tpu", "quic"]
 readme = "README.md"
@@ -86,10 +87,9 @@ tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json
 
 # Agave Monorepo
 solana-client = { workspace = true }
-solana-net-utils = { workspace = true }
+solana-net-utils = { workspace = true, features = ["agave-unstable-api"] }
 solana-rpc-client = { workspace = true, optional = true }
 solana-rpc-client-api = { workspace = true }
-solana-streamer = { workspace = true }
 solana-system-interface = { workspace = true, optional = true, features = ["bincode"] }
 solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
 solana-version = { workspace = true }
@@ -103,7 +103,6 @@ solana-hash = { workspace = true, optional = true }
 solana-instruction = { workspace = true }
 solana-keypair = { workspace = true }
 solana-message = { workspace = true }
-solana-packet = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
@@ -114,3 +113,7 @@ solana-transaction-error = { workspace = true }
 yellowstone-grpc-client = { workspace = true, optional = true }
 yellowstone-grpc-proto = { workspace = true, optional = true }
 yellowstone-shield-store = { workspace = true, optional = true }
+
+
+[dev-dependencies]
+x509-parser = { workspace = true }

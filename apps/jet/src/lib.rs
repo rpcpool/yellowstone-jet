@@ -24,6 +24,7 @@ pub mod payload;
 pub mod proto;
 pub mod pubkey_challenger;
 pub mod quic_client;
+pub mod recent_leader_slot;
 pub mod rooted_transaction_state;
 pub mod rpc;
 pub mod solana;
