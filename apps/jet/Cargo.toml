@@ -90,6 +90,7 @@ solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
 solana-transaction = { workspace = true }
 solana-transaction-error = { workspace = true }
+solana-leader-schedule = { workspace = true, features = ["agave-unstable-api"] }
 
 # Yellowstone
 yellowstone-grpc-client = { workspace = true }
