@@ -152,12 +152,6 @@ pub mod jet {
             "leader_schedule_rpc_attempts_total", "Total RPC attempts to fetch leader schedule"
         ).unwrap();
 
-        // Schedule parsing time
-        static ref LEADER_SCHEDULE_PARSE_AND_INSERT_TIME: Histogram = Histogram::with_opts(
-            HistogramOpts::new("leader_schedule_parse_insert_us", "Time to parse RPC response and insert into HashMap in microseconds")
-                .buckets(vec![10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0])
-        ).unwrap();
-
         // HashMap size for memory tracking
         static ref LEADER_SCHEDULE_SIZE: IntGauge = IntGauge::new(
             "leader_schedule_hashmap_size", "Number of entries in leader_schedule HashMap"
@@ -270,7 +264,6 @@ pub mod jet {
             register!(SLOT_STATUS_RECEIVED_BY_TYPE);
             register!(LEADER_SCHEDULE_RPC_FETCH_TIME);
             register!(LEADER_SCHEDULE_RPC_ATTEMPTS);
-            register!(LEADER_SCHEDULE_PARSE_AND_INSERT_TIME);
             register!(LEADER_SCHEDULE_SIZE);
             register!(LEADER_SCHEDULE_ENTRIES_ADDED);
             register!(LEADER_SCHEDULE_ENTRIES_CLEANED);
@@ -487,10 +480,6 @@ pub mod jet {
 
     pub fn incr_leader_schedule_rpc_attempts() {
         LEADER_SCHEDULE_RPC_ATTEMPTS.inc();
-    }
-
-    pub fn observe_leader_schedule_parse_insert_time(duration: Duration) {
-        LEADER_SCHEDULE_PARSE_AND_INSERT_TIME.observe(duration.as_micros() as f64);
     }
 
     pub fn set_leader_schedule_size(size: usize) {
