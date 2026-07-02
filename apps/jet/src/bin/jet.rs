@@ -1,3 +1,4 @@
+use rustls::crypto::CryptoProvider;
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 use {
