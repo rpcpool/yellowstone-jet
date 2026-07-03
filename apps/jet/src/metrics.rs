@@ -61,7 +61,10 @@ pub mod jet {
         },
         solana_clock::Slot,
         solana_pubkey::Pubkey,
-        std::{sync::Once, time::Duration},
+        std::{
+            sync::{Once, RwLock},
+            time::Duration,
+        },
     };
 
     lazy_static::lazy_static! {
@@ -86,6 +89,8 @@ pub mod jet {
         ).unwrap();
 
         static ref ROOTED_TRANSACTIONS_POOL_SIZE: IntGauge = IntGauge::new("rooted_transactions_pool_size", "Total number of transactions in landed pool").unwrap();
+        static ref TRANSACTION_PIPELINE_HEALTH: IntGauge = IntGauge::new("transaction_pipeline_health", "1 when the local transaction enqueue pipeline is healthy").unwrap();
+        static ref TRANSACTION_PIPELINE_LAST_ERROR: RwLock<Option<String>> = RwLock::new(None);
 
         static ref STS_POOL_SIZE: IntGauge = IntGauge::new("sts_pool_size", "Number of transactions in the pool").unwrap();
         static ref STS_INFLIGHT_SIZE: IntGauge = IntGauge::new("sts_inflight_size", "Number of transactions sending right now").unwrap();
@@ -275,6 +280,7 @@ pub mod jet {
             register!(GRPC_SLOT_RECEIVED);
 
             register!(ROOTED_TRANSACTIONS_POOL_SIZE);
+            register!(TRANSACTION_PIPELINE_HEALTH);
             register!(SEND_TRANSACTION_ATTEMPT);
             register!(SEND_TRANSACTION_ERROR);
             register!(SEND_TRANSACTION_SUCCESS);
@@ -312,6 +318,8 @@ pub mod jet {
 
             yellowstone_jet_tpu_client::prom::register_metrics(&REGISTRY);
             grpc_lewis::prom::register_metrics(&REGISTRY);
+
+            mark_transaction_pipeline_healthy();
         });
     }
 
@@ -360,8 +368,41 @@ pub mod jet {
             .set(1);
     }
 
+    pub fn mark_transaction_pipeline_healthy() {
+        TRANSACTION_PIPELINE_HEALTH.set(1);
+
+        if let Ok(mut last_error) = TRANSACTION_PIPELINE_LAST_ERROR.write() {
+            *last_error = None;
+        }
+    }
+
+    pub fn mark_transaction_pipeline_unhealthy(reason: impl Into<String>) {
+        TRANSACTION_PIPELINE_HEALTH.set(0);
+
+        if let Ok(mut last_error) = TRANSACTION_PIPELINE_LAST_ERROR.write() {
+            *last_error = Some(reason.into());
+        }
+    }
+
+    pub fn get_transaction_pipeline_health_status() -> anyhow::Result<()> {
+        if TRANSACTION_PIPELINE_HEALTH.get() > 0 {
+            return Ok(());
+        }
+
+        let reason = TRANSACTION_PIPELINE_LAST_ERROR
+            .read()
+            .ok()
+            .and_then(|last_error| last_error.clone())
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or_else(|| "unknown error".to_owned());
+
+        anyhow::bail!("transaction pipeline unavailable: {reason}");
+    }
+
     // TODO:  this logic should not be in metrics module as its use for RPC admin module.
     pub fn get_health_status() -> anyhow::Result<()> {
+        get_transaction_pipeline_health_status()?;
+
         anyhow::ensure!(
             GRPC_SLOT_RECEIVED
                 .with_label_values(&[CommitmentLevel::Processed.as_str()])

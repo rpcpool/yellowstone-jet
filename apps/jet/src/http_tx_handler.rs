@@ -1,7 +1,8 @@
 use {
     crate::{
-        metrics::jet as metrics, payload::JetRpcSendTransactionConfig,
-        transaction_handler::TransactionHandler,
+        metrics::jet as metrics,
+        payload::JetRpcSendTransactionConfig,
+        transaction_handler::{TransactionHandler, TransactionHandlerError},
     },
     bytes::Bytes,
     futures::future::{BoxFuture, FutureExt},
@@ -269,7 +270,13 @@ impl HttpTransactionHandler {
                 if self.log_invalid_txn {
                     warn!(error = %e, "HTTP transaction submission failed");
                 }
-                text_response(StatusCode::BAD_REQUEST, &e.to_string())
+                let status = if matches!(e, TransactionHandlerError::TransactionPipelineUnavailable)
+                {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                text_response(status, &e.to_string())
             }
         }
     }
