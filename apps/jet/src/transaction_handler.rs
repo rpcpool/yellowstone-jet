@@ -1,7 +1,7 @@
 use {
     crate::{
-        payload::JetRpcSendTransactionConfig, solana::decode_and_deserialize,
-        transactions::SendTransactionRequest,
+        metrics::jet as jet_metrics, payload::JetRpcSendTransactionConfig,
+        solana::decode_and_deserialize, transactions::SendTransactionRequest,
     },
     anyhow::Result,
     bytes::Bytes,
@@ -33,6 +33,9 @@ pub enum TransactionHandlerError {
 
     #[error("unsupported encoding")]
     UnsupportedEncoding,
+
+    #[error("transaction pipeline unavailable")]
+    TransactionPipelineUnavailable,
 }
 
 impl TransactionHandlerError {
@@ -43,6 +46,9 @@ impl TransactionHandlerError {
             TransactionHandlerError::PreflightNotSupported => "PreflightNotSupported",
             TransactionHandlerError::InvalidParams(_) => "InvalidParams",
             TransactionHandlerError::UnsupportedEncoding => "UnsupportedEncoding",
+            TransactionHandlerError::TransactionPipelineUnavailable => {
+                "TransactionPipelineUnavailable"
+            }
         }
     }
 }
@@ -77,6 +83,19 @@ impl TransactionHandler {
         }
     }
 
+    fn enqueue_transaction(
+        &self,
+        request: SendTransactionRequest,
+    ) -> Result<(), TransactionHandlerError> {
+        self.transaction_sink.send(Arc::new(request)).map_err(|_| {
+            jet_metrics::mark_transaction_pipeline_unhealthy("transaction sink closed");
+            TransactionHandlerError::TransactionPipelineUnavailable
+        })?;
+
+        jet_metrics::mark_transaction_pipeline_healthy();
+        Ok(())
+    }
+
     pub async fn handle_versioned_transaction(
         &self,
         transaction: VersionedTransaction,
@@ -104,15 +123,13 @@ impl TransactionHandler {
             )));
         }
 
-        self.transaction_sink
-            .send(Arc::new(SendTransactionRequest {
-                signature,
-                transaction,
-                wire_transaction: wire_transaction.into(),
-                max_retries: config.max_retries,
-                policies: config_with_forwarding_policies.forwarding_policies,
-            }))
-            .expect("transaction sink closed");
+        self.enqueue_transaction(SendTransactionRequest {
+            signature,
+            transaction,
+            wire_transaction: wire_transaction.into(),
+            max_retries: config.max_retries,
+            policies: config_with_forwarding_policies.forwarding_policies,
+        })?;
 
         Ok(signature.to_string())
     }
@@ -143,15 +160,13 @@ impl TransactionHandler {
 
         let signature = transaction.signatures[0];
 
-        self.transaction_sink
-            .send(Arc::new(SendTransactionRequest {
-                signature,
-                transaction,
-                wire_transaction,
-                max_retries: config_with_forwarding_policies.config.max_retries,
-                policies: config_with_forwarding_policies.forwarding_policies,
-            }))
-            .expect("transaction sink closed");
+        self.enqueue_transaction(SendTransactionRequest {
+            signature,
+            transaction,
+            wire_transaction,
+            max_retries: config_with_forwarding_policies.config.max_retries,
+            policies: config_with_forwarding_policies.forwarding_policies,
+        })?;
 
         Ok(signature.to_string())
     }
@@ -167,15 +182,13 @@ impl TransactionHandler {
         let (wire_transaction, transaction) = self.prepare_transaction(data, config).await?;
         let signature = transaction.signatures[0];
 
-        self.transaction_sink
-            .send(Arc::new(SendTransactionRequest {
-                signature,
-                transaction,
-                wire_transaction: wire_transaction.into(),
-                max_retries: config.max_retries,
-                policies: config_with_forwarding_policies.forwarding_policies,
-            }))
-            .expect("transaction sink closed");
+        self.enqueue_transaction(SendTransactionRequest {
+            signature,
+            transaction,
+            wire_transaction: wire_transaction.into(),
+            max_retries: config.max_retries,
+            policies: config_with_forwarding_policies.forwarding_policies,
+        })?;
 
         Ok(signature.to_string())
     }
@@ -205,5 +218,70 @@ impl TransactionHandler {
             .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         Ok((wire_transaction, transaction))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::metrics::jet as jet_metrics,
+        solana_hash::Hash,
+        solana_keypair::Keypair,
+        solana_message::{VersionedMessage, v0},
+        solana_rpc_client_api::config::RpcSendTransactionConfig,
+        solana_signer::Signer,
+        solana_system_interface::instruction::transfer,
+    };
+
+    fn test_transaction() -> VersionedTransaction {
+        let payer = Keypair::new();
+        let receiver = Keypair::new();
+        let instructions = [transfer(&payer.pubkey(), &receiver.pubkey(), 1)];
+
+        VersionedTransaction::try_new(
+            VersionedMessage::V0(
+                v0::Message::try_compile(&payer.pubkey(), &instructions, &[], Hash::new_unique())
+                    .expect("try compile"),
+            ),
+            &[&payer],
+        )
+        .expect("try new")
+    }
+
+    fn send_config() -> JetRpcSendTransactionConfig {
+        JetRpcSendTransactionConfig {
+            config: RpcSendTransactionConfig {
+                skip_preflight: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_transaction_sink_returns_pipeline_unavailable_and_marks_unhealthy() {
+        jet_metrics::mark_transaction_pipeline_healthy();
+        let (transaction_sink, transaction_source) = mpsc::unbounded_channel();
+        drop(transaction_source);
+
+        let handler = TransactionHandler::new(transaction_sink);
+        let err = handler
+            .handle_versioned_transaction(test_transaction(), send_config())
+            .await
+            .expect_err("closed sink should fail");
+
+        assert!(matches!(
+            err,
+            TransactionHandlerError::TransactionPipelineUnavailable
+        ));
+        assert!(
+            jet_metrics::get_transaction_pipeline_health_status()
+                .expect_err("closed sink should mark health unhealthy")
+                .to_string()
+                .contains("transaction sink closed")
+        );
+
+        jet_metrics::mark_transaction_pipeline_healthy();
     }
 }
