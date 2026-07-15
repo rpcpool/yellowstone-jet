@@ -11,7 +11,6 @@ use {
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status_client_types::UiTransactionEncoding,
     solana_version::Version,
-    std::sync::Arc,
     thiserror::Error,
     tokio::sync::mpsc,
     yellowstone_jet_tpu_client::core::PACKET_DATA_SIZE,
@@ -61,11 +60,11 @@ impl From<TransactionHandlerError> for ErrorObjectOwned {
 
 #[derive(Clone)]
 pub struct TransactionHandler {
-    pub transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    pub transaction_sink: mpsc::UnboundedSender<SendTransactionRequest>,
 }
 
 impl TransactionHandler {
-    pub const fn new(transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>) -> Self {
+    pub const fn new(transaction_sink: mpsc::UnboundedSender<SendTransactionRequest>) -> Self {
         Self { transaction_sink }
     }
 
@@ -105,13 +104,13 @@ impl TransactionHandler {
         }
 
         self.transaction_sink
-            .send(Arc::new(SendTransactionRequest {
+            .send(SendTransactionRequest {
                 signature,
                 transaction,
                 wire_transaction: wire_transaction.into(),
                 max_retries: config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
-            }))
+            })
             .expect("transaction sink closed");
 
         Ok(signature.to_string())
@@ -144,13 +143,13 @@ impl TransactionHandler {
         let signature = transaction.signatures[0];
 
         self.transaction_sink
-            .send(Arc::new(SendTransactionRequest {
+            .send(SendTransactionRequest {
                 signature,
                 transaction,
                 wire_transaction,
                 max_retries: config_with_forwarding_policies.config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
-            }))
+            })
             .expect("transaction sink closed");
 
         Ok(signature.to_string())
@@ -168,13 +167,13 @@ impl TransactionHandler {
         let signature = transaction.signatures[0];
 
         self.transaction_sink
-            .send(Arc::new(SendTransactionRequest {
+            .send(SendTransactionRequest {
                 signature,
                 transaction,
                 wire_transaction: wire_transaction.into(),
                 max_retries: config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
-            }))
+            })
             .expect("transaction sink closed");
 
         Ok(signature.to_string())

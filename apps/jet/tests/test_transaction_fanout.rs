@@ -108,13 +108,12 @@ async fn it_should_fanout_three_times() {
     });
 
     let tx = create_send_transaction_request(Hash::new_unique(), 0);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
+    sink.send(tx.clone()).unwrap();
 
     let mut actual_tx_sent = vec![];
     for pubkey in my_schedule.iter().take(FANOUT_FACTOR) {
         let actual_tx = gateway_rx.recv().await.unwrap();
-        assert_eq!(actual_tx.tx_sig, actual_tx.tx_sig);
+        assert_eq!(actual_tx.tx_sig, tx.signature);
         assert_eq!(actual_tx.remote_peer, *pubkey);
         actual_tx_sent.push(actual_tx);
     }
@@ -169,11 +168,10 @@ async fn it_should_apply_shield_policies() {
     });
 
     let tx = create_send_transaction_request(Hash::new_unique(), 0);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
+    sink.send(tx.clone()).unwrap();
     let actual_tx = gateway_rx.recv().await.unwrap();
     assert!(gateway_rx.try_recv().is_err());
-    assert_eq!(actual_tx.tx_sig, actual_tx.tx_sig);
+    assert_eq!(actual_tx.tx_sig, tx.signature);
     assert_eq!(actual_tx.remote_peer, my_schedule[2]);
 }
 
@@ -214,8 +212,7 @@ async fn it_should_support_extra_fanout() {
     });
 
     let tx = create_send_transaction_request(Hash::new_unique(), 0);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
+    sink.send(tx.clone()).unwrap();
 
     let mut actual_tx_sent = vec![];
     for _i in 0..FANOUT_FACTOR + extra_fanout_pubkeys.len() {
