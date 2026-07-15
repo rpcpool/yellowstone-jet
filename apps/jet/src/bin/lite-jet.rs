@@ -31,7 +31,6 @@ use {
         config::{ConfigJet, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         identity::JetIdentitySyncMember,
-        jet_gateway::spawn_jet_gw_listener,
         metrics::{REGISTRY, jet as metrics},
         rpc::{RpcServer, RpcServerType},
         setup_tracing,
@@ -189,7 +188,7 @@ async fn run_jet(
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
 
-    let (scheduler_in, scheduler_out) = mpsc::unbounded_channel::<Arc<SendTransactionRequest>>();
+    let (scheduler_in, scheduler_out) = mpsc::unbounded_channel::<SendTransactionRequest>();
     let tpu_sender_endpoints = Endpoints {
         rpc: config.upstream.rpc.clone(),
         grpc: config.upstream.grpc.endpoint.clone(),
@@ -307,45 +306,6 @@ async fn run_jet(
         },
     )
     .await;
-    let mut jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
-        vec![];
-
-    let jet_gw_listener = match config.jet_gateway {
-        Some(config_jet_gateway) => {
-            let jet_gw_cancellation_token = jet_cancellation_token.child_token();
-            if config_jet_gateway.endpoints.is_empty() {
-                warn!("no endpoints for jet-gateway with existed config");
-                None
-            } else {
-                let jet_gw_config = config_jet_gateway.clone();
-                let expected_identity = config.identity.expected;
-
-                info!("starting jet-gateway listener");
-                let stake_info = stake_info_map.clone();
-                let jet_gw_identity = initial_identity.insecure_clone();
-                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(
-                    tx_handler,
-                    config.log_invalid_txn,
-                );
-                let (jet_gw_identity_updater, jet_gw_fut) = spawn_jet_gw_listener(
-                    stake_info,
-                    jet_gw_config,
-                    tx_sender,
-                    expected_identity,
-                    config.features,
-                    jet_gw_identity,
-                    jet_gw_cancellation_token,
-                );
-                jet_identity_sync_members.push(Box::new(jet_gw_identity_updater));
-                Some(jet_gw_fut.boxed())
-            }
-        }
-        _ => {
-            drop(tx_handler);
-            warn!("Skipping jet-gateway listener, no config provided");
-            None
-        }
-    };
 
     let mut sigint = signal(SignalKind::interrupt())?;
 
@@ -367,11 +327,6 @@ async fn run_jet(
             .expect("blockhash queue shutdown");
     });
     tg_name_map.insert(ah.id(), "blockhash_queue".to_string());
-
-    if let Some(jet_gw_listener_fut) = jet_gw_listener {
-        let ah = tg.spawn(jet_gw_listener_fut);
-        tg_name_map.insert(ah.id(), "jet_gw_listener".to_string());
-    }
 
     if let Some(prometheus_bind_addr) = prometheus_bind_addr {
         let my_ct = jet_cancellation_token.child_token();
@@ -457,7 +412,7 @@ async fn run_jet(
 ///
 /// Example of using jet-tpu-client
 pub async fn tpu_sender_loop(
-    mut incoming: UnboundedReceiver<Arc<SendTransactionRequest>>,
+    mut incoming: UnboundedReceiver<SendTransactionRequest>,
     mut tpu_sender: YellowstoneTpuSender,
     shield: Option<PolicyStore>,
     cancellation_token: CancellationToken,
@@ -466,7 +421,6 @@ pub async fn tpu_sender_loop(
         if cancellation_token.is_cancelled() {
             break;
         }
-        let request = Arc::unwrap_or_clone(request);
         let SendTransactionRequest {
             signature,
             transaction: _,

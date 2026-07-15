@@ -191,7 +191,7 @@ pub struct SendTransactionRequest {
 }
 
 struct RetryableTx {
-    tx: Arc<SendTransactionRequest>,
+    tx: SendTransactionRequest,
     leftover_attempt: usize,
 }
 
@@ -205,8 +205,8 @@ pub struct TransactionRetrySchedulerRuntime {
     tx_pool: HashMap<Signature, RetryableTx>,
     block_height_deadline_map: BTreeMap<u64, Vec<Signature>>,
     insertion_order: VecDeque<(Instant, Signature)>,
-    transaction_source: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
-    response_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    transaction_source: mpsc::UnboundedReceiver<SendTransactionRequest>,
+    response_sink: mpsc::UnboundedSender<SendTransactionRequest>,
     retry_rate: tokio::time::Duration,
     stop_send_on_commitment: CommitmentLevel,
     max_retry: usize,
@@ -266,7 +266,7 @@ impl TransactionRetrySchedulerRuntime {
                         "resending tx {signature}, attempts left: {}",
                         rtx.leftover_attempt
                     );
-                    let _ = self.response_sink.send(Arc::clone(&rtx.tx));
+                    let _ = self.response_sink.send(rtx.tx.clone());
                     self.insertion_order.push_back((now, signature));
                 } else {
                     self.tx_pool.remove(&signature);
@@ -322,7 +322,7 @@ impl TransactionRetrySchedulerRuntime {
         }
     }
 
-    fn add_new_transaction(&mut self, tx: Arc<SendTransactionRequest>, now: Instant) {
+    fn add_new_transaction(&mut self, tx: SendTransactionRequest, now: Instant) {
         // Make sure to not double count this metric elsewhere.
         metrics::sts_received_inc();
         let max_retries = tx.max_retries.unwrap_or(0).min(self.max_retry);
@@ -389,7 +389,7 @@ impl TransactionRetrySchedulerRuntime {
         self.tx_pool.insert(
             signature,
             RetryableTx {
-                tx: Arc::clone(&tx),
+                tx: tx.clone(),
                 leftover_attempt,
             },
         );
@@ -407,8 +407,8 @@ impl TransactionRetrySchedulerRuntime {
 }
 
 pub struct TransactionRetryScheduler {
-    pub sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
-    pub source: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+    pub sink: mpsc::UnboundedSender<SendTransactionRequest>,
+    pub source: mpsc::UnboundedReceiver<SendTransactionRequest>,
 }
 
 pub struct TransactionRetrySchedulerConfig {
@@ -435,15 +435,15 @@ impl Default for TransactionRetrySchedulerConfig {
 /// It forwards transactions to the next leader if the transaction's last valid block height is less than the current block height.
 ///
 pub struct TransactionNoRetryScheduler {
-    pub sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
-    pub source: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+    pub sink: mpsc::UnboundedSender<SendTransactionRequest>,
+    pub source: mpsc::UnboundedReceiver<SendTransactionRequest>,
 }
 
 impl TransactionNoRetryScheduler {
     pub fn new(blockheight_service: Arc<dyn BlockHeightService + Send + Sync + 'static>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let (scheduler_resp_tx, scheduler_resp_rx) =
-            mpsc::unbounded_channel::<Arc<SendTransactionRequest>>();
+            mpsc::unbounded_channel::<SendTransactionRequest>();
 
         tokio::spawn(
             async move { Self::fwd_loop(blockheight_service, rx, scheduler_resp_tx).await },
@@ -456,8 +456,8 @@ impl TransactionNoRetryScheduler {
 
     async fn fwd_loop(
         blockheight_service: Arc<dyn BlockHeightService + Send + Sync + 'static>,
-        mut incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
-        response_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+        mut incoming_transaction_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
+        response_sink: mpsc::UnboundedSender<SendTransactionRequest>,
     ) {
         loop {
             let Some(tx) = incoming_transaction_rx.recv().await else {
@@ -535,7 +535,7 @@ impl TransactionRetryScheduler {
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let (scheduler_resp_tx, scheduler_resp_rx) =
-            mpsc::unbounded_channel::<Arc<SendTransactionRequest>>();
+            mpsc::unbounded_channel::<SendTransactionRequest>();
         let mut scheduler_runtime = TransactionRetrySchedulerRuntime {
             block_height_service,
             rooted_transactions,
@@ -582,7 +582,7 @@ pub struct TransactionFanout {
     policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
     tpu_sender: mpsc::Sender<TpuSenderTxn>,
     gateway_response_rx: mpsc::UnboundedReceiver<TpuSenderResponse>,
-    incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+    incoming_transaction_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
     transaction_send_set: JoinSet<Result<Signature, SendTransactionError>>,
     transaction_send_set_meta: HashMap<task::Id, Signature>,
     inflight_transactions: HashSet<Signature>,
@@ -663,7 +663,7 @@ impl TransactionFanout {
     pub fn new(
         leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
         policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
-        incoming_transaction_rx: mpsc::UnboundedReceiver<Arc<SendTransactionRequest>>,
+        incoming_transaction_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
         quic_gateway_bidi: QuicGatewayBidi,
         // Extra remote peer to forward too
         fanout_config: FanoutConfig,
@@ -790,8 +790,7 @@ impl TransactionFanout {
         }
     }
 
-    fn fwd_tx(&mut self, tx: Arc<SendTransactionRequest>) {
-        let tx = Arc::unwrap_or_clone(tx);
+    fn fwd_tx(&mut self, tx: SendTransactionRequest) {
         if self.inflight_transactions.contains(&tx.signature) {
             tracing::trace!(
                 "transaction {} is already in flight, skipping",

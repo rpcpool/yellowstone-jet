@@ -141,8 +141,7 @@ async fn it_should_retry_transaction_three_time() {
     let blockhash = Hash::new_unique();
     blockheight_service.increase_block_height(blockhash);
     let tx = create_send_transaction_request(blockhash, 3);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
+    sink.send(tx.clone()).unwrap();
 
     for _ in 0..3 {
         let request = source.recv().await.expect("Failed to receive request");
@@ -190,8 +189,7 @@ async fn it_should_not_attempt_invalid_transaction() {
     blockheight_service.increase_block_height(blockhash1);
     blockheight_service.increase_block_height(blockhash2);
     let tx = create_send_transaction_request(blockhash1, 3);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
+    sink.send(tx.clone()).unwrap();
     source.try_recv().expect_err("Expected no more requests");
     let dlq_ev = dlq_rx
         .recv()
@@ -231,8 +229,7 @@ async fn it_should_retry_durable_nonce_transaction_without_blockhash_validation(
 
     let durable_nonce_account = Pubkey::new_unique();
     let tx = create_durable_nonce_txn_request(blockhash1, 3, durable_nonce_account);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
+    sink.send(tx.clone()).unwrap();
 
     for _ in 0..3 {
         let request = source.recv().await.expect("Failed to receive request");
@@ -275,7 +272,7 @@ async fn it_should_skip_landed_durable_nonce_transaction() {
     rooted_tx
         .send(tx.signature, CommitmentLevel::Confirmed)
         .await;
-    sink.send(Arc::new(tx)).unwrap();
+    sink.send(tx.clone()).unwrap();
 
     let dlq_ev = tokio::time::timeout(Duration::from_secs(1), dlq_rx.recv())
         .await
@@ -304,8 +301,7 @@ async fn no_retry_scheduler_should_forward_durable_nonce_without_blockhash_valid
 
     let durable_nonce_account = Pubkey::new_unique();
     let tx = create_durable_nonce_txn_request(Hash::new_unique(), 0, durable_nonce_account);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
+    sink.send(tx.clone()).unwrap();
 
     let request = tokio::time::timeout(Duration::from_secs(1), source.recv())
         .await
