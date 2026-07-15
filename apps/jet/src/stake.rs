@@ -369,6 +369,7 @@ pub mod tests {
             epoch_credits: vec![],
             last_vote: 1,
             root_slot: 1,
+            inflation_rewards_commission_bps: None,
         }
     }
 

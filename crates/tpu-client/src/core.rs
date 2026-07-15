@@ -40,8 +40,6 @@
 
 #[cfg(feature = "prometheus")]
 use crate::prom;
-#[allow(deprecated)]
-use solana_clock::NUM_CONSECUTIVE_LEADER_SLOTS;
 use {
     crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
     bytes::Bytes,
@@ -117,6 +115,8 @@ pub(crate) enum ConnectingError {
 pub(crate) struct SentOk {
     pub e2e_time: Duration,
 }
+
+const NUM_CONSECUTIVE_LEADER_SLOTS: u64 = 4;
 
 ///
 /// Metadata about an inflight connection attempt to a remote peer.
@@ -362,7 +362,7 @@ struct OrphanConnectionSet {
 }
 
 impl OrphanConnectionSet {
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         self.curr_len
     }
 
@@ -580,7 +580,7 @@ pub struct TpuSenderTxn {
 }
 
 impl TpuSenderTxn {
-    pub fn from_bytes(tx_sig: Signature, remote_peer: Pubkey, wire: Bytes) -> Self {
+    pub const fn from_bytes(tx_sig: Signature, remote_peer: Pubkey, wire: Bytes) -> Self {
         Self {
             tx_sig,
             wire,
@@ -2226,7 +2226,7 @@ where
     /// So we use connection versioning to `assert!` that we didn't create any orphan worker or orphan connection in the code.
     ///
     ///
-    fn next_connection_version(&mut self) -> u64 {
+    const fn next_connection_version(&mut self) -> u64 {
         let ret = self.connection_version;
         self.connection_version += 1;
         ret
@@ -2235,7 +2235,7 @@ where
     ///
     /// Round-robin endpoint selection
     ///
-    fn next_endpoint_idx(&mut self) -> usize {
+    const fn next_endpoint_idx(&mut self) -> usize {
         let ret = self.endpoint_sequence;
         self.endpoint_sequence = (self.endpoint_sequence + 1) % self.endpoints.len();
         ret

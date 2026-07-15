@@ -1,5 +1,3 @@
-#[allow(deprecated)]
-use solana_clock::NUM_CONSECUTIVE_LEADER_SLOTS;
 use {
     crate::{
         grpc_geyser::SlotUpdateWithStatus,
@@ -60,6 +58,8 @@ impl ClusterTpuInfoProvider for ClusterTpuInfo {
 // Number of extra leader slots to keep in the schedule after the current slot
 // This provides a buffer to avoid constantly fetching new schedules
 const LEADER_SCHEDULE_RETENTION_SLOTS: u64 = 42;
+
+const NUM_CONSECUTIVE_LEADER_SLOTS: u64 = 4;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TpuInfo {
@@ -155,8 +155,6 @@ impl ClusterTpuInfo {
         cluster_nodes_update_interval: Duration,
         cancellation_token: CancellationToken,
     ) -> (Self, impl Future<Output = ()>) {
-        assert_eq!(NUM_CONSECUTIVE_LEADER_SLOTS, 4);
-
         let inner = Arc::new(StdRwLock::new(ClusterTpuInfoInner {
             epoch_schedule: ClusterTpuInfoInner::get_epoch_schedule(Arc::clone(&rpc)).await,
             ..Default::default()
@@ -188,12 +186,10 @@ impl ClusterTpuInfo {
     }
 
     pub fn latest_seen_slot(&self) -> Slot {
-        let result = self
-            .inner
+        self.inner
             .read()
             .expect("rwlock schedule poisoned")
-            .latest_seen_slot;
-        result
+            .latest_seen_slot
     }
 
     pub fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
@@ -461,13 +457,11 @@ impl ClusterTpuInfo {
             .read()
             .expect("rwlock epoch schedule is poisoned");
 
-        let result = (0..=leader_forward_count as u64)
+        (0..=leader_forward_count as u64)
             .filter_map(|i| {
                 let leader_slot = inner.latest_seen_slot + i * NUM_CONSECUTIVE_LEADER_SLOTS;
                 inner.get_tpu_info(leader_slot)
             })
-            .collect::<Vec<_>>();
-
-        result
+            .collect::<Vec<_>>()
     }
 }

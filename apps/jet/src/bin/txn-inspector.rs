@@ -116,6 +116,7 @@ fn print_summary(encoding: &str, bytes: &[u8], tx: &VersionedTransaction, detail
     let message_version = match &tx.message {
         VersionedMessage::Legacy(_) => "legacy",
         VersionedMessage::V0(_) => "v0",
+        VersionedMessage::V1(_) => "v1",
     };
     let instruction_count = tx.message.instructions().len();
     let static_accounts = tx
@@ -150,6 +151,9 @@ fn print_summary(encoding: &str, bytes: &[u8], tx: &VersionedTransaction, detail
                     lookup.account_key, lookup.writable_indexes, lookup.readonly_indexes
                 );
             }
+        }
+        VersionedMessage::V1(_) => {
+            println!("alt accounts: none (v1 message)");
         }
     }
 
@@ -228,6 +232,32 @@ fn print_detailed_transaction(tx: &VersionedTransaction) {
                     lookup.account_key, lookup.writable_indexes, lookup.readonly_indexes
                 );
             }
+        }
+        VersionedMessage::V1(message) => {
+            println!("message: v1");
+            println!(
+                "header: required_signatures={} readonly_signed={} readonly_unsigned={}",
+                message.header.num_required_signatures,
+                message.header.num_readonly_signed_accounts,
+                message.header.num_readonly_unsigned_accounts
+            );
+            println!("recent_blockhash: {}", message.lifetime_specifier);
+            println!("config: {:?}", message.config);
+            println!("account_keys ({}):", message.account_keys.len());
+            for (i, key) in message.account_keys.iter().enumerate() {
+                println!("- [{i}] {key}");
+            }
+            println!("instructions ({}):", message.instructions.len());
+            for (i, ix) in message.instructions.iter().enumerate() {
+                println!(
+                    "- [{i}] program_id_index={} accounts={:?} data_len={} data={:?}",
+                    ix.program_id_index,
+                    ix.accounts,
+                    ix.data.len(),
+                    ix.data
+                );
+            }
+            println!("address_table_lookups: none (v1 message)");
         }
     }
 }

@@ -17,14 +17,14 @@ pub enum SlotEvent {
 }
 
 impl SlotEvent {
-    pub fn slot(&self) -> Slot {
+    pub const fn slot(&self) -> Slot {
         match self {
             SlotEvent::Start(slot) => *slot,
             SlotEvent::End(slot) => *slot,
         }
     }
 
-    pub fn is_start(&self) -> bool {
+    pub const fn is_start(&self) -> bool {
         matches!(self, SlotEvent::Start(_))
     }
 }

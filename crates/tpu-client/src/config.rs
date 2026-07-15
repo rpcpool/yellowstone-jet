@@ -227,7 +227,7 @@ impl TpuSenderConfig {
     /// It should only be used in controlled testing environments.
     ///
     #[allow(unreachable_code)]
-    pub unsafe fn allow_arbitrary_txn_size(&mut self) {
+    pub const unsafe fn allow_arbitrary_txn_size(&mut self) {
         #[cfg(not(feature = "intg-testing"))]
         {
             panic!(

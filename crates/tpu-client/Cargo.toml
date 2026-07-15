@@ -114,6 +114,8 @@ yellowstone-grpc-client = { workspace = true, optional = true }
 yellowstone-grpc-proto = { workspace = true, optional = true }
 yellowstone-shield-store = { workspace = true, optional = true }
 
-
 [dev-dependencies]
 x509-parser = { workspace = true }
+
+[lints]
+workspace = true

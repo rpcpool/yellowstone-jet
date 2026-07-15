@@ -278,10 +278,10 @@ pub mod rpc_admin {
 
     impl RpcServerImpl {
         async fn set_keypair(&self, identity: Keypair) -> RpcResult<()> {
-            if let Some(allow_ident) = &self.allowed_identity {
-                if allow_ident != &identity.pubkey() {
-                    return Err(invalid_params("invalid identity".to_owned()));
-                }
+            if let Some(allow_ident) = &self.allowed_identity
+                && allow_ident != &identity.pubkey()
+            {
+                return Err(invalid_params("invalid identity".to_owned()));
             }
             let pubkey = identity.pubkey();
             self.jet_identity_updater
@@ -402,16 +402,14 @@ pub mod rpc_solana_like {
                         } else {
                             Cow::Borrowed("unknown")
                         }
+                    } else if maybe_txn_sig.is_some() {
+                        Cow::Borrowed("[REDACTED]")
                     } else {
-                        if maybe_txn_sig.is_some() {
-                            Cow::Borrowed("[REDACTED]")
-                        } else {
-                            Cow::Borrowed("unknown")
-                        }
+                        Cow::Borrowed("unknown")
                     };
                     warn!(
                         signature = %sig,
-                        x_request_id = %maybe_request_id.unwrap_or_else(|| Cow::Borrowed("unknown")),
+                        x_request_id = %maybe_request_id.unwrap_or(Cow::Borrowed("unknown")),
                         error = %err,
                         "send_transaction failed"
                     )

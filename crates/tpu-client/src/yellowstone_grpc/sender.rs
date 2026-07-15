@@ -608,7 +608,7 @@ impl YellowstoneTpuSender {
     /// In this case, sending multiple transactions to different validators sharing the same address may be redundant.
     /// By enabling this option, the sender will coalesce multiple sends to the same address into
     ///
-    pub fn set_coalesce_many_dest_collision(&mut self, coalesce: bool) {
+    pub const fn set_coalesce_many_dest_collision(&mut self, coalesce: bool) {
         self.coalesce_send_many_tpu_port_collision = coalesce;
     }
 
