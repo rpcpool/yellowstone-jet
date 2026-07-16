@@ -1,5 +1,5 @@
 use {
-    crate::{feature_flags::FeatureSet, util::CommitmentLevel},
+    crate::util::CommitmentLevel,
     anyhow::Context,
     serde::{
         Deserialize,
@@ -70,12 +70,12 @@ pub struct ConfigJet {
     /// Quic config
     pub quic: ConfigQuic,
 
-    /// Send events to Lewis
-    pub lewis_events: Option<ConfigLewisEvents>,
-
     /// Features Flags
+    ///#[serde(default)]
+    // pub features: FeatureSet,
+
     #[serde(default)]
-    pub features: FeatureSet,
+    pub enable_yellowstone_shield: bool,
 
     /// Prometheus Push Gateway
     pub prometheus: Option<PrometheusConfig>,

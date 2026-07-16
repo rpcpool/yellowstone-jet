@@ -3,7 +3,6 @@ use tikv_jemallocator::Jemalloc;
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
-    futures::future::FutureExt,
     jsonrpsee::http_client::HttpClientBuilder,
     reqwest::{Client, Url},
     solana_client::rpc_client::RpcClientConfig,
@@ -30,7 +29,7 @@ use {
         time::Instant,
     },
     tokio_util::sync::CancellationToken,
-    tracing::{error, info, warn},
+    tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
@@ -282,10 +281,7 @@ async fn run_jet(
     )
     .await;
 
-    let shield_policy_store = if config
-        .features
-        .is_feature_enabled(yellowstone_jet::proto::jet::Feature::YellowstoneShield)
-    {
+    let shield_policy_store = if config.enable_yellowstone_shield {
         let policy_store_config = config.upstream.clone().into();
         let policy_store = PolicyStore::build()
             .config(policy_store_config)
