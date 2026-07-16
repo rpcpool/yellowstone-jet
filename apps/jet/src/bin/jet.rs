@@ -4,7 +4,6 @@ use {
     anyhow::Context,
     clap::{Parser, Subcommand},
     jsonrpsee::http_client::HttpClientBuilder,
-    reqwest::{Client, Url},
     solana_client::rpc_client::RpcClientConfig,
     solana_commitment_config::CommitmentConfig,
     solana_keypair::{Keypair, read_keypair},
@@ -25,7 +24,7 @@ use {
         runtime::Builder,
         signal::unix::{SignalKind, signal},
         sync::{Mutex, watch},
-        task::{self, JoinHandle, JoinSet},
+        task::{self, JoinSet},
         time::Instant,
     },
     tokio_util::sync::CancellationToken,
@@ -33,10 +32,10 @@ use {
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
-        config::{ConfigJet, PrometheusConfig, RpcErrorStrategy, load_config},
+        config::{ConfigJet, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
-        metrics::{REGISTRY, collect_to_text, jet as metrics},
+        metrics::{REGISTRY, jet as metrics},
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
@@ -46,7 +45,7 @@ use {
             AlwaysAllowTransactionPolicyStore, FanoutConfig, QuicGatewayBidi, TransactionFanout,
             TransactionNoRetryScheduler, TransactionPolicyStore,
         },
-        util::{WaitShutdown, prom::inject_job_label},
+        util::WaitShutdown,
     },
     yellowstone_jet_tpu_client::core::{
         IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
@@ -444,19 +443,6 @@ async fn run_jet(
 
     tg_name_map.insert(ah.id(), "rooted_tx_receiver".to_string());
 
-    if let Some(config_prometheus) = config.prometheus {
-        let push_gw_task = spawn_push_prometheus_metrics(
-            identity_observer.clone(),
-            config_prometheus,
-            jet_cancellation_token.child_token(),
-        )
-        .await;
-        let ah = tg.spawn(async move {
-            push_gw_task.await.expect("prometheus_push_gw");
-        });
-        tg_name_map.insert(ah.id(), "prometheus_push_gw".to_string());
-    }
-
     if let Some(prometheus_bind_addr) = prometheus_bind_addr {
         let my_ct = jet_cancellation_token.child_token();
         tracing::info!(
@@ -536,39 +522,4 @@ async fn run_jet(
     }
     tg.abort_all();
     Ok(())
-}
-
-async fn spawn_push_prometheus_metrics(
-    mut jet_identity: watch::Receiver<Pubkey>,
-    config: PrometheusConfig,
-    cancellation_token: CancellationToken,
-) -> JoinHandle<()> {
-    let prometheus_url = Url::parse(&config.url).expect("");
-    let mut interval = tokio::time::interval(config.push_interval);
-    let client = Client::new();
-
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let current_identity = *jet_identity.borrow_and_update();
-                    let labels_to_inject = [
-                        ("job", "jet"),
-                        ("instance", &current_identity.to_string() as &str),
-                    ];
-                    if let Err(error) = client
-                        .post(prometheus_url.clone())
-                        .header("Content-Type", "text/plain")
-                        .body(inject_job_label(&collect_to_text(), labels_to_inject))
-                        .send()
-                        .await {
-                            warn!(?error, "Error pushing metrics");
-                        }
-                }
-                _ = cancellation_token.cancelled() => {
-                    break;
-                }
-            }
-        }
-    })
 }

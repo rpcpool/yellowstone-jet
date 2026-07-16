@@ -10,7 +10,7 @@ use {
     std::{
         collections::HashSet,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-        num::{NonZeroU64, NonZeroUsize},
+        num::NonZeroUsize,
         path::{Path, PathBuf},
         str::FromStr,
     },
@@ -55,9 +55,6 @@ pub struct ConfigJet {
     /// RPC & gRPC for upstream validator
     pub upstream: ConfigUpstream,
 
-    /// jet-gateway endpoints
-    pub jet_gateway: Option<ConfigJetGatewayClient>,
-
     /// Admin server listen options
     pub listen_admin: ConfigListenAdmin,
 
@@ -76,9 +73,6 @@ pub struct ConfigJet {
 
     #[serde(default)]
     pub enable_yellowstone_shield: bool,
-
-    /// Prometheus Push Gateway
-    pub prometheus: Option<PrometheusConfig>,
 
     /// Shield Program ID (Optional, default to yellowstone-shield-store default)
     #[serde(default, deserialize_with = "ConfigJet::deserialize_maybe_program_id")]
@@ -246,46 +240,6 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
                 initial_stream_window_size: None,
             },
         }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ConfigJetGatewayClient {
-    /// gRPC service endpoints, only one connection would be used
-    pub endpoints: Vec<String>,
-
-    /// Access token
-    pub x_token: Option<String>,
-
-    /// Maximum number of permit that can be received from jet-gateway, overrides staked-based stream computation.
-    /// If set to `None`, then stream size would be computed based on stake.
-    /// It is clipped to the maximum staked-based stream size.
-    #[serde(
-        default,
-        deserialize_with = "ConfigJetGatewayClient::deserialize_maybe_nonzero_u64"
-    )]
-    pub max_streams: Option<NonZeroU64>,
-
-    ///
-    /// Maximum number of subscribe attempts to the jet-gateway.
-    /// If set to `None`, then it would be infinite.
-    #[serde(default = "ConfigJetGatewayClient::default_maximum_subscribe_attempts")]
-    pub maximum_subscribe_attempts: Option<NonZeroUsize>,
-}
-
-impl ConfigJetGatewayClient {
-    fn deserialize_maybe_nonzero_u64<'de, D>(
-        deserializer: D,
-    ) -> Result<Option<NonZeroU64>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        // If 0 then fallback to None.
-        Ok(Option::<u64>::deserialize(deserializer)?.and_then(NonZeroU64::new))
-    }
-
-    const fn default_maximum_subscribe_attempts() -> Option<NonZeroUsize> {
-        None
     }
 }
 
@@ -614,40 +568,5 @@ pub struct PrometheusConfig {
 impl PrometheusConfig {
     const fn default_push_interval() -> Duration {
         Duration::from_secs(10)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_deser_jet_gateway_client() {
-        let yaml = r#"
-        max_streams: null
-        endpoints:
-            - http://127.0.0.1:8002
-        # Access token
-        x_token: null
-        "#;
-
-        let cfg: ConfigJetGatewayClient = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.endpoints, vec!["http://127.0.0.1:8002"]);
-        assert_eq!(cfg.max_streams, None);
-        assert_eq!(cfg.x_token, None);
-
-        // Interpret 0 as None
-        let yaml = r#"
-        max_streams: 0
-        endpoints:
-            - http://127.0.0.1:8002
-        # Access token
-        x_token: null
-        "#;
-
-        let cfg: ConfigJetGatewayClient = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.endpoints, vec!["http://127.0.0.1:8002"]);
-        assert_eq!(cfg.max_streams, None);
-        assert_eq!(cfg.x_token, None);
     }
 }
