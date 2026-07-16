@@ -26,9 +26,8 @@ use {
         time,
     },
     tokio_util::sync::CancellationToken,
-    tonic::transport::channel::ClientTlsConfig,
     tracing::{debug, error, info, warn},
-    yellowstone_grpc_client::{GeyserGrpcBuilder, GeyserGrpcClient},
+    yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcBuilder, GeyserGrpcClient},
     yellowstone_grpc_proto::{
         prelude::{
             BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel,

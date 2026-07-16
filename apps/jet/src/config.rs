@@ -72,7 +72,7 @@ pub struct ConfigJet {
     ///#[serde(default)]
     // pub features: FeatureSet,
 
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enable_yellowstone_shield: bool,
 
     /// Shield Program ID (Optional, default to yellowstone-shield-store default)
@@ -83,6 +83,10 @@ pub struct ConfigJet {
     /// This is useful for debugging transaction handling errors, but may cause log spam if there are many invalid transactions.
     #[serde(default)]
     pub log_invalid_txn: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 impl ConfigJet {
