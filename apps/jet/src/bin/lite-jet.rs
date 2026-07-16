@@ -2,8 +2,6 @@
 use tikv_jemallocator::Jemalloc;
 use {
     clap::{Parser, Subcommand},
-    solana_client::rpc_client::RpcClientConfig,
-    solana_commitment_config::CommitmentConfig,
     solana_keypair::Keypair,
     solana_rpc_client::http_sender::HttpSender,
     solana_signature::Signature,
@@ -24,13 +22,11 @@ use {
     tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
-        config::{ConfigJet, RpcErrorStrategy, load_config},
+        config::{ConfigJet, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         metrics::{REGISTRY, jet as metrics},
         rpc::{RpcServer, RpcServerType},
         setup_tracing,
-        solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
-        stake::spawn_cache_stake_info_map,
         transaction_handler::TransactionHandler,
         transactions::SendTransactionRequest,
         util::WaitShutdown,
@@ -117,39 +113,6 @@ async fn run_jet(
     if let Some(identity) = config.identity.expected {
         metrics::quic_set_identity_expected(identity);
     }
-
-    let retry_strategy = match config.upstream.rpc_on_error.clone() {
-        RpcErrorStrategy::Fixed { interval, retries } => Some(RetryRpcSenderStrategy::FixedDelay {
-            delay: interval,
-            max_retries: retries.get(),
-        }),
-        RpcErrorStrategy::Exponential {
-            base,
-            factor,
-            retries,
-        } => Some(RetryRpcSenderStrategy::ExponentialBackoff {
-            base,
-            exp: factor,
-            max_retries: retries.get(),
-        }),
-        RpcErrorStrategy::Fail => None,
-    };
-
-    let rpc_sender = HttpSender::new(config.upstream.rpc.clone());
-    let rpc_client_config = RpcClientConfig::with_commitment(CommitmentConfig::finalized());
-    let rpc_client = match retry_strategy {
-        Some(strategy) => {
-            let rpc_sender = RetryRpcSender::new(rpc_sender, strategy);
-            solana_client::nonblocking::rpc_client::RpcClient::new_sender(
-                rpc_sender,
-                rpc_client_config,
-            )
-        }
-        None => solana_client::nonblocking::rpc_client::RpcClient::new_sender(
-            rpc_sender,
-            rpc_client_config,
-        ),
-    };
 
     let shield_policy_store = if config.enable_yellowstone_shield {
         let policy_store_config = config.upstream.clone().into();
