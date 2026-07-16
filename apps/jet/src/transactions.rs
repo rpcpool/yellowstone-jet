@@ -3,7 +3,6 @@ use {
         blockhash_queue::BlockHeightService,
         cluster_tpu_info::ClusterTpuInfo,
         grpc_geyser::GrpcUpdateMessage,
-        grpc_lewis::LewisEventHandler,
         metrics::jet as metrics,
         rooted_transaction_state::{RootedTxEffect, RootedTxEvent, RootedTxStateMachine},
         solana::get_durable_nonce,
@@ -15,7 +14,7 @@ use {
     solana_signature::Signature,
     solana_transaction::versioned::VersionedTransaction,
     std::{
-        collections::{BTreeMap, HashMap, HashSet, VecDeque},
+        collections::{HashMap, HashSet},
         future::Future,
         sync::{Arc, RwLock as StdRwLock},
     },
@@ -64,123 +63,6 @@ pub trait RootedTxReceiver {
     async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)>;
 }
 
-///
-/// Processes transaction commitment updates from gRPC stream.
-///
-/// Uses a state machine to track transaction locations and commitment levels,
-/// notifying subscribers when transactions reach new commitment levels.
-/// The state machine is thread-safe (Arc<RwLock>) as trait methods can be
-/// called from different threads than the processing loop.
-///
-#[derive(Debug)]
-pub struct GrpcRootedTxReceiver {
-    state_machine: Arc<StdRwLock<RootedTxStateMachine>>,
-    rx: mpsc::UnboundedReceiver<(Signature, CommitmentLevel)>,
-}
-
-#[async_trait::async_trait]
-impl RootedTxReceiver for GrpcRootedTxReceiver {
-    fn get_transaction_commitment(&mut self, signature: Signature) -> Option<CommitmentLevel> {
-        let state_machine = self.state_machine.read().expect("RwLock poisoned");
-        state_machine
-            .state
-            .transactions
-            .get(&signature)
-            .and_then(|slot| state_machine.state.slots.get(slot))
-            .and_then(|info| info.blockmeta)
-            .map(|meta| meta.commitment)
-    }
-
-    fn subscribe_signature(&mut self, signature: Signature) {
-        let mut state_machine = self.state_machine.write().expect("RwLock poisoned");
-        state_machine.state.watched_signatures.insert(signature);
-    }
-
-    fn unsubscribe_signature(&mut self, signature: Signature) {
-        let mut state_machine = self.state_machine.write().expect("RwLock poisoned");
-        state_machine.state.watched_signatures.remove(&signature);
-    }
-
-    async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)> {
-        self.rx.recv().await
-    }
-}
-
-impl GrpcRootedTxReceiver {
-    pub fn new(grpc_rx: mpsc::Receiver<GrpcUpdateMessage>) -> (Self, impl Future) {
-        let state_machine = Arc::new(StdRwLock::new(RootedTxStateMachine::new()));
-        let (tx, rx) = mpsc::unbounded_channel();
-        let loop_fut = Self::start_loop(grpc_rx, Arc::clone(&state_machine), tx);
-        let this = Self { state_machine, rx };
-        (this, loop_fut)
-    }
-
-    async fn start_loop(
-        mut grpc_rx: mpsc::Receiver<GrpcUpdateMessage>,
-        state_machine: Arc<StdRwLock<RootedTxStateMachine>>,
-        signature_updates_tx: mpsc::UnboundedSender<RootedTransactionsUpdateSignature>,
-    ) {
-        let mut transactions_bulk = vec![];
-
-        loop {
-            let blockmeta_update = tokio::select! {
-                message = grpc_rx.recv() => match message {
-                    Some(GrpcUpdateMessage::Transaction(transaction)) => {
-                        transactions_bulk.push(transaction);
-                        continue;
-                    }
-                    Some(GrpcUpdateMessage::Slot(_)) => {
-                        // We don't need slot updates here
-                        continue;
-                    },
-                    Some(GrpcUpdateMessage::BlockMeta(blockmeta)) => blockmeta,
-                    None => break,
-                }
-            };
-
-            // Process events with the state machine locked
-            let effects = {
-                let mut state_machine = state_machine.write().expect("RwLock poisoned");
-
-                // Process buffered transactions first
-                let mut all_effects = Vec::new();
-                for tx in transactions_bulk.drain(..) {
-                    all_effects.extend(
-                        state_machine.process_event(RootedTxEvent::TransactionReceived(tx)),
-                    );
-                }
-
-                // Process block meta update
-                all_effects.extend(
-                    state_machine.process_event(RootedTxEvent::BlockMetaUpdate(blockmeta_update)),
-                );
-
-                all_effects
-            }; // Lock is released here
-
-            // Send notifications (outside the lock)
-            for effect in effects {
-                let RootedTxEffect::NotifyWatcher {
-                    signature,
-                    commitment,
-                } = effect;
-                if signature_updates_tx.send((signature, commitment)).is_err() {
-                    return;
-                }
-            }
-
-            // Update metrics
-            let transaction_count = state_machine
-                .read()
-                .expect("RwLock poisoned")
-                .state
-                .transactions
-                .len();
-            metrics::rooted_transactions_pool_set_size(transaction_count);
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct SendTransactionRequest {
     pub signature: Signature,
@@ -188,246 +70,6 @@ pub struct SendTransactionRequest {
     pub wire_transaction: Bytes,
     pub max_retries: Option<usize>,
     pub policies: Vec<Pubkey>,
-}
-
-struct RetryableTx {
-    tx: SendTransactionRequest,
-    leftover_attempt: usize,
-}
-
-///
-/// Transaction scheduler runtime that tracks which transaction landed and resends transactions that are not landed yet.
-///
-pub struct TransactionRetrySchedulerRuntime {
-    block_height_service: Arc<dyn BlockHeightService + Send + Sync + 'static>,
-    rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
-    last_known_block_height: u64,
-    tx_pool: HashMap<Signature, RetryableTx>,
-    block_height_deadline_map: BTreeMap<u64, Vec<Signature>>,
-    insertion_order: VecDeque<(Instant, Signature)>,
-    transaction_source: mpsc::UnboundedReceiver<SendTransactionRequest>,
-    response_sink: mpsc::UnboundedSender<SendTransactionRequest>,
-    retry_rate: tokio::time::Duration,
-    stop_send_on_commitment: CommitmentLevel,
-    max_retry: usize,
-    max_processing_age: u64,
-    dlq: Option<mpsc::UnboundedSender<TransactionRetrySchedulerDlqEvent>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransactionRetrySchedulerDlqEvent {
-    ReachedMaxProcessingAge(Signature),
-    ReachedMaxRetries(Signature),
-    AlreadyLanded(Signature),
-}
-
-impl TransactionRetrySchedulerRuntime {
-    pub async fn run(&mut self) {
-        let mut interval = tokio::time::interval(self.retry_rate);
-
-        loop {
-            tokio::select! {
-                now = interval.tick() => {
-                    self.gc_deadline_map();
-                    self.resend_non_landed_tx(now);
-                }
-                source = self.transaction_source.recv() => {
-                    match source {
-                        Some(newtx) => self.add_new_transaction(newtx, Instant::now()),
-                        None => {
-                            break;
-                        }
-                    }
-                }
-                maybe_signature_update = self.rooted_transactions.recv() => {
-                    match maybe_signature_update {
-                        Some((signature, commitment)) => self.handle_tx_commitment_update(signature, commitment),
-                        None => {
-                            error!("signature updates channel is closed");
-                            break;
-                        }
-                    }
-                },
-            }
-            metrics::sts_pool_set_size(self.tx_pool.len());
-        }
-    }
-
-    fn resend_non_landed_tx(&mut self, now: Instant) {
-        while let Some(inserted_at) = self.insertion_order.front().map(|(t, _)| *t) {
-            if now.duration_since(inserted_at) < self.retry_rate {
-                break;
-            }
-            let (_, signature) = self.insertion_order.pop_front().unwrap();
-            if let Some(rtx) = self.tx_pool.get_mut(&signature) {
-                if rtx.leftover_attempt > 0 {
-                    rtx.leftover_attempt = rtx.leftover_attempt.saturating_sub(1);
-                    tracing::trace!(
-                        "resending tx {signature}, attempts left: {}",
-                        rtx.leftover_attempt
-                    );
-                    let _ = self.response_sink.send(rtx.tx.clone());
-                    self.insertion_order.push_back((now, signature));
-                } else {
-                    self.tx_pool.remove(&signature);
-                    if let Some(dlq) = &self.dlq {
-                        let _ = dlq.send(TransactionRetrySchedulerDlqEvent::ReachedMaxRetries(
-                            signature,
-                        ));
-                    }
-                    tracing::trace!("tx {signature} reached max attempts, dropping it");
-                }
-            }
-        }
-    }
-
-    fn gc_deadline_map(&mut self) {
-        let outdated_block_height = self
-            .last_known_block_height
-            .saturating_sub(self.max_processing_age);
-        let right = self
-            .block_height_deadline_map
-            .split_off(&outdated_block_height);
-
-        let deprecrated_tx = std::mem::replace(&mut self.block_height_deadline_map, right);
-        let deprecated_cnt = deprecrated_tx.values().map(|v| v.len()).sum::<usize>();
-        if deprecated_cnt > 0 {
-            tracing::debug!(
-                "cleaning up {} outdated transactions from the deadline map",
-                deprecated_cnt
-            );
-        }
-        deprecrated_tx
-            .into_iter()
-            .flat_map(|(_, signatures)| signatures)
-            .for_each(|signature| {
-                self.tx_pool.remove(&signature);
-                self.rooted_transactions.unsubscribe_signature(signature);
-                if let Some(dlq) = &self.dlq {
-                    let _ = dlq.send(TransactionRetrySchedulerDlqEvent::ReachedMaxProcessingAge(
-                        signature,
-                    ));
-                }
-            });
-    }
-
-    fn handle_tx_commitment_update(&mut self, signature: Signature, commitment: CommitmentLevel) {
-        if commitment == self.stop_send_on_commitment {
-            tracing::trace!(
-                "transaction {signature} landed on commitment {commitment:?}, removing from the pool"
-            );
-            if self.tx_pool.remove(&signature).is_some() {
-                metrics::sts_landed_inc();
-            }
-        }
-    }
-
-    fn add_new_transaction(&mut self, tx: SendTransactionRequest, now: Instant) {
-        // Make sure to not double count this metric elsewhere.
-        metrics::sts_received_inc();
-        let max_retries = tx.max_retries.unwrap_or(0).min(self.max_retry);
-        let signature = tx.signature;
-
-        let current_block_height = self
-            .block_height_service
-            .get_block_height_for_commitment(CommitmentLevel::Confirmed)
-            .unwrap_or(0);
-        self.last_known_block_height = current_block_height;
-        let durable_nonce = get_durable_nonce(&tx.transaction);
-        let last_valid_block_height = if let Some(durable_nonce) = durable_nonce {
-            tracing::trace!(
-                %signature,
-                %durable_nonce,
-                "durable nonce transaction skipping blockhash validation"
-            );
-            current_block_height + self.max_processing_age
-        } else {
-            self.block_height_service
-                .get_block_height(tx.transaction.message.recent_blockhash())
-                .map(|block_height| block_height + self.max_processing_age)
-                .unwrap_or(current_block_height + self.max_processing_age)
-        };
-
-        tracing::trace!(
-            "received new transaction {signature}, max_retries: {max_retries}, last_valid_block_height: {last_valid_block_height}, current_block_height: {current_block_height}"
-        );
-
-        if last_valid_block_height < current_block_height {
-            if let Some(dlq) = &self.dlq {
-                let _ = dlq.send(TransactionRetrySchedulerDlqEvent::ReachedMaxProcessingAge(
-                    signature,
-                ));
-            }
-            tracing::warn!(
-                %signature,
-                last_valid_block_height,
-                current_block_height,
-                "transaction last valid block height is less than current block height, dropping transaction"
-            );
-            return;
-        }
-
-        let is_landed = self
-            .rooted_transactions
-            .get_transaction_commitment(signature)
-            .filter(|cl| cl >= &self.stop_send_on_commitment)
-            .is_some();
-
-        if is_landed {
-            tracing::debug!("skipping {signature}, transaction already landed");
-            metrics::sts_landed_inc();
-            if let Some(dlq) = &self.dlq {
-                let _ = dlq.send(TransactionRetrySchedulerDlqEvent::AlreadyLanded(signature));
-            }
-            return;
-        }
-
-        self.rooted_transactions.subscribe_signature(signature);
-        // -1 because we are going to send the transaction immediately
-        let leftover_attempt = max_retries.saturating_sub(1);
-
-        self.tx_pool.insert(
-            signature,
-            RetryableTx {
-                tx: tx.clone(),
-                leftover_attempt,
-            },
-        );
-        tracing::trace!(
-            "added transaction {signature} to the pool, attempts left: {}",
-            leftover_attempt
-        );
-        self.block_height_deadline_map
-            .entry(last_valid_block_height)
-            .or_default()
-            .push(signature);
-        let _ = self.response_sink.send(tx);
-        self.insertion_order.push_back((now, signature));
-    }
-}
-
-pub struct TransactionRetryScheduler {
-    pub sink: mpsc::UnboundedSender<SendTransactionRequest>,
-    pub source: mpsc::UnboundedReceiver<SendTransactionRequest>,
-}
-
-pub struct TransactionRetrySchedulerConfig {
-    pub retry_rate: tokio::time::Duration,
-    pub stop_send_on_commitment: CommitmentLevel,
-    pub max_retry: usize,
-    /// The maximum age of a transaction in blocks a transaction can stay in the scheduler pool.
-    pub transaction_max_processing_age: u64,
-}
-
-impl Default for TransactionRetrySchedulerConfig {
-    fn default() -> Self {
-        Self {
-            retry_rate: tokio::time::Duration::from_secs(1),
-            stop_send_on_commitment: CommitmentLevel::Confirmed,
-            max_retry: 3,
-            transaction_max_processing_age: MAX_PROCESSING_AGE as u64,
-        }
-    }
 }
 
 ///
@@ -510,58 +152,6 @@ impl TransactionNoRetryScheduler {
     }
 }
 
-impl TransactionRetryScheduler {
-    pub fn new(
-        config: TransactionRetrySchedulerConfig,
-        block_height_service: Arc<dyn BlockHeightService + Send + Sync + 'static>,
-        rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
-        dlq: Option<mpsc::UnboundedSender<TransactionRetrySchedulerDlqEvent>>,
-    ) -> Self {
-        Self::new_on(
-            config,
-            block_height_service,
-            rooted_transactions,
-            dlq,
-            tokio::runtime::Handle::current(),
-        )
-    }
-
-    pub fn new_on(
-        config: TransactionRetrySchedulerConfig,
-        block_height_service: Arc<dyn BlockHeightService + Send + Sync + 'static>,
-        rooted_transactions: Box<dyn RootedTxReceiver + Send + Sync + 'static>,
-        dlq: Option<mpsc::UnboundedSender<TransactionRetrySchedulerDlqEvent>>,
-        runtime: tokio::runtime::Handle,
-    ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (scheduler_resp_tx, scheduler_resp_rx) =
-            mpsc::unbounded_channel::<SendTransactionRequest>();
-        let mut scheduler_runtime = TransactionRetrySchedulerRuntime {
-            block_height_service,
-            rooted_transactions,
-            last_known_block_height: 0,
-            tx_pool: Default::default(),
-            block_height_deadline_map: Default::default(),
-            insertion_order: Default::default(),
-            transaction_source: rx,
-            retry_rate: config.retry_rate,
-            stop_send_on_commitment: config.stop_send_on_commitment,
-            max_retry: config.max_retry,
-            response_sink: scheduler_resp_tx,
-            max_processing_age: config.transaction_max_processing_age,
-            dlq,
-        };
-        // Automatically close the runtime when all reference to `tx` are dropped.
-        runtime.spawn(async move {
-            scheduler_runtime.run().await;
-        });
-        Self {
-            sink: tx,
-            source: scheduler_resp_rx,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FanoutConfig {
     #[deprecated(note = "use SmartFanout instead")]
@@ -587,7 +177,6 @@ pub struct TransactionFanout {
     transaction_send_set_meta: HashMap<task::Id, Signature>,
     inflight_transactions: HashSet<Signature>,
     fanout_config: FanoutConfig,
-    lewis_handler: Option<Arc<LewisEventHandler>>,
     extra_fwd: Arc<[Pubkey]>,
 }
 
@@ -662,7 +251,6 @@ impl TransactionFanout {
         // Extra remote peer to forward too
         fanout_config: FanoutConfig,
         extra_fwd: Vec<Pubkey>,
-        lewis_handler: Option<Arc<LewisEventHandler>>,
     ) -> Self {
         Self {
             leader_schedule_service,
@@ -673,7 +261,6 @@ impl TransactionFanout {
             transaction_send_set: JoinSet::new(),
             transaction_send_set_meta: HashMap::new(),
             inflight_transactions: HashSet::new(),
-            lewis_handler,
             extra_fwd: extra_fwd.into(),
             fanout_config,
         }
@@ -712,10 +299,11 @@ impl TransactionFanout {
 
     fn handle_gateway_response(&mut self, response: &TpuSenderResponse) {
         // Forward to Lewis if handler is configured
-        if let Some(handler) = &self.lewis_handler {
-            let current_slot = self.leader_schedule_service.get_current_slot();
-            handler.handle_gateway_response(response, current_slot);
-        }
+        // todo: implement new metrics collector.
+        // if let Some(handler) = &self.lewis_handler {
+        //     let current_slot = self.leader_schedule_service.get_current_slot();
+        //     handler.handle_gateway_response(response, current_slot);
+        // }
         match response {
             TpuSenderResponse::TxSent(gateway_tx_sent) => {
                 let tx_sig = gateway_tx_sent.tx_sig;
@@ -779,7 +367,6 @@ impl TransactionFanout {
         let policy_store_service = Arc::clone(&self.policy_store_service);
         let tpu_sink = self.tpu_sender.clone();
         let signature = tx.signature;
-        let lewis_handler = self.lewis_handler.clone();
         let extra_fwd = Arc::clone(&self.extra_fwd);
         let fanout_config = self.fanout_config;
         let send_fut = async move {
@@ -800,9 +387,10 @@ impl TransactionFanout {
             for (i, dest) in next_leaders.iter().enumerate() {
                 if !policy_store_service.is_allowed(&tx.policies, dest)? {
                     // Report skip to Lewis
-                    if let Some(handler) = &lewis_handler {
-                        handler.handle_skip(tx.signature, *dest, current_slot, &tx.policies);
-                    }
+                    // todo: report skip with new metrics collector.
+                    // if let Some(handler) = &lewis_handler {
+                    //     handler.handle_skip(tx.signature, *dest, current_slot, &tx.policies);
+                    // }
                     metrics::sts_tpu_denied_inc_by(1);
                     tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
                     continue;
