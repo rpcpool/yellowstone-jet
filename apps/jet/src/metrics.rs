@@ -51,10 +51,7 @@ pub fn collect_to_text() -> String {
 pub mod jet {
     use {
         super::{REGISTRY, init2},
-        crate::{
-            grpc_lewis,
-            util::{CommitmentLevel, SlotStatus},
-        },
+        crate::util::{CommitmentLevel, SlotStatus},
         prometheus::{
             Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
             IntGaugeVec, Opts,
@@ -280,7 +277,6 @@ pub mod jet {
             register!(HTTP_TX_REQUEST_DURATION);
 
             yellowstone_jet_tpu_client::prom::register_metrics(&REGISTRY);
-            grpc_lewis::prom::register_metrics(&REGISTRY);
         });
     }
 

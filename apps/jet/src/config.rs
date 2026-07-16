@@ -335,10 +335,6 @@ pub struct ConfigSendTransactionService {
     )]
     pub retry_rate: Duration,
 
-    /// Drop transactions from the pool once max retries limit is reached (landed statistic would be invalid)
-    #[serde(default)]
-    pub relay_only_mode: bool,
-
     /// Extra forward (transactions would be always sent to these nodes)
     /// regardless of the transaction yellowstone-shield policies.
     #[serde(default, deserialize_with = "deser_pubkey_vec")]
