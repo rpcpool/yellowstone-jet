@@ -18,6 +18,7 @@ use {
     },
     tracing::level_filters::LevelFilter,
     tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt},
+    url::Url,
     yellowstone_jet_tpu_client::{
         core::TpuSenderResponse,
         yellowstone_grpc::sender::{
@@ -92,14 +93,20 @@ async fn main() {
 
     let rpc_endpoint = match args.rpc {
         Some(endpoint) => endpoint,
-        None => env::var("RPC_ENDPOINT")
-            .expect("RPC_ENDPOINT must be set in dotenv file or environment"),
+        None => Url::parse(
+            &env::var("RPC_ENDPOINT")
+                .expect("RPC_ENDPOINT must be set in dotenv file or environment"),
+        )
+        .expect("Failed to parse RPC_ENDPOINT"),
     };
 
     let grpc_endpoint = match args.grpc {
         Some(endpoint) => endpoint,
-        None => env::var("GRPC_ENDPOINT")
-            .expect("GRPC_ENDPOINT must be set in dotenv file or environment"),
+        None => Url::parse(
+            &env::var("GRPC_ENDPOINT")
+                .expect("GRPC_ENDPOINT must be set in dotenv file or environment"),
+        )
+        .expect("Failed to parse GRPC_ENDPOINT"),
     };
 
     let grpc_x_token = match args.x_token {
@@ -131,7 +138,7 @@ async fn main() {
     };
 
     let rpc_client = Arc::new(RpcClient::new_with_commitment(
-        rpc_endpoint.clone(),
+        rpc_endpoint.to_string(),
         CommitmentConfig::confirmed(),
     ));
 
@@ -198,9 +205,9 @@ struct Args {
     dotenv: Option<PathBuf>,
     /// Endpoint to Yellowstone gRPC service
     #[clap(long, short)]
-    rpc: Option<String>,
+    rpc: Option<Url>,
     #[clap(long, short)]
-    grpc: Option<String>,
+    grpc: Option<Url>,
     /// X-Token for Yellowstone gRPC service
     x_token: Option<String>,
     ///

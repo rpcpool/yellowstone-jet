@@ -23,6 +23,7 @@ pub mod rpc;
 pub mod solana;
 pub mod solana_rpc_utils;
 pub mod stake;
+pub mod tpu_sink;
 pub mod transaction_handler;
 pub mod transactions;
 pub mod util;

@@ -84,6 +84,7 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"], optional = true }
+url = { workspace = true, derive = ["serde"] }
 
 # Agave Monorepo
 solana-client = { workspace = true }

@@ -1,6 +1,7 @@
 use {
     crate::util::CommitmentLevel,
     anyhow::Context,
+    reqwest::Url,
     serde::{
         Deserialize,
         de::{self, Deserializer},
@@ -157,7 +158,7 @@ pub struct ConfigUpstream {
 
     /// RPC endpoint
     #[serde(default = "ConfigUpstream::default_rpc")]
-    pub rpc: String,
+    pub rpc: Url,
 
     ///
     /// RPC retry strategy
@@ -188,8 +189,8 @@ impl ConfigUpstream {
         }
     }
 
-    fn default_rpc() -> String {
-        "http://127.0.0.1:8899".to_owned()
+    fn default_rpc() -> Url {
+        Url::parse("http://127.0.0.1:8899").unwrap()
     }
 
     const fn default_cluster_nodes_update_interval() -> Duration {
@@ -205,15 +206,15 @@ impl ConfigUpstream {
 pub struct ConfigUpstreamGrpc {
     /// gRPC service endpoint
     #[serde(default = "ConfigUpstreamGrpc::default_endpoint")]
-    pub endpoint: String,
+    pub endpoint: Url,
 
     /// Optional token for access to gRPC
     pub x_token: Option<String>,
 }
 
 impl ConfigUpstreamGrpc {
-    fn default_endpoint() -> String {
-        "http://127.0.0.1:10000".to_owned()
+    fn default_endpoint() -> Url {
+        Url::parse("http://127.0.0.1:10000").unwrap()
     }
 }
 
@@ -226,9 +227,11 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
         } = config;
 
         PolicyStoreConfig {
-            rpc: PolicyStoreRpcConfig { endpoint: rpc },
+            rpc: PolicyStoreRpcConfig {
+                endpoint: rpc.to_string(),
+            },
             grpc: PolicyStoreGrpcConfig {
-                endpoint,
+                endpoint: endpoint.to_string(),
                 x_token,
                 max_decoding_message_size: Some(100_000_000),
                 commitment: Some(ShieldStoreCommitmentLevel::Confirmed),

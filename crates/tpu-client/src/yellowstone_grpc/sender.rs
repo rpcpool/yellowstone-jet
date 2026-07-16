@@ -33,9 +33,14 @@ use {
     std::{
         collections::{BTreeSet, HashSet},
         fmt,
+        future::Future,
+        net::SocketAddr,
+        pin::Pin,
         sync::Arc,
+        task::{Context, Poll},
     },
     tokio::sync::mpsc::UnboundedSender,
+    url::Url,
     yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcBuilder, GeyserGrpcClient},
 };
 
@@ -413,6 +418,101 @@ impl Blocklist for NoBlocklist {
     }
 }
 
+enum YellowstoneSendTxnState<'a> {
+    Ready(Option<Result<(), SendError>>),
+    Sending(SendTxnManyDest<'a>),
+}
+
+pub struct YellowstoneSendTxn<'a> {
+    state: YellowstoneSendTxnState<'a>,
+}
+
+impl<'a> YellowstoneSendTxn<'a> {
+    fn ready(result: Result<(), SendError>) -> Self {
+        Self {
+            state: YellowstoneSendTxnState::Ready(Some(result)),
+        }
+    }
+
+    fn sending(
+        base_tpu_sender: &'a mut TpuSender,
+        sig: Signature,
+        wire_txn: Bytes,
+        dests: Vec<Pubkey>,
+    ) -> Self {
+        Self {
+            state: YellowstoneSendTxnState::Sending(SendTxnManyDest {
+                base_tpu_sender,
+                sig,
+                wire_txn,
+                dests,
+                next_dest: 0,
+                pending_txn: None,
+            }),
+        }
+    }
+}
+
+impl Future for YellowstoneSendTxn<'_> {
+    type Output = Result<(), SendError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut self.state {
+            YellowstoneSendTxnState::Ready(result) => {
+                Poll::Ready(result.take().expect("polled after completion"))
+            }
+            YellowstoneSendTxnState::Sending(fut) => Pin::new(fut).poll(cx),
+        }
+    }
+}
+
+struct SendTxnManyDest<'a> {
+    base_tpu_sender: &'a mut TpuSender,
+    sig: Signature,
+    wire_txn: Bytes,
+    dests: Vec<Pubkey>,
+    next_dest: usize,
+    pending_txn: Option<TpuSenderTxn>,
+}
+
+impl Future for SendTxnManyDest<'_> {
+    type Output = Result<(), SendError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        loop {
+            if this.pending_txn.is_some() {
+                let mut pending_txn = this.pending_txn.take();
+                match this.base_tpu_sender.poll_send_txn(cx, &mut pending_txn) {
+                    Poll::Ready(Ok(())) => continue,
+                    Poll::Ready(Err(_)) => {
+                        return Poll::Ready(Err(SendError {
+                            kind: SendErrorKind::Closed,
+                            txn: this.wire_txn.clone(),
+                        }));
+                    }
+                    Poll::Pending => {
+                        this.pending_txn = pending_txn;
+                        return Poll::Pending;
+                    }
+                }
+            }
+
+            if this.next_dest >= this.dests.len() {
+                return Poll::Ready(Ok(()));
+            }
+
+            let remote_peer = this.dests[this.next_dest];
+            this.next_dest += 1;
+            this.pending_txn = Some(TpuSenderTxn {
+                tx_sig: this.sig,
+                remote_peer,
+                wire: this.wire_txn.clone(),
+            });
+        }
+    }
+}
+
 #[cfg_attr(
     docsrs,
     doc(cfg(feature = "shield", doc = "only if `shield` feature-flag is enabled"))
@@ -469,46 +569,40 @@ impl YellowstoneTpuSender {
     ///
     /// If `dests` is empty, the function returns `Ok(())` immediately
     ///
-    pub async fn send_txn_many_dest<T>(
-        &mut self,
+    pub fn send_txn_many_dest<'a, T>(
+        &'a mut self,
         sig: Signature,
         txn: T,
         dests: &[Pubkey],
-    ) -> Result<(), SendError>
+    ) -> YellowstoneSendTxn<'a>
     where
         T: AsRef<[u8]> + Send + 'static,
     {
         if dests.is_empty() {
-            return Ok(());
+            return YellowstoneSendTxn::ready(Ok(()));
         }
 
-        let wire_txn = Bytes::from_owner(txn);
-        let mut dest_addr_vec = Vec::with_capacity(dests.len());
-
+        let mut selected_dests = Vec::with_capacity(dests.len());
+        let mut dest_addr_vec = Vec::<SocketAddr>::with_capacity(dests.len());
         for dest in dests {
             if let Some(addr) = self
                 .leader_tpu_info
                 .get_quic_dest_addr(dest, self.tpu_port_kind)
             {
                 if self.coalesce_send_many_tpu_port_collision && dest_addr_vec.contains(&addr) {
-                    // Skip duplicate address when coalescing is enabled
                     continue;
                 }
                 dest_addr_vec.push(addr);
             }
-            let tpu_txn = TpuSenderTxn {
-                tx_sig: sig,
-                remote_peer: *dest,
-                wire: wire_txn.clone(),
-            };
-            if self.base_tpu_sender.send_txn(tpu_txn).await.is_err() {
-                return Err(SendError {
-                    kind: SendErrorKind::Closed,
-                    txn: wire_txn,
-                });
-            }
+            selected_dests.push(*dest);
         }
-        Ok(())
+
+        YellowstoneSendTxn::sending(
+            &mut self.base_tpu_sender,
+            sig,
+            Bytes::from_owner(txn),
+            selected_dests,
+        )
     }
 
     ///
@@ -524,31 +618,28 @@ impl YellowstoneTpuSender {
     ///
     /// The fanout succeed if the sender can schedule at least one send to a leader.
     ///
-    async fn send_txn_fanout_with_blocklist<T, B>(
-        &mut self,
+    fn send_txn_fanout_with_blocklist<'a, T, B>(
+        &'a mut self,
         sig: Signature,
         txn: T,
         blocklist: Option<B>,
-    ) -> Result<(), SendError>
+    ) -> YellowstoneSendTxn<'a>
     where
         T: AsRef<[u8]> + Send + 'static,
-        B: Blocklist,
+        B: Blocklist + 'a,
     {
         let wire_txn = Bytes::from_owner(txn);
         let current_slot = match self.atomic_slot_tracker.load() {
             Ok(slot) => slot,
             Err(_) => {
-                return Err(SendError {
+                return YellowstoneSendTxn::ready(Err(SendError {
                     kind: SendErrorKind::SlotTrackerDisconnected,
                     txn: wire_txn,
-                });
+                }));
             }
         };
         let reminder = current_slot % 4;
         let floor_leader_boundary = current_slot.saturating_sub(reminder);
-
-        // Each leader gets 4 slots
-        // If we are near the boundary (2/4), we need to send to the next leader as well
         let n = if reminder >= 2 { 2 } else { 1 };
 
         let mut blocked_cnt = 0;
@@ -578,18 +669,18 @@ impl YellowstoneTpuSender {
         match result {
             Ok(leaders) => {
                 if leaders.is_empty() && blocked_cnt > 0 {
-                    Err(SendError {
+                    YellowstoneSendTxn::ready(Err(SendError {
                         kind: SendErrorKind::RemotePeerBlocked,
                         txn: wire_txn,
-                    })
+                    }))
                 } else {
-                    self.send_txn_many_dest(sig, wire_txn, &leaders).await
+                    self.send_txn_many_dest(sig, wire_txn, &leaders)
                 }
             }
-            Err(err_kind) => Err(SendError {
+            Err(err_kind) => YellowstoneSendTxn::ready(Err(SendError {
                 kind: err_kind,
                 txn: wire_txn,
-            }),
+            })),
         }
     }
 
@@ -627,12 +718,11 @@ impl YellowstoneTpuSender {
     /// `Ok(())` if the transaction was sent successfully, or a `SendError` if there was an error.
     ///
     ///
-    pub async fn send_txn<T>(&mut self, sig: Signature, txn: T) -> Result<(), SendError>
+    pub fn send_txn<'a, T>(&'a mut self, sig: Signature, txn: T) -> YellowstoneSendTxn<'a>
     where
         T: AsRef<[u8]> + Send + 'static,
     {
         self.send_txn_with_blocklist(sig, txn, Some(NoBlocklist))
-            .await
     }
 
     ///
@@ -649,18 +739,17 @@ impl YellowstoneTpuSender {
     /// `Ok(())` if the transaction was sent successfully, or a `SendError` if there was an error.
     ///
     ///
-    pub async fn send_txn_with_blocklist<T, B>(
-        &mut self,
+    pub fn send_txn_with_blocklist<'a, T, B>(
+        &'a mut self,
         sig: Signature,
         txn: T,
         blocklist: Option<B>,
-    ) -> Result<(), SendError>
+    ) -> YellowstoneSendTxn<'a>
     where
         T: AsRef<[u8]> + Send + 'static,
-        B: Blocklist,
+        B: Blocklist + 'a,
     {
         self.send_txn_fanout_with_blocklist(sig, txn, blocklist)
-            .await
     }
 
     #[cfg_attr(
@@ -679,17 +768,16 @@ impl YellowstoneTpuSender {
     ///
     ///  # Returns
     ///  `Ok(())` if the transaction was sent successfully, or a `SendError` if there was an error.
-    pub async fn send_txn_with_shield_policies<T>(
-        &mut self,
+    pub fn send_txn_with_shield_policies<'a, T>(
+        &'a mut self,
         sig: Signature,
         txn: T,
-        shield: ShieldBlockList<'_>,
-    ) -> Result<(), SendError>
+        shield: ShieldBlockList<'a>,
+    ) -> YellowstoneSendTxn<'a>
     where
         T: AsRef<[u8]> + Send + 'static,
     {
         self.send_txn_fanout_with_blocklist(sig, txn, Some(shield))
-            .await
     }
 
     ///
@@ -701,6 +789,334 @@ impl YellowstoneTpuSender {
     ///
     pub async fn update_identity(&mut self, new_identity: Keypair) {
         self.base_tpu_sender.update_identity(new_identity).await;
+    }
+}
+
+///
+/// Owned, in-progress multi-destination send state for [`PollTpuSender`].
+///
+/// Equivalent to [`SendTxnManyDest`], except its fields live inline in [`PollTpuSender`]
+/// instead of being borrowed from it, so it never needs a lifetime parameter.
+///
+struct PollPendingSend {
+    sig: Signature,
+    wire_txn: Bytes,
+    dests: Vec<Pubkey>,
+    next_dest: usize,
+    pending_txn: Option<TpuSenderTxn>,
+}
+
+///
+/// A poll-based equivalent of [`YellowstoneTpuSender`].
+///
+/// [`YellowstoneTpuSender`]'s send methods return a [`YellowstoneSendTxn`] future whose lifetime
+/// is tied to `&mut self` (and, for [`YellowstoneTpuSender::send_txn_with_shield_policies`], to
+/// the borrowed [`ShieldBlockList`] as well). That makes it impossible to store the returned
+/// future in a struct alongside the sender it borrows from without either boxing it or resorting
+/// to unsafe self-referential tricks.
+///
+/// [`PollTpuSender`] avoids that entirely: every `start_send_*` method resolves the destination
+/// list *synchronously* (exactly like [`YellowstoneTpuSender::send_txn_fanout_with_blocklist`]
+/// does internally) and stores the resulting fanout state as owned data inline
+/// ([`PollPendingSend`]). Any borrow (like [`ShieldBlockList`]) only needs to live for the
+/// duration of the `start_send_*` call itself.
+///
+/// # Usage
+///
+/// This mirrors the `start_send`/`poll_send` contract used by `futures::Sink`, except a
+/// single [`PollTpuSender`] only ever buffers one in-flight send at a time (there is no
+/// separate readiness check ahead of `start_send_*` -- draining via `poll_send` and being
+/// ready for the next send are the same condition here):
+///
+/// 1. Call one of the `start_send_*` methods to begin a send.
+/// 2. Call [`PollTpuSender::poll_send`] and wait for it to return `Poll::Ready`. This drains
+///    the started send to all of its destinations.
+/// 3. Once flushed, go back to step 1 to start the next send.
+///
+/// Calling a `start_send_*` method before a previously started send has been fully drained via
+/// [`PollTpuSender::poll_send`] is a logic error and will panic.
+///
+pub struct PollTpuSender {
+    sender: YellowstoneTpuSender,
+    pending: Option<PollPendingSend>,
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("disconnected")]
+pub struct PollSendError {
+    signature: Signature,
+    wire_txn: Bytes,
+    dests: Vec<Pubkey>,
+}
+
+impl PollTpuSender {
+    ///
+    /// Wraps an existing [`YellowstoneTpuSender`] in poll-based mode.
+    ///
+    pub fn new(sender: YellowstoneTpuSender) -> Self {
+        Self {
+            sender,
+            pending: None,
+        }
+    }
+
+    ///
+    /// Drives any in-progress send -- across all of its destinations -- to completion.
+    ///
+    /// Returns `Poll::Ready(Ok(()))` once there is no in-progress send, at which point a
+    /// `start_send_*` method may be called. Must be called (and must return `Poll::Ready`)
+    /// before every `start_send_*` call.
+    ///
+    pub fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), PollSendError>> {
+        loop {
+            let Some(pending) = self.pending.as_mut() else {
+                return Poll::Ready(Ok(()));
+            };
+
+            if pending.pending_txn.is_some() {
+                match self
+                    .sender
+                    .base_tpu_sender
+                    .poll_send_txn(cx, &mut pending.pending_txn)
+                {
+                    Poll::Ready(Ok(())) => continue,
+                    Poll::Ready(Err(_)) => {
+                        let txn = pending.wire_txn.clone();
+                        let err = PollSendError {
+                            signature: pending.sig,
+                            wire_txn: txn,
+                            dests: std::mem::take(&mut pending.dests),
+                        };
+                        self.pending = None;
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+
+            if pending.next_dest >= pending.dests.len() {
+                self.pending = None;
+                continue;
+            }
+
+            let remote_peer = pending.dests[pending.next_dest];
+            pending.next_dest += 1;
+            pending.pending_txn = Some(TpuSenderTxn {
+                tx_sig: pending.sig,
+                remote_peer,
+                wire: pending.wire_txn.clone(),
+            });
+        }
+    }
+
+    fn assert_ready_for_start_send(&self) {
+        assert!(
+            self.pending.is_none(),
+            "PollTpuSender::start_send_* called before poll_send returned Poll::Ready"
+        );
+    }
+
+    ///
+    /// Poll-based equivalent of [`YellowstoneTpuSender::send_txn_many_dest`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before a previously started send was fully drained via
+    /// [`PollTpuSender::poll_send`].
+    ///
+    pub fn start_send_txn_many_dest<T>(
+        &mut self,
+        sig: Signature,
+        txn: T,
+        dests: &[Pubkey],
+    ) -> Result<(), SendError>
+    where
+        T: AsRef<[u8]> + Send + 'static,
+    {
+        self.assert_ready_for_start_send();
+
+        let wire_txn = Bytes::from_owner(txn);
+        if dests.is_empty() {
+            return Ok(());
+        }
+
+        let mut selected_dests = Vec::with_capacity(dests.len());
+        let mut dest_addr_vec = Vec::<SocketAddr>::with_capacity(dests.len());
+        for dest in dests {
+            if let Some(addr) = self
+                .sender
+                .leader_tpu_info
+                .get_quic_dest_addr(dest, self.sender.tpu_port_kind)
+            {
+                if self.sender.coalesce_send_many_tpu_port_collision
+                    && dest_addr_vec.contains(&addr)
+                {
+                    continue;
+                }
+                dest_addr_vec.push(addr);
+            }
+            selected_dests.push(*dest);
+        }
+
+        self.pending = Some(PollPendingSend {
+            sig,
+            wire_txn,
+            dests: selected_dests,
+            next_dest: 0,
+            pending_txn: None,
+        });
+        Ok(())
+    }
+
+    ///
+    /// Poll-based equivalent of [`YellowstoneTpuSender::send_txn_with_blocklist`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before a previously started send was fully drained via
+    /// [`PollTpuSender::poll_send`].
+    ///
+    pub fn start_send_txn_with_blocklist<T, B>(
+        &mut self,
+        sig: Signature,
+        txn: T,
+        blocklist: Option<B>,
+    ) -> Result<(), SendError>
+    where
+        T: AsRef<[u8]> + Send + 'static,
+        B: Blocklist,
+    {
+        self.assert_ready_for_start_send();
+
+        let wire_txn = Bytes::from_owner(txn);
+        let current_slot = match self.sender.atomic_slot_tracker.load() {
+            Ok(slot) => slot,
+            Err(_) => {
+                return Err(SendError {
+                    kind: SendErrorKind::SlotTrackerDisconnected,
+                    txn: wire_txn,
+                });
+            }
+        };
+        let reminder = current_slot % 4;
+        let floor_leader_boundary = current_slot.saturating_sub(reminder);
+        let n = if reminder >= 2 { 2 } else { 1 };
+
+        let mut blocked_cnt = 0;
+        let result = (0..n)
+            .map(|i| floor_leader_boundary + (i * 4) as u64)
+            .map(|leader_slot_boundary| {
+                self.sender.leader_schedule.get_leader(leader_slot_boundary)
+            })
+            .filter_map(|res| match res {
+                Ok(None) => {
+                    panic!("unknown leader for slot boundary {floor_leader_boundary}");
+                }
+                Ok(Some(leader)) => {
+                    if let Some(blocklist) = &blocklist {
+                        if blocklist.is_blocked(&leader) {
+                            blocked_cnt += 1;
+                            None
+                        } else {
+                            Some(Ok(leader))
+                        }
+                    } else {
+                        Some(Ok(leader))
+                    }
+                }
+                Err(_) => Some(Err(SendErrorKind::ManagedLeaderScheduleDisconnected)),
+            })
+            .collect::<Result<Vec<_>, SendErrorKind>>();
+
+        match result {
+            Ok(leaders) => {
+                if leaders.is_empty() && blocked_cnt > 0 {
+                    Err(SendError {
+                        kind: SendErrorKind::RemotePeerBlocked,
+                        txn: wire_txn,
+                    })
+                } else {
+                    self.start_send_txn_many_dest(sig, wire_txn, &leaders)
+                }
+            }
+            Err(err_kind) => Err(SendError {
+                kind: err_kind,
+                txn: wire_txn,
+            }),
+        }
+    }
+
+    ///
+    /// Poll-based equivalent of [`YellowstoneTpuSender::send_txn`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before a previously started send was fully drained via
+    /// [`PollTpuSender::poll_send`].
+    ///
+    pub fn start_send_txn<T>(&mut self, sig: Signature, txn: T) -> Result<(), SendError>
+    where
+        T: AsRef<[u8]> + Send + 'static,
+    {
+        self.start_send_txn_with_blocklist(sig, txn, Some(NoBlocklist))
+    }
+
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(feature = "shield", doc = "only if `shield` feature-flag is enabled"))
+    )]
+    #[cfg(feature = "shield")]
+    ///
+    /// Poll-based equivalent of [`YellowstoneTpuSender::send_txn_with_shield_policies`].
+    ///
+    /// The [`ShieldBlockList`] borrow only needs to be valid for the duration of this call: it is
+    /// used synchronously to resolve the upcoming leaders into a destination list, which is then
+    /// owned by this [`PollTpuSender`] for the rest of the send.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before a previously started send was fully drained via
+    /// [`PollTpuSender::poll_send`].
+    ///
+    pub fn start_send_txn_with_shield_policies<T>(
+        &mut self,
+        sig: Signature,
+        txn: T,
+        shield: ShieldBlockList<'_>,
+    ) -> Result<(), SendError>
+    where
+        T: AsRef<[u8]> + Send + 'static,
+    {
+        self.start_send_txn_with_blocklist(sig, txn, Some(shield))
+    }
+
+    ///
+    /// Updates the identity keypair used by the underlying [`YellowstoneTpuSender`].
+    ///
+    pub async fn update_identity(&mut self, new_identity: Keypair) {
+        self.sender.update_identity(new_identity).await;
+    }
+
+    ///
+    /// Unwraps the underlying [`YellowstoneTpuSender`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if there is a send in-progress that hasn't been drained via
+    /// [`PollTpuSender::poll_send`].
+    ///
+    pub fn into_inner(self) -> YellowstoneTpuSender {
+        assert!(
+            self.pending.is_none(),
+            "PollTpuSender::into_inner called with a send in-progress"
+        );
+        self.sender
+    }
+}
+
+impl From<YellowstoneTpuSender> for PollTpuSender {
+    fn from(sender: YellowstoneTpuSender) -> Self {
+        Self::new(sender)
     }
 }
 
@@ -832,11 +1248,21 @@ where
 ///
 pub struct Endpoints {
     /// RPC endpoint URL.
-    pub rpc: String,
+    pub rpc: Url,
     /// gRPC endpoint URL.
-    pub grpc: String,
+    pub grpc: Url,
     /// Optional X-Token for authentication.
     pub grpc_x_token: Option<String>,
+}
+
+impl Default for Endpoints {
+    fn default() -> Self {
+        Self {
+            rpc: Url::parse("http://localhost:8899").unwrap(),
+            grpc: Url::parse("http://localhost:10000").unwrap(),
+            grpc_x_token: None,
+        }
+    }
 }
 
 ///
@@ -870,7 +1296,7 @@ where
         },
     ));
 
-    let grpc_client = GeyserGrpcBuilder::from_shared(grpc)
+    let grpc_client = GeyserGrpcBuilder::from_shared(grpc.as_str().to_owned())
         .expect("from_shared")
         .x_token(grpc_x_token)
         .expect("x-token")

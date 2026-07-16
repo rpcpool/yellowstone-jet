@@ -6428,6 +6428,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -7059,6 +7060,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "vergen",
  "yellowstone-grpc-client",
@@ -7124,6 +7126,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
  "x509-parser",
  "yellowstone-grpc-client",
  "yellowstone-grpc-proto",
