@@ -19,11 +19,6 @@ fn main() -> anyhow::Result<()> {
         get_pkg_version(&lockfile, "yellowstone-grpc-proto")
     );
 
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::set_var("PROTOC", protobuf_src::protoc()) };
-    tonic_prost_build::configure()
-        .compile_protos(&["proto/jet.proto", "proto/lewis.proto"], &["proto"])?;
-
     Ok(())
 }
 

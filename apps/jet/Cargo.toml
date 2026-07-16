@@ -50,9 +50,6 @@ tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
-tonic = { workspace = true, features = ["tls-native-roots"] }
-tonic-health = { workspace = true }
-tonic-prost = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"] }
@@ -102,9 +99,6 @@ yellowstone-shield-store = { workspace = true }
 anyhow = { workspace = true }
 cargo-lock = { workspace = true }
 git-version = { workspace = true }
-protobuf-src = { workspace = true }
-tonic-build = { workspace = true }
-tonic-prost-build = { workspace = true }
 vergen = { workspace = true, features = ["build", "rustc"] }
 
 [lints]
