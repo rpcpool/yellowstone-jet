@@ -1,12 +1,7 @@
 use {
     crate::{
-        blockhash_queue::BlockHeightService,
-        cluster_tpu_info::ClusterTpuInfo,
-        grpc_geyser::GrpcUpdateMessage,
-        metrics::jet as metrics,
-        rooted_transaction_state::{RootedTxEffect, RootedTxEvent, RootedTxStateMachine},
-        solana::get_durable_nonce,
-        util::CommitmentLevel,
+        blockhash_queue::BlockHeightService, cluster_tpu_info::ClusterTpuInfo,
+        metrics::jet as metrics, solana::get_durable_nonce, util::CommitmentLevel,
     },
     bytes::Bytes,
     solana_clock::{MAX_PROCESSING_AGE, Slot},
@@ -15,13 +10,11 @@ use {
     solana_transaction::versioned::VersionedTransaction,
     std::{
         collections::{HashMap, HashSet},
-        future::Future,
-        sync::{Arc, RwLock as StdRwLock},
+        sync::Arc,
     },
     tokio::{
         sync::mpsc::{self},
         task::{self, JoinSet},
-        time::Instant,
     },
     tracing::error,
     yellowstone_jet_tpu_client::core::{TpuSenderResponse, TpuSenderTxn, TpuSenderTxnInfo},
@@ -49,18 +42,6 @@ impl UpcomingLeaderSchedule for ClusterTpuInfo {
     fn get_current_slot(&self) -> Slot {
         self.latest_seen_slot()
     }
-}
-
-///
-/// Base trait for Rooted transaction update notifier
-///
-#[async_trait::async_trait]
-pub trait RootedTxReceiver {
-    fn subscribe_signature(&mut self, signature: Signature);
-    fn unsubscribe_signature(&mut self, signature: Signature);
-    // async fn unsubscribe_signatures(&mut self, signatures: Vec<Signature>);
-    fn get_transaction_commitment(&mut self, signature: Signature) -> Option<CommitmentLevel>;
-    async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)>;
 }
 
 #[derive(Debug, Clone)]
@@ -457,70 +438,4 @@ impl TransactionFanout {
 
 pub const fn module_path_for_test() -> &'static str {
     module_path!()
-}
-
-pub mod testkit {
-    use {
-        super::RootedTxReceiver,
-        crate::util::CommitmentLevel,
-        solana_signature::Signature,
-        std::{
-            collections::HashMap,
-            sync::{Arc, RwLock as StdRwLock},
-        },
-        tokio::sync::mpsc::{self, UnboundedReceiver},
-    };
-
-    #[derive(Default)]
-    struct MockRootedTxChannelShared {
-        transactions: HashMap<Signature, CommitmentLevel>,
-    }
-
-    pub struct MockRootedTransactionsTx {
-        shared: Arc<StdRwLock<MockRootedTxChannelShared>>,
-        tx: mpsc::UnboundedSender<(Signature, CommitmentLevel)>,
-    }
-
-    impl MockRootedTransactionsTx {
-        pub async fn send(&self, signature: Signature, commitment: CommitmentLevel) {
-            self.shared
-                .write()
-                .expect("shared lock poisoned")
-                .transactions
-                .insert(signature, Default::default());
-            self.tx.send((signature, commitment)).unwrap();
-        }
-    }
-
-    pub struct MockRootedTransactionsRx {
-        shared: Arc<StdRwLock<MockRootedTxChannelShared>>,
-        rx: UnboundedReceiver<(Signature, CommitmentLevel)>,
-    }
-
-    pub fn mock_rooted_tx_channel() -> (MockRootedTransactionsTx, MockRootedTransactionsRx) {
-        let shared = Default::default();
-        let (tx, rx) = mpsc::unbounded_channel();
-        let rooted_rx = MockRootedTransactionsRx {
-            shared: Arc::clone(&shared),
-            rx,
-        };
-        let rooted_tx = MockRootedTransactionsTx { shared, tx };
-        (rooted_tx, rooted_rx)
-    }
-
-    #[async_trait::async_trait]
-    impl RootedTxReceiver for MockRootedTransactionsRx {
-        fn subscribe_signature(&mut self, _signature: Signature) {}
-
-        fn unsubscribe_signature(&mut self, _signature: Signature) {}
-
-        fn get_transaction_commitment(&mut self, signature: Signature) -> Option<CommitmentLevel> {
-            let locked = self.shared.read().expect("shared lock poisoned");
-            locked.transactions.get(&signature).copied()
-        }
-
-        async fn recv(&mut self) -> Option<(Signature, CommitmentLevel)> {
-            self.rx.recv().await
-        }
-    }
 }

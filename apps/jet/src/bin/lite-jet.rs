@@ -2,7 +2,6 @@
 use tikv_jemallocator::Jemalloc;
 use {
     clap::{Parser, Subcommand},
-    futures::future::FutureExt,
     solana_client::rpc_client::RpcClientConfig,
     solana_commitment_config::CommitmentConfig,
     solana_keypair::Keypair,
@@ -12,10 +11,7 @@ use {
         collections::HashMap,
         net::SocketAddr,
         path::PathBuf,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
+        sync::atomic::{AtomicUsize, Ordering},
     },
     tokio::{
         runtime::Builder,
@@ -30,7 +26,6 @@ use {
         blockhash_queue::BlockhashQueue,
         config::{ConfigJet, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
-        identity::JetIdentitySyncMember,
         metrics::{REGISTRY, jet as metrics},
         rpc::{RpcServer, RpcServerType},
         setup_tracing,
@@ -156,18 +151,7 @@ async fn run_jet(
         ),
     };
 
-    let (stake_info_map, stake_info_bg_fut) = spawn_cache_stake_info_map(
-        rpc_client,
-        config.upstream.stake_update_interval,
-        None,
-        jet_cancellation_token.child_token(),
-    )
-    .await;
-
-    let shield_policy_store = if config
-        .features
-        .is_feature_enabled(yellowstone_jet::proto::jet::Feature::YellowstoneShield)
-    {
+    let shield_policy_store = if config.enable_yellowstone_shield {
         let policy_store_config = config.upstream.clone().into();
         let policy_store = PolicyStore::build()
             .config(policy_store_config)
@@ -308,9 +292,6 @@ async fn run_jet(
     .await;
 
     let mut sigint = signal(SignalKind::interrupt())?;
-
-    let ah = tg.spawn(stake_info_bg_fut);
-    tg_name_map.insert(ah.id(), "stake_refresh_task".to_string());
 
     let ah = tg.spawn(async move {
         geyser_handle
