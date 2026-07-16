@@ -104,11 +104,11 @@ pub struct RpcClusterTpuQuicInfoServiceConfig {
 }
 
 impl RpcClusterTpuQuicInfoServiceConfig {
-    pub fn default_refresh_interval() -> std::time::Duration {
+    pub const fn default_refresh_interval() -> std::time::Duration {
         DEFAULT_REFRESH_INTERVAL
     }
 
-    pub fn default_max_retry_attempts() -> usize {
+    pub const fn default_max_retry_attempts() -> usize {
         DEFAULT_MAX_RETRY_ATTEMPTS
     }
 }
@@ -333,6 +333,7 @@ mod tests {
             version: None,
             feature_set: None,
             shred_version: None,
+            client_id: None,
         };
 
         let info3 = RpcContactInfo {
@@ -350,6 +351,7 @@ mod tests {
             version: None,
             feature_set: None,
             shred_version: None,
+            client_id: None,
         };
 
         let mut info1_prime = info1.clone();

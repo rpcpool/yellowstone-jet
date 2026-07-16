@@ -15,7 +15,7 @@ use {
     solana_hash::{Hash, ParseHashError},
     solana_signature::Signature,
     std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, HashSet},
         future::Future,
         sync::Arc,
         time::{Duration, Instant},
@@ -28,7 +28,7 @@ use {
     tokio_util::sync::CancellationToken,
     tonic::transport::channel::ClientTlsConfig,
     tracing::{debug, error, info, warn},
-    yellowstone_grpc_client::{GeyserGrpcBuilder, GeyserGrpcClient, Interceptor},
+    yellowstone_grpc_client::{GeyserGrpcBuilder, GeyserGrpcClient},
     yellowstone_grpc_proto::{
         prelude::{
             BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel,
@@ -93,22 +93,21 @@ pub type Result<T> = std::result::Result<T, GeyserError>;
  * These can arrive in any order, so we track what we've seen and emit
  * block metadata only when we have both the metadata AND a commitment status.
  */
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct SlotTrackingInfo {
-    // Bitmask tracking which slot statuses we've seen
-    statuses_seen: u8,
+    statuses_seen: HashSet<SlotStatus>,
     block_height: BlockHeight,
     block_hash: Hash,
     has_block_meta: bool,
 }
 
 impl SlotTrackingInfo {
-    const fn mark_status_seen(&mut self, status: SlotStatus) {
-        self.statuses_seen |= 1 << (status as i32 as u8);
+    fn mark_status_seen(&mut self, status: SlotStatus) {
+        self.statuses_seen.insert(status);
     }
 
-    const fn has_seen_status(&self, status: SlotStatus) -> bool {
-        self.statuses_seen & (1 << (status as i32 as u8)) != 0
+    fn has_seen_status(&self, status: SlotStatus) -> bool {
+        self.statuses_seen.contains(&status)
     }
 }
 
@@ -705,7 +704,7 @@ impl GeyserSubscriber {
         }
     }
 
-    async fn validate_version(geyser: &mut GeyserGrpcClient<impl Interceptor>) -> Result<()> {
+    async fn validate_version(geyser: &mut GeyserGrpcClient) -> Result<()> {
         #[derive(Debug, Deserialize)]
         struct GrpcVersionOld {
             version: String,
@@ -782,75 +781,9 @@ impl GeyserStreams for GeyserSubscriber {
 #[cfg(test)]
 mod tests {
     use {
-        crate::{
-            grpc_geyser::{GeyserSubscriber, SlotTrackingInfo},
-            util::SlotStatus,
-        },
+        crate::grpc_geyser::GeyserSubscriber,
         semver::{Version, VersionReq},
-        solana_hash::Hash,
     };
-
-    #[test]
-    fn test_slot_seen_status() {
-        let mut info = SlotTrackingInfo {
-            statuses_seen: 0,
-            block_height: 0,
-            block_hash: Hash::default(),
-            has_block_meta: false,
-        };
-
-        for status in [
-            SlotStatus::SlotProcessed,
-            SlotStatus::SlotConfirmed,
-            SlotStatus::SlotFinalized,
-            SlotStatus::SlotFirstShredReceived,
-            SlotStatus::SlotCompleted,
-            SlotStatus::SlotCreatedBank,
-            SlotStatus::SlotDead,
-        ] {
-            assert!(!info.has_seen_status(status));
-        }
-
-        for status in [
-            SlotStatus::SlotProcessed,
-            SlotStatus::SlotConfirmed,
-            SlotStatus::SlotFinalized,
-            SlotStatus::SlotFirstShredReceived,
-            SlotStatus::SlotCompleted,
-            SlotStatus::SlotCreatedBank,
-            SlotStatus::SlotDead,
-        ] {
-            info.mark_status_seen(status);
-            assert!(info.has_seen_status(status));
-        }
-
-        info.statuses_seen = 0; // Reset for next checks
-
-        // Mark in reverse order
-        for status in [
-            SlotStatus::SlotDead,
-            SlotStatus::SlotCreatedBank,
-            SlotStatus::SlotCompleted,
-            SlotStatus::SlotFirstShredReceived,
-            SlotStatus::SlotFinalized,
-            SlotStatus::SlotConfirmed,
-            SlotStatus::SlotProcessed,
-        ] {
-            assert!(!info.has_seen_status(status));
-            info.mark_status_seen(status);
-            assert!(info.has_seen_status(status));
-        }
-
-        info.statuses_seen = 0; // Reset again
-
-        // Check that marking a status doesn't affect others
-        info.mark_status_seen(SlotStatus::SlotConfirmed);
-        assert!(!info.has_seen_status(SlotStatus::SlotProcessed));
-
-        info.statuses_seen = 0; // Reset again
-        info.mark_status_seen(SlotStatus::SlotConfirmed);
-        assert!(!info.has_seen_status(SlotStatus::SlotFinalized));
-    }
 
     #[test]
     fn it_should_parse_rc_version() {

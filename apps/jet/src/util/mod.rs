@@ -78,7 +78,7 @@ impl PartialOrd for CommitmentLevel {
 }
 
 // SlotStatus is used to represent the status of a slot in the gRPC API.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum SlotStatus {
     SlotProcessed,
@@ -155,7 +155,7 @@ impl IncrementalBackoff {
             let next_delay = self.initial_interval * 2u32.pow(retries);
             sleep(self.max_interval.min(next_delay)).await;
 
-            self.retries = Some(retries.checked_add(1).unwrap_or(u32::MAX));
+            self.retries = Some(retries.saturating_add(1));
         }
     }
 }

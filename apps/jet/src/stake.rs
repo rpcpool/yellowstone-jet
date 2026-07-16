@@ -10,7 +10,6 @@ use {
         QUIC_MAX_STAKED_CONCURRENT_STREAMS, QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
         QUIC_MIN_STAKED_CONCURRENT_STREAMS, QUIC_TOTAL_STAKED_CONCURRENT_STREAMS,
     },
-    solana_streamer::nonblocking::quic::ConnectionPeerType,
     std::{
         collections::HashMap,
         future::Future,
@@ -29,31 +28,26 @@ use {
 /// In Solana crates V3, they no longer compute the max allowed uni streams based on stake.
 /// We need this function to keep compatibility with the current gateway logic.
 /// After running in producer we don't find any issue keeping this function
-pub fn compute_max_allowed_uni_streams(peer_type: ConnectionPeerType, total_stake: u64) -> usize {
-    match peer_type {
-        ConnectionPeerType::Staked(peer_stake) => {
-            // No checked math for f64 type. So let's explicitly check for 0 here
-            if total_stake == 0 || peer_stake > total_stake {
-                tracing::warn!(
-                    "Invalid stake values: peer_stake: {:?}, total_stake: {:?}",
-                    peer_stake,
-                    total_stake,
-                );
+pub fn compute_max_allowed_uni_streams(peer_stake: u64, total_stake: u64) -> usize {
+    // No checked math for f64 type. So let's explicitly check for 0 here
+    if total_stake == 0 || peer_stake > total_stake {
+        tracing::warn!(
+            "Invalid stake values: peer_stake: {:?}, total_stake: {:?}",
+            peer_stake,
+            total_stake,
+        );
 
-                QUIC_MIN_STAKED_CONCURRENT_STREAMS
-            } else {
-                let delta = (QUIC_TOTAL_STAKED_CONCURRENT_STREAMS
-                    - QUIC_MIN_STAKED_CONCURRENT_STREAMS) as f64;
+        QUIC_MIN_STAKED_CONCURRENT_STREAMS
+    } else {
+        let delta =
+            (QUIC_TOTAL_STAKED_CONCURRENT_STREAMS - QUIC_MIN_STAKED_CONCURRENT_STREAMS) as f64;
 
-                (((peer_stake as f64 / total_stake as f64) * delta) as usize
-                    + QUIC_MIN_STAKED_CONCURRENT_STREAMS)
-                    .clamp(
-                        QUIC_MIN_STAKED_CONCURRENT_STREAMS,
-                        QUIC_MAX_STAKED_CONCURRENT_STREAMS,
-                    )
-            }
-        }
-        ConnectionPeerType::Unstaked => QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
+        (((peer_stake as f64 / total_stake as f64) * delta) as usize
+            + QUIC_MIN_STAKED_CONCURRENT_STREAMS)
+            .clamp(
+                QUIC_MIN_STAKED_CONCURRENT_STREAMS,
+                QUIC_MAX_STAKED_CONCURRENT_STREAMS,
+            )
     }
 }
 
@@ -70,7 +64,7 @@ pub fn stake_to_max_stream(stake: u64, total_stake: u64) -> u64 {
     if stake == 0 {
         QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS as u64
     } else {
-        compute_max_allowed_uni_streams(ConnectionPeerType::Staked(stake), total_stake) as u64
+        compute_max_allowed_uni_streams(stake, total_stake) as u64
     }
 }
 
@@ -375,6 +369,7 @@ pub mod tests {
             epoch_credits: vec![],
             last_vote: 1,
             root_slot: 1,
+            inflation_rewards_commission_bps: None,
         }
     }
 

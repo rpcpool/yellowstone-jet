@@ -26,7 +26,7 @@ pub struct CompactSortedSchedule {
 
 impl CompactSortedSchedule {
     #[inline]
-    pub fn last_slot(&self) -> u64 {
+    pub const fn last_slot(&self) -> u64 {
         self.first_slot + DEFAULT_SLOTS_PER_EPOCH - 1
     }
 
@@ -195,6 +195,12 @@ async fn auto_leader_schedule_loop(
         shared: Option<Arc<RwLock<InnerManagedLeaderSchedule>>>,
     }
 
+    impl AsRef<Arc<RwLock<InnerManagedLeaderSchedule>>> for OnDrop {
+        fn as_ref(&self) -> &Arc<RwLock<InnerManagedLeaderSchedule>> {
+            self.shared.as_ref().expect("shared")
+        }
+    }
+
     impl Drop for OnDrop {
         fn drop(&mut self) {
             if let Some(shared) = self.shared.take() {
@@ -210,7 +216,10 @@ async fn auto_leader_schedule_loop(
         }
     }
 
-    let initial = shared.read().expect("read").double_buffer.clone();
+    let shared = OnDrop {
+        shared: Some(shared),
+    };
+    let initial = shared.as_ref().read().expect("read").double_buffer.clone();
 
     let mut current_epoch = initial[0].first_slot / DEFAULT_SLOTS_PER_EPOCH;
 
@@ -241,7 +250,7 @@ async fn auto_leader_schedule_loop(
                 .expect("rpc_client.get_unnested_leader_schedule next")
                 .expect("None next schedule");
             {
-                let mut schedules = shared.write().expect("write");
+                let mut schedules = shared.as_ref().write().expect("write");
                 schedules.double_buffer[1] = next_schedule;
             }
 
@@ -272,7 +281,7 @@ async fn auto_leader_schedule_loop(
                 .expect("None next schedule");
 
             {
-                let mut schedules = shared.write().expect("write");
+                let mut schedules = shared.as_ref().write().expect("write");
                 schedules.double_buffer = [current_schedule, next_schedule];
             }
         }
@@ -297,7 +306,7 @@ impl ManagedLeaderScheduleConfig {
     ///
     /// Default check interval duration.
     ///
-    pub fn default_check_interval() -> std::time::Duration {
+    pub const fn default_check_interval() -> std::time::Duration {
         DEFAULT_AUTO_LEADER_SCHEDULE_CHECK_INTERVAL
     }
 }
@@ -335,7 +344,7 @@ pub async fn spawn_managed_leader_schedule(
         fail: AtomicBool::new(false),
     }));
 
-    let shared_clone = shared.clone();
+    let shared_clone = Arc::clone(&shared);
     let cancellation_token = tokio_util::sync::CancellationToken::new();
     let loop_ct = cancellation_token.clone();
     let jh = tokio::spawn(async move {

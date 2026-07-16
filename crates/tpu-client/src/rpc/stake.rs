@@ -213,7 +213,7 @@ pub struct RpcValidatorStakeInfoServiceConfig {
 }
 
 impl RpcValidatorStakeInfoServiceConfig {
-    fn default_refresh_interval() -> std::time::Duration {
+    const fn default_refresh_interval() -> std::time::Duration {
         DEFAULT_STAKE_INFO_REFRESH_INTERVAL
     }
 }
@@ -332,6 +332,7 @@ pub mod tests {
             epoch_credits: vec![],
             last_vote: 1,
             root_slot: 1,
+            inflation_rewards_commission_bps: None,
         }
     }
 

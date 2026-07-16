@@ -3,6 +3,7 @@ use {
         metrics::jet as metrics, payload::JetRpcSendTransactionConfig,
         transaction_handler::TransactionHandler,
     },
+    base64::Engine,
     bytes::Bytes,
     futures::future::{BoxFuture, FutureExt},
     hyper::{HeaderMap, Request, Response, StatusCode},
@@ -11,6 +12,7 @@ use {
     solana_rpc_client_api::config::RpcSendTransactionConfig,
     solana_transaction_status_client_types::UiTransactionEncoding,
     std::{
+        borrow::Cow,
         error::Error,
         str::FromStr,
         task::{Context, Poll},
@@ -144,6 +146,8 @@ pub struct HttpTransactionHandler {
     log_invalid_txn: bool,
 }
 
+const X_REQUEST_ID_HEADER: &str = "x-request-id";
+
 impl HttpTransactionHandler {
     pub const fn new(tx_handler: TransactionHandler, log_invalid_txn: bool) -> Self {
         Self {
@@ -162,6 +166,13 @@ impl HttpTransactionHandler {
                 "method not allowed, use POST",
             );
         }
+
+        let x_request_id = req
+            .headers()
+            .get(X_REQUEST_ID_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| Cow::Owned(s.to_owned()))
+            .unwrap_or_else(|| Cow::Borrowed("unknown"));
 
         let params = match RequestParams::parse(req.uri().query(), req.headers()) {
             Ok(p) => p,
@@ -265,10 +276,33 @@ impl HttpTransactionHandler {
                 }
             }
             Err(e) => {
-                metrics::http_tx_requests_inc("error", encoding_label);
-                if self.log_invalid_txn {
-                    warn!(error = %e, "HTTP transaction submission failed");
-                }
+                let encoding = if is_raw {
+                    "raw"
+                } else {
+                    params.encoding_label()
+                };
+                let body_bytes = if self.log_invalid_txn {
+                    if is_raw {
+                        let base64_body =
+                            base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+                        Cow::Owned(format!("[RAW DATA ENCODED] -- {}", base64_body))
+                    } else {
+                        match String::from_utf8(body_bytes.to_vec()) {
+                            Ok(s) => Cow::Owned(s),
+                            Err(_) => Cow::Borrowed("[INVALID UTF-8]"),
+                        }
+                    }
+                } else {
+                    Cow::Borrowed("[REDACTED]")
+                };
+                metrics::http_tx_requests_inc("error", encoding);
+                warn!(
+                    error = %e,
+                    x_request_id = %x_request_id,
+                    encoding = %encoding,
+                    body = %body_bytes,
+                    "HTTP transaction submission failed"
+                );
                 text_response(StatusCode::BAD_REQUEST, &e.to_string())
             }
         }
@@ -304,6 +338,9 @@ impl<S> HttpTxMiddleware<S> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct XRequestId(pub Cow<'static, str>);
+
 impl<S> Service<Request<Body>> for HttpTxMiddleware<S>
 where
     S: Service<Request<Body>, Response = Response<Body>>,
@@ -319,12 +356,21 @@ where
         self.service.poll_ready(cx).map_err(Into::into)
     }
 
-    fn call(&mut self, request: Request<Body>) -> Self::Future {
+    fn call(&mut self, mut request: Request<Body>) -> Self::Future {
+        let x_request_id = request
+            .headers()
+            .get(X_REQUEST_ID_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| Cow::Owned(s.to_owned()))
+            .unwrap_or_else(|| Cow::Borrowed("unknown"));
+        let x_request_id = XRequestId(x_request_id);
+
+        request.extensions_mut().insert(x_request_id);
+
         if request.uri().path() == API_TX_PATH {
             let handler = self.handler.clone();
             async move { Ok(handler.handle_request(request).await) }.boxed()
         } else {
-            let mut request = request;
             if simulation_performed(request.headers()) {
                 request.extensions_mut().insert(SimulationPerformed);
             }

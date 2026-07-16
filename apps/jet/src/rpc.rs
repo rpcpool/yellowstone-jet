@@ -278,10 +278,10 @@ pub mod rpc_admin {
 
     impl RpcServerImpl {
         async fn set_keypair(&self, identity: Keypair) -> RpcResult<()> {
-            if let Some(allow_ident) = &self.allowed_identity {
-                if allow_ident != &identity.pubkey() {
-                    return Err(invalid_params("invalid identity".to_owned()));
-                }
+            if let Some(allow_ident) = &self.allowed_identity
+                && allow_ident != &identity.pubkey()
+            {
+                return Err(invalid_params("invalid identity".to_owned()));
             }
             let pubkey = identity.pubkey();
             self.jet_identity_updater
@@ -299,8 +299,11 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            http_tx_handler::SimulationPerformed, metrics, payload::JetRpcSendTransactionConfig,
-            rpc::invalid_params, solana::decode_and_deserialize,
+            http_tx_handler::{SimulationPerformed, XRequestId},
+            metrics,
+            payload::JetRpcSendTransactionConfig,
+            rpc::invalid_params,
+            solana::decode_and_deserialize,
             transaction_handler::TransactionHandler,
         },
         jsonrpsee::{
@@ -311,7 +314,8 @@ pub mod rpc_solana_like {
         solana_rpc_client_api::response::RpcVersionInfo,
         solana_transaction::versioned::VersionedTransaction,
         solana_transaction_status_client_types::UiTransactionEncoding,
-        tracing::debug,
+        std::borrow::Cow,
+        tracing::{debug, warn},
     };
 
     #[rpc(server, client)]
@@ -341,21 +345,11 @@ pub mod rpc_solana_like {
             config: JetRpcSendTransactionConfig,
         ) -> RpcResult<String /* Signature */> {
             debug!("handling internal versioned transaction");
-            let maybe_txn_sig = transaction.signatures.first().cloned();
             self.tx_handler
                 .handle_versioned_transaction(transaction, config)
                 .await
                 .inspect_err(|e| {
                     let name = e.variant_name();
-                    if self.log_invalid_txn
-                        && let Some(signature) = maybe_txn_sig
-                    {
-                        tracing::warn!(
-                            error = %e,
-                            signature = signature.to_string(),
-                            category = "txn_handle_error",
-                        );
-                    }
                     metrics::jet::incr_versioned_txn_handler_error(name);
                 })
                 .map_err(Into::into)
@@ -391,15 +385,35 @@ pub mod rpc_solana_like {
 
             let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base58);
 
-            let (_, transaction) = decode_and_deserialize(
+            let (_, transaction) = decode_and_deserialize::<VersionedTransaction>(
                 data,
                 encoding
                     .into_binary_encoding()
                     .ok_or_else(|| invalid_params("unsupported encoding"))?,
             )?;
-
+            let maybe_txn_sig = transaction.signatures.first().cloned();
+            let maybe_request_id = extensions.get::<XRequestId>().map(|x| x.0.clone());
             self.handle_internal_transaction(transaction, config_with_policies)
                 .await
+                .inspect_err(|err| {
+                    let sig = if self.log_invalid_txn {
+                        if let Some(sig) = maybe_txn_sig {
+                            Cow::Owned(sig.to_string())
+                        } else {
+                            Cow::Borrowed("unknown")
+                        }
+                    } else if maybe_txn_sig.is_some() {
+                        Cow::Borrowed("[REDACTED]")
+                    } else {
+                        Cow::Borrowed("unknown")
+                    };
+                    warn!(
+                        signature = %sig,
+                        x_request_id = %maybe_request_id.unwrap_or(Cow::Borrowed("unknown")),
+                        error = %err,
+                        "send_transaction failed"
+                    )
+                })
         }
     }
 

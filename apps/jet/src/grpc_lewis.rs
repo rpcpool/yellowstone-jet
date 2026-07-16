@@ -280,11 +280,11 @@ async fn connect_and_stream(
 
     loop {
         // Check stream timeout
-        if let Some(deadline) = stream_deadline {
-            if tokio::time::Instant::now() >= deadline {
-                warn!("Stream timeout reached after {:?}", config.stream_timeout);
-                break;
-            }
+        if let Some(deadline) = stream_deadline
+            && tokio::time::Instant::now() >= deadline
+        {
+            warn!("Stream timeout reached after {:?}", config.stream_timeout);
+            break;
         }
 
         tokio::select! {

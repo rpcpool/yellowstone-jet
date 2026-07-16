@@ -608,7 +608,7 @@ impl YellowstoneTpuSender {
     /// In this case, sending multiple transactions to different validators sharing the same address may be redundant.
     /// By enabling this option, the sender will coalesce multiple sends to the same address into
     ///
-    pub fn set_coalesce_many_dest_collision(&mut self, coalesce: bool) {
+    pub const fn set_coalesce_many_dest_collision(&mut self, coalesce: bool) {
         self.coalesce_send_many_tpu_port_collision = coalesce;
     }
 
@@ -741,7 +741,7 @@ pub async fn create_yellowstone_tpu_sender_with_clients<CB>(
     config: YellowstoneTpuSenderConfig,
     initial_identity: Keypair,
     rpc_client: Arc<rpc_client::RpcClient>,
-    grpc_client: GeyserGrpcClient<impl yellowstone_grpc_client::Interceptor + Clone + 'static>,
+    grpc_client: GeyserGrpcClient,
     callback: Option<CB>,
 ) -> Result<NewYellowstoneTpuSender, CreateTpuSenderError>
 where

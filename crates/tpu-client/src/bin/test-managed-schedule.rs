@@ -10,7 +10,7 @@ use {
     },
     tracing::level_filters::LevelFilter,
     tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt},
-    yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcBuilder, GeyserGrpcClient, Interceptor},
+    yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcBuilder, GeyserGrpcClient},
     yellowstone_jet_tpu_client::{
         core::UpcomingLeaderPredictor,
         rpc::schedule::spawn_managed_leader_schedule,
@@ -32,10 +32,7 @@ pub fn setup_tracing() {
     subscriber.with(io_layer).try_init().expect("try_init");
 }
 
-async fn build_geyser_client(
-    endpoint: String,
-    x_token: Option<String>,
-) -> GeyserGrpcClient<impl Interceptor + Clone + 'static> {
+async fn build_geyser_client(endpoint: String, x_token: Option<String>) -> GeyserGrpcClient {
     GeyserGrpcBuilder::from_shared(endpoint)
         .expect("from_shared")
         .x_token(x_token)
