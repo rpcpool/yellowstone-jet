@@ -308,7 +308,7 @@ async fn run_jet(
     let blockhash_queue = BlockhashQueue::new(geyser.subscribe_block_meta());
 
     let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
-        config.upstream.rpc.clone(),
+        config.upstream.rpc.as_str().to_string(),
     ));
 
     let (cluster_tpu_info, cluster_tpu_info_tasks) = ClusterTpuInfo::new(

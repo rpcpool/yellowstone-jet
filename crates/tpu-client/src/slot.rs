@@ -30,6 +30,14 @@ impl AtomicSlotTracker {
     }
 
     ///
+    /// Builds an [`AtomicSlotTracker`] with a fixed initial slot for integration tests.
+    ///
+    #[cfg(any(test, feature = "intg-testing"))]
+    pub const fn new_for_test(initial_slot: u64) -> Self {
+        Self::new(initial_slot)
+    }
+
+    ///
     /// Load the current slot.
     ///
     /// Returns an error if the slot tracker is poisoned.

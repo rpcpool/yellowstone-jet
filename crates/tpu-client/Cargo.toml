@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet-tpu-client"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -16,18 +16,22 @@ exclude = ["src/bin/*"]
 [[bin]]
 name = "test-managed-schedule"
 path = "src/bin/test-managed-schedule.rs"
+required-features = ["examples"]
 
 [[bin]]
 name = "test-tpu-info"
 path = "src/bin/test-tpu-info.rs"
+required-features = ["examples"]
 
 [[bin]]
 name = "test-tpu-send"
 path = "src/bin/test-tpu-send.rs"
+required-features = ["examples"]
 
 [[bin]]
 name = "test-slot-tracker"
 path = "src/bin/test-slot-tracker.rs"
+required-features = ["examples"]
 
 [features]
 default = ["yellowstone-grpc"]
@@ -84,6 +88,7 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"], optional = true }
+url = { workspace = true, features = ["serde"] }
 
 # Agave Monorepo
 solana-client = { workspace = true }
@@ -116,6 +121,7 @@ yellowstone-shield-store = { workspace = true, optional = true }
 
 [dev-dependencies]
 x509-parser = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"] }
 
 [lints]
 workspace = true

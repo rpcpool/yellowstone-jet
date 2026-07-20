@@ -43,6 +43,7 @@ use crate::prom;
 use {
     crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
     bytes::Bytes,
+    core::fmt,
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
@@ -58,11 +59,12 @@ use {
     solana_tls_utils::{QuicClientCertificate, SkipServerVerification, new_dummy_x509_certificate},
     std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
+        future,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroUsize,
         pin::Pin,
-        sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
-        task::Poll,
+        sync::{Arc, Mutex as StdMutex, atomic::AtomicU8},
+        task::{Poll, ready},
         time::{Duration, Instant},
     },
     tokio::{
@@ -74,6 +76,7 @@ use {
         task::{self, Id, JoinError, JoinHandle, JoinSet},
         time::{Sleep, interval},
     },
+    tokio_util::sync::PollSender,
 };
 
 /// This has been copy-pasted from `solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID`
@@ -132,12 +135,40 @@ struct ConnectingMeta {
     created_at: Instant,
 }
 
+struct UpdateIdentityCallback {
+    shared: Option<Arc<UpdateIdentityInner>>,
+}
+
+impl Drop for UpdateIdentityCallback {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.take() {
+            shared.state.store(
+                UpdateIdentityInner::CANCELED,
+                std::sync::atomic::Ordering::Release,
+            );
+            shared.waker.wake();
+        }
+    }
+}
+
+impl UpdateIdentityCallback {
+    fn callback(mut self) {
+        if let Some(shared) = self.shared.take() {
+            shared.state.store(
+                UpdateIdentityInner::TRUE,
+                std::sync::atomic::Ordering::Release,
+            );
+            shared.waker.wake();
+        }
+    }
+}
+
 ///
 /// Inner part of the update identity command.
 ///
 struct UpdateIdentityCommand {
     new_identity: Keypair,
-    callback: Arc<UpdateIdentityInner>,
+    callback: UpdateIdentityCallback,
 }
 
 struct MultiStepIdentitySynchronizationCommand {
@@ -149,8 +180,23 @@ struct MultiStepIdentitySynchronizationCommand {
 /// Command to control driver behavior.
 ///
 enum DriverCommand {
-    UpdateIdenttiy(UpdateIdentityCommand),
+    UpdateIdentity(UpdateIdentityCommand),
     MultiStepIdentitySynchronization(MultiStepIdentitySynchronizationCommand),
+}
+
+impl fmt::Debug for DriverCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DriverCommand::UpdateIdentity(cmd) => f
+                .debug_struct("UpdateIdentity")
+                .field("new_identity", &cmd.new_identity.pubkey())
+                .finish(),
+            DriverCommand::MultiStepIdentitySynchronization(cmd) => f
+                .debug_struct("MultiStepIdentitySynchronization")
+                .field("new_identity", &cmd.new_identity.pubkey())
+                .finish(),
+        }
+    }
 }
 
 enum DriverTaskMeta {
@@ -1641,7 +1687,7 @@ where
                     prom::incr_quic_gw_tx_connection_cache_miss_cnt();
                 }
             }
-            tracing::warn!(
+            tracing::debug!(
                 "Skipping connection attempt to remote peer: {} since it is already connecting",
                 remote_peer_identity
             );
@@ -1649,7 +1695,7 @@ where
         }
 
         if self.being_evicted_peers.contains(&remote_peer_identity) {
-            tracing::warn!(
+            tracing::debug!(
                 "Skipping connection attempt to remote peer: {} since it is being evicted",
                 remote_peer_identity
             );
@@ -1660,7 +1706,7 @@ where
             .tx_worker_handle_map
             .contains_key(&remote_peer_identity)
         {
-            tracing::warn!(
+            tracing::debug!(
                 "Skipping connection attempt to remote peer: {} since it already has a worker",
                 remote_peer_identity
             );
@@ -2137,7 +2183,7 @@ where
                                 // EACH REATTEMPT SPAWNS A NEW CONNECTING TASK WITH ATTEMPT COUNT EQUALS TO PREVIOUS ATTEMPT COUNT + 1.
                                 // AFTER REACHING MAX ATTEMPTS, THE DEFAULT MATCH BRANCH WILL HANDLE THE FAILURE CALLED "whatever".
 
-                                tracing::warn!(
+                                tracing::info!(
                                     "Connection attempt {} to remote peer: {multiplexed_remote_peer_identity_vec:?} failed, retrying...",
                                     connection_attempt
                                 );
@@ -2696,16 +2742,13 @@ where
 
     async fn handle_cnc(&mut self, command: DriverCommand) {
         match command {
-            DriverCommand::UpdateIdenttiy(cmd) => {
+            DriverCommand::UpdateIdentity(cmd) => {
                 let UpdateIdentityCommand {
                     new_identity,
                     callback,
                 } = cmd;
                 let fake_barrier = async {
-                    callback
-                        .set
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    callback.waker.wake();
+                    callback.callback();
                 };
                 self.update_identity(new_identity, fake_barrier).await;
             }
@@ -3382,7 +3425,7 @@ impl TpuSenderDriverSpawner {
         TpuSenderSessionContext {
             driver_tx_sink: tx_inlet,
             identity_updater: TpuSenderIdentityUpdater {
-                cnc_tx: driver_cnc_tx,
+                cnc_tx: PollSender::new(driver_cnc_tx),
             },
             driver_join_handle: jh,
         }
@@ -3392,11 +3435,12 @@ impl TpuSenderDriverSpawner {
 ///
 /// Handle to update the identity used by the TPU sender driver.
 ///
+#[derive(Clone)]
 pub struct TpuSenderIdentityUpdater {
     ///
     /// Command-and-control channel to send command to the QUIC driver
     ///  
-    cnc_tx: mpsc::Sender<DriverCommand>,
+    cnc_tx: PollSender<DriverCommand>,
 }
 
 ///
@@ -3406,25 +3450,25 @@ impl TpuSenderIdentityUpdater {
     ///
     /// Changes the configured identity in the QUIC driver
     ///
-    pub async fn update_identity(&mut self, identity: Keypair) {
+    pub fn update_identity(&mut self, identity: Keypair) -> UpdateIdentity {
         let shared = UpdateIdentityInner {
-            set: AtomicBool::new(false),
+            state: AtomicU8::new(UpdateIdentityInner::FALSE),
             waker: AtomicWaker::new(),
         };
         let shared = Arc::new(shared);
+        let callback = UpdateIdentityCallback {
+            shared: Some(Arc::clone(&shared)),
+        };
         let cmd = UpdateIdentityCommand {
             new_identity: identity,
-            callback: Arc::clone(&shared),
+            callback,
         };
-        self.cnc_tx
-            .send(DriverCommand::UpdateIdenttiy(cmd))
-            .await
-            .expect("disconnected");
-        let update_identity = UpdateIdentity {
+        let cnc_tx = self.cnc_tx.clone();
+
+        UpdateIdentity {
             inner: shared,
-            _this: self,
-        };
-        update_identity.await
+            state: UpdateIdentityState::Init { cnc_tx, cmd },
+        }
     }
 
     ///
@@ -3446,10 +3490,26 @@ impl TpuSenderIdentityUpdater {
             new_identity: identity,
             barrier,
         };
-        self.cnc_tx
-            .send(DriverCommand::MultiStepIdentitySynchronization(cmd))
+        let mut cnc_tx = self.cnc_tx.clone();
+        future::poll_fn(|cx| cnc_tx.poll_reserve(cx))
             .await
             .expect("disconnected");
+        cnc_tx
+            .send_item(DriverCommand::MultiStepIdentitySynchronization(cmd))
+            .expect("disconnected");
+    }
+
+    ///
+    /// Builds a [`TpuSenderIdentityUpdater`] backed by an already-closed channel, for use in
+    /// tests that only need a placeholder value (e.g. to construct a [`TpuSender`](crate::sender::TpuSender))
+    /// and don't exercise identity updates.
+    ///
+    #[cfg(test)]
+    pub(crate) fn new_test_disconnected() -> Self {
+        let (cnc_tx, _cnc_rx) = tokio::sync::mpsc::channel(1);
+        Self {
+            cnc_tx: PollSender::new(cnc_tx),
+        }
     }
 }
 
@@ -3457,37 +3517,105 @@ impl TpuSenderIdentityUpdater {
 /// The shared state used to notify the completion of the identity update.
 /// See [`UpdateIdentity`] for more details.
 struct UpdateIdentityInner {
-    set: AtomicBool,
+    state: AtomicU8,
     waker: AtomicWaker,
+}
+
+// impl Drop for UpdateIdentityInner {
+//     fn drop(&mut self) {
+//         // If the future is dropped before the identity update is completed, we need to notify the driver to cancel the update.
+//         let last_state = self.state.load(std::sync::atomic::Ordering::Acquire);
+//         if last_state == UpdateIdentityInner::TRUE || last_state == UpdateIdentityInner::CANCELED_FLAG {
+//             // The update has already completed or been canceled, no need to do anything.
+//             return;
+//         }
+//         self.state
+//             .store(UpdateIdentityInner::CANCELED_FLAG, std::sync::atomic::Ordering::SeqCst);
+//         self.waker.wake();
+//     }
+// }
+
+impl UpdateIdentityInner {
+    const FALSE: u8 = 0;
+    const TRUE: u8 = 1;
+    // the last bit is used to indicate that the update has been canceled, and the future should return an error.
+    const CANCELED: u8 = 0x80;
+}
+
+#[allow(clippy::large_enum_variant)]
+enum UpdateIdentityState {
+    Init {
+        cnc_tx: PollSender<DriverCommand>,
+        cmd: UpdateIdentityCommand,
+    },
+    Closed,
+    WaitingForCompletion,
 }
 
 ///
 /// Future that waits for the identity update to complete.
 /// This future is used to ensure that the identity update is completed before proceeding.
 ///
-pub struct UpdateIdentity<'a> {
+pub struct UpdateIdentity {
     inner: Arc<UpdateIdentityInner>,
-    _this: &'a TpuSenderIdentityUpdater, /* phantom data to prevent two threads from updating the identity at the same time */
+    state: UpdateIdentityState,
 }
 
-impl Future for UpdateIdentity<'_> {
-    type Output = ();
+impl UpdateIdentity {
+    const fn take_state(&mut self) -> UpdateIdentityState {
+        std::mem::replace(&mut self.state, UpdateIdentityState::Closed)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("tpu sender runtime closed")]
+pub struct UpdateIdentityError;
+
+impl Future for UpdateIdentity {
+    type Output = Result<(), UpdateIdentityError>;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        // quick check to avoid registration if already done.
-        if self.inner.set.load(std::sync::atomic::Ordering::Relaxed) {
-            return Poll::Ready(());
-        }
+        let this = self.get_mut();
 
-        self.inner.waker.register(cx.waker());
+        let (result, next_state) = match this.take_state() {
+            UpdateIdentityState::Init { mut cnc_tx, cmd } => {
+                match ready!(cnc_tx.poll_reserve(cx)) {
+                    Ok(()) => {
+                        match cnc_tx.send_item(DriverCommand::UpdateIdentity(cmd)) {
+                            Ok(()) => {
+                                this.inner.waker.register(cx.waker());
+                                // Between the time we send and the registration, the driver may have already completed the update and set the atomic bool.
+                                // So we need to immediately wake the waker, so that the next poll will check the atomic bool and return ready if the update is already complete.
+                                cx.waker().wake_by_ref();
+                                (None, UpdateIdentityState::WaitingForCompletion)
+                            }
+                            Err(_) => (Some(Err(UpdateIdentityError)), UpdateIdentityState::Closed),
+                        }
+                    }
+                    Err(_) => (Some(Err(UpdateIdentityError)), UpdateIdentityState::Closed),
+                }
+            }
+            UpdateIdentityState::WaitingForCompletion => {
+                match this.inner.state.load(std::sync::atomic::Ordering::Relaxed) {
+                    UpdateIdentityInner::TRUE => (Some(Ok(())), UpdateIdentityState::Closed),
+                    UpdateIdentityInner::FALSE => (None, UpdateIdentityState::WaitingForCompletion),
+                    UpdateIdentityInner::CANCELED => {
+                        (Some(Err(UpdateIdentityError)), UpdateIdentityState::Closed)
+                    }
+                    _ => panic!("Unexpected state"),
+                }
+            }
+            UpdateIdentityState::Closed => {
+                panic!("UpdateIdentity polled after completion");
+            }
+        };
 
-        // Need to check condition **after** `register` to avoid a race
-        // condition that would result in lost notifications.
-        if self.inner.set.load(std::sync::atomic::Ordering::Relaxed) {
-            Poll::Ready(())
+        this.state = next_state;
+        if let Some(result) = result {
+            Poll::Ready(result)
         } else {
             Poll::Pending
         }
@@ -3508,15 +3636,35 @@ mod test {
         solana_pubkey::Pubkey,
         std::time::Duration,
         tokio::sync::mpsc,
+        tokio_util::sync::PollSender,
     };
+
+    #[tokio::test]
+    async fn update_identity_should_return_error_if_dropped_before_completion() {
+        let (cnc_tx, cnc_rx) = mpsc::channel(10);
+        let mut updater: TpuSenderIdentityUpdater = TpuSenderIdentityUpdater {
+            cnc_tx: PollSender::new(cnc_tx),
+        };
+
+        let identity = Keypair::new();
+        let mut update_fut = updater.update_identity(identity.insecure_clone());
+        let xs = futures::poll!(&mut update_fut);
+        assert!(xs.is_pending());
+        drop(updater);
+        drop(cnc_rx);
+        let result = update_fut.await;
+        assert!(result.is_err());
+    }
 
     #[tokio::test]
     async fn test_update_identity_fut() {
         let (cnc_tx, mut cnc_rx) = mpsc::channel(10);
-        let mut updater = TpuSenderIdentityUpdater { cnc_tx };
+        let mut updater = TpuSenderIdentityUpdater {
+            cnc_tx: PollSender::new(cnc_tx),
+        };
 
         let jh = tokio::spawn(async move {
-            let DriverCommand::UpdateIdenttiy(UpdateIdentityCommand {
+            let DriverCommand::UpdateIdentity(UpdateIdentityCommand {
                 new_identity,
                 callback,
             }) = cnc_rx.recv().await.unwrap()
@@ -3525,15 +3673,15 @@ mod test {
             };
             tokio::time::sleep(Duration::from_secs(2)).await;
             // This can be relaxed because `wake` hides `Released` memory barrier.
-            callback
-                .set
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            callback.waker.wake();
+            callback.callback();
             new_identity
         });
 
         let identity = Keypair::new();
-        updater.update_identity(identity.insecure_clone()).await;
+        updater
+            .update_identity(identity.insecure_clone())
+            .await
+            .unwrap();
 
         let actual = jh.await.unwrap();
         assert_eq!(actual, identity)

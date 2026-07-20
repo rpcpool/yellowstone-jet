@@ -6395,6 +6395,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -7031,6 +7032,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "vergen",
  "yellowstone-grpc-client",
@@ -7041,7 +7043,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet-tpu-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7096,6 +7098,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
  "x509-parser",
  "yellowstone-grpc-client",
  "yellowstone-grpc-proto",

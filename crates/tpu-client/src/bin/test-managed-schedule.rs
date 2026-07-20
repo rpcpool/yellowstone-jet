@@ -130,12 +130,12 @@ async fn main() {
         tokio::select! {
             _ = interval.tick() => {},
             _ = &mut ctrlc => break,
-            _ = &mut slot_tracker_jh => {
-                tracing::error!("Yellowstone slot tracker task exited unexpectedly");
-                break;
-            }
             _ = &mut managed_leader_schedule_jh => {
                 tracing::error!("managed leader schedule task exited unexpectedly");
+                break;
+            }
+            _ = &mut slot_tracker_jh => {
+                tracing::error!("Yellowstone slot tracker task exited unexpectedly");
                 break;
             }
         }
