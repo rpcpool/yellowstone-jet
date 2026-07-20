@@ -234,7 +234,7 @@ impl GeyserSubscriber {
                     info!("gRPC subscriber: cancellation token triggered, shutting down...");
                     return Ok(());
                 },
-                result = Self::grpc_open(&endpoint, x_token.as_deref(), true, include_transactions) => {
+                result = Self::grpc_open(endpoint.as_str(), x_token.as_deref(), true, include_transactions) => {
                     result
                 }
                 _ = time::sleep(Duration::from_secs(30)) => {

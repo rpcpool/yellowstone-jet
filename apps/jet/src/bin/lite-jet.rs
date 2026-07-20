@@ -44,7 +44,7 @@ use {
         core::{TpuSenderResponse, TpuSenderResponseCallback},
         yellowstone_grpc::sender::{
             Endpoints, NewYellowstoneTpuSender, ShieldBlockList, YellowstoneTpuSender,
-            create_yellowstone_tpu_sender_with_callback,
+            YellowstoneTpuSenderConfig, create_yellowstone_tpu_sender_with_callback,
         },
     },
     yellowstone_shield_store::PolicyStore,
@@ -222,13 +222,18 @@ async fn run_jet(
             }
         }
     }
+
+    let ys_tpu_sender_config = YellowstoneTpuSenderConfig {
+        endpoints: tpu_sender_endpoints.clone(),
+        ..Default::default()
+    };
+
     let NewYellowstoneTpuSender {
         sender,
         related_objects_jh,
     } = create_yellowstone_tpu_sender_with_callback(
-        Default::default(),
+        ys_tpu_sender_config,
         initial_identity.insecure_clone(),
-        tpu_sender_endpoints,
         LoggingCallback,
     )
     .await

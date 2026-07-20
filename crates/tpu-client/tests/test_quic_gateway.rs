@@ -477,7 +477,8 @@ async fn it_should_update_gatway_identity() {
 
     identity_updater
         .update_identity(gateway_identity2.insecure_clone())
-        .await;
+        .await
+        .unwrap();
 
     let txn = TpuSenderTxn::from_owned(
         Signature::new_unique(),
@@ -1259,7 +1260,8 @@ async fn it_should_support_multiplexed_connection() {
 
     identity_updater
         .update_identity(tpu_sender_identity2.insecure_clone())
-        .await;
+        .await
+        .unwrap();
 
     let txn_remote_peer1 = TpuSenderTxn::from_owned(
         Signature::new_unique(),
