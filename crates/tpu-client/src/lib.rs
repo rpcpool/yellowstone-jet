@@ -42,11 +42,14 @@
 //!
 //! Compile-time capacity tuning:
 //!
-//! - Set `TXN_INFO_CAP` before build to change metadata storage capacity.
-//! - Default capacity is `64` bytes.
+//! - Enable exactly one of the `txn-info-cap-0`, `txn-info-cap-64`, or `txn-info-cap-128`
+//!   feature-flags to fix the metadata storage capacity to that many bytes.
+//! - Default is `txn-info-cap-64` (64 bytes).
+//! - For a capacity not covered by those tiers, enable `txn-info-cap-custom` instead and set
+//!   the `TXN_INFO_CAP` env var at build time (defaults to 64 if unset):
 //!
 //! ```sh
-//! TXN_INFO_CAP=128 cargo build -p yellowstone-jet-tpu-client
+//! TXN_INFO_CAP=256 cargo build -p yellowstone-jet-tpu-client --no-default-features --features txn-info-cap-custom,yellowstone-grpc
 //! ```
 //!
 //! You can inspect the value at runtime:
@@ -76,6 +79,10 @@
 //! - **prometheus**: Enable prometheus metrics exposition module [`crate::prom`]
 //! - **yellowstone-grpc**: Enable Yellowstone gRPC based TPU sender implementation [`crate::yellowstone_grpc`]
 //! - **bytes** : Enable `bytes` crate based transaction representation support in TPU sender
+//! - **txn-info-cap-0** / **txn-info-cap-64** / **txn-info-cap-128**: Fix [`TXN_INFO_CAP`] to
+//!   0, 64, or 128 bytes respectively. Enable exactly one; `txn-info-cap-64` is the default.
+//! - **txn-info-cap-custom**: Read [`TXN_INFO_CAP`] from the `TXN_INFO_CAP` env var at build
+//!   time instead of a fixed tier.
 //!
 ///
 /// module for top-level cnfiguration objects

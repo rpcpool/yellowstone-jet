@@ -3,7 +3,6 @@ use tikv_jemallocator::Jemalloc;
 use {
     clap::{Parser, Subcommand},
     solana_keypair::Keypair,
-    solana_rpc_client::http_sender::HttpSender,
     solana_signature::Signature,
     std::{
         collections::HashMap,

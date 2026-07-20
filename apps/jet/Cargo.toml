@@ -47,7 +47,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tower = { workspace = true }
@@ -92,7 +92,7 @@ solana-leader-schedule = { workspace = true, features = ["agave-unstable-api"] }
 # Yellowstone
 yellowstone-grpc-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
-yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yellowstone-grpc", "shield"] }
+yellowstone-jet-tpu-client = { workspace = true, default-features = false, features = ["prometheus", "yellowstone-grpc", "shield", "txn-info-cap-128"] }
 yellowstone-shield-store = { workspace = true }
 
 [build-dependencies]

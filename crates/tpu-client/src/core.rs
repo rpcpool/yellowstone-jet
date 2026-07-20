@@ -835,6 +835,19 @@ pub enum TxDropReason {
     DriverIdentityChanged,
 }
 
+impl TxDropReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TxDropReason::RateLimited => "rate-limited",
+            TxDropReason::RemotePeerUnreachable => "remote-peer-unreachable",
+            TxDropReason::DropByDriver => "drop-by-driver",
+            TxDropReason::RemotePeerBeingEvicted => "remote-conn-peer-being-evicted",
+            TxDropReason::InvalidPacketSize => "invalid-packet-size",
+            TxDropReason::DriverIdentityChanged => "quic-driver-identity-changed",
+        }
+    }
+}
+
 ///
 /// Information about dropped transactions.
 ///
