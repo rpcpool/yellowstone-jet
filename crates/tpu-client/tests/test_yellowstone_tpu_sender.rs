@@ -8,7 +8,6 @@ use {
     quinn::ConnectionError,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_signature::Signature,
     solana_signer::Signer,
     std::{
         array,
@@ -231,9 +230,9 @@ async fn from_parts_send_txn_many_dest_should_land_properly() {
 
     sender
         .send_txn_many_dest(
-            Signature::new_unique(),
             "helloworld".as_bytes().to_vec(),
             &[remote_identity.pubkey()],
+            None,
         )
         .await
         .expect("send_txn_many_dest");
@@ -269,9 +268,9 @@ async fn from_parts_sending_multiple_tx_to_same_peer_should_reuse_connection() {
     for i in 0..MAX_TX {
         sender
             .send_txn_many_dest(
-                Signature::new_unique(),
                 format!("helloworld{i}").as_bytes().to_vec(),
                 &[remote_identity.pubkey()],
+                None,
             )
             .await
             .expect("send_txn_many_dest");
@@ -327,7 +326,7 @@ async fn from_parts_send_txn_should_follow_managed_schedule() {
         MockedRemoteValidator::spawn(non_leader_identity.insecure_clone(), non_leader_addr);
 
     sender
-        .send_txn(Signature::new_unique(), "fanout".as_bytes().to_vec())
+        .send_txn("fanout".as_bytes().to_vec(), None)
         .await
         .expect("send_txn");
 
@@ -372,9 +371,9 @@ async fn from_parts_should_support_identity_update() {
 
     sender
         .send_txn_many_dest(
-            Signature::new_unique(),
             "before-update".as_bytes().to_vec(),
             &[remote_identity.pubkey()],
+            None,
         )
         .await
         .expect("send before update");
@@ -393,9 +392,9 @@ async fn from_parts_should_support_identity_update() {
 
     sender
         .send_txn_many_dest(
-            Signature::new_unique(),
             "after-update".as_bytes().to_vec(),
             &[remote_identity.pubkey()],
+            None,
         )
         .await
         .expect("send after update");

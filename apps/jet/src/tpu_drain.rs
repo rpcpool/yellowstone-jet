@@ -6,8 +6,11 @@ use {
         pin::Pin,
         task::{Context, Poll, ready},
     },
-    yellowstone_jet_tpu_client::yellowstone_grpc::sender::{
-        PollYellowstoneTpuSender, SendErrorKind, ShieldBlockList, YellowstoneTpuSender,
+    yellowstone_jet_tpu_client::{
+        core::TpuSenderTxnInfo,
+        yellowstone_grpc::sender::{
+            PollYellowstoneTpuSender, SendErrorKind, ShieldBlockList, YellowstoneTpuSender,
+        },
     },
     yellowstone_shield_store::PolicyStore,
 };
@@ -74,6 +77,8 @@ where
                 return Poll::Ready(Ok(()));
             };
 
+            let txn_info = TpuSenderTxnInfo::new(request.signature);
+
             let start_result = match &this.shield_store {
                 Some(shield_store) => {
                     let blocklist = ShieldBlockList {
@@ -81,16 +86,15 @@ where
                         shield_policy_addresses: &request.policies,
                         default_return_value: true,
                     };
-
                     this.tpu_sender.start_send_txn_with_shield_policies(
-                        request.signature,
                         request.wire_transaction,
                         blocklist,
+                        Some(txn_info),
                     )
                 }
                 None => this
                     .tpu_sender
-                    .start_send_txn(request.signature, request.wire_transaction),
+                    .start_send_txn(request.wire_transaction, Some(txn_info)),
             };
 
             if let Err(e) = start_result {

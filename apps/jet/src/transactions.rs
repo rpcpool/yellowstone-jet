@@ -25,7 +25,7 @@ use {
         time::Instant,
     },
     tracing::error,
-    yellowstone_jet_tpu_client::core::{TpuSenderResponse, TpuSenderTxn},
+    yellowstone_jet_tpu_client::core::{TpuSenderResponse, TpuSenderTxn, TpuSenderTxnInfo},
     yellowstone_shield_store::{CheckError, PolicyStoreTrait},
 };
 
@@ -654,6 +654,12 @@ pub struct QuicGatewayBidi {
 // Custom retry logic is implemented in the "transaction scheduler" which is hidden behind a tokio channel giving us free polymorphism.
 //
 impl TransactionFanout {
+    fn signature_from_info(info: &Option<TpuSenderTxnInfo>) -> Option<Signature> {
+        info.as_ref()
+            .and_then(|txn_info| txn_info.downcast_ref::<Signature>())
+            .copied()
+    }
+
     pub fn new(
         leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
         policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
@@ -718,25 +724,43 @@ impl TransactionFanout {
         }
         match response {
             TpuSenderResponse::TxSent(gateway_tx_sent) => {
-                let tx_sig = gateway_tx_sent.tx_sig;
-                // BECAREFUL: THE SAME TRANSACTION CAN BE SENT TO MULTIPLE LEADERS,
-                // SO REMOVE MAY RETURN FALSE.
-                self.inflight_transactions.remove(&tx_sig);
-                tracing::trace!(
-                    "transaction {tx_sig} forwarded to {} validator",
-                    gateway_tx_sent.remote_peer_identity
-                );
+                if let Some(tx_sig) = Self::signature_from_info(&gateway_tx_sent.info) {
+                    // BECAREFUL: THE SAME TRANSACTION CAN BE SENT TO MULTIPLE LEADERS,
+                    // SO REMOVE MAY RETURN FALSE.
+                    self.inflight_transactions.remove(&tx_sig);
+                    tracing::trace!(
+                        "transaction {tx_sig} forwarded to {} validator",
+                        gateway_tx_sent.remote_peer_identity
+                    );
+                } else {
+                    tracing::trace!(
+                        "received TxSent without signature metadata for {}",
+                        gateway_tx_sent.remote_peer_identity
+                    );
+                }
             }
             TpuSenderResponse::TxFailed(gateway_tx_failed) => {
-                let tx_sig = gateway_tx_failed.tx_sig;
-                tracing::trace!("transaction {tx_sig} failed");
-                self.inflight_transactions.remove(&tx_sig);
+                if let Some(tx_sig) = Self::signature_from_info(&gateway_tx_failed.info) {
+                    tracing::trace!("transaction {tx_sig} failed");
+                    self.inflight_transactions.remove(&tx_sig);
+                } else {
+                    tracing::trace!(
+                        "received TxFailed without signature metadata for {}",
+                        gateway_tx_failed.remote_peer_identity
+                    );
+                }
             }
             TpuSenderResponse::TxDrop(tx_drop) => {
                 for (gw_tx, _curr_attempt) in &tx_drop.dropped_tx_vec {
-                    let tx_sig = gw_tx.tx_sig;
-                    tracing::trace!("transaction {tx_sig} dropped by QUIC gateway");
-                    self.inflight_transactions.remove(&tx_sig);
+                    if let Some(tx_sig) = Self::signature_from_info(&gw_tx.info) {
+                        tracing::trace!("transaction {tx_sig} dropped by QUIC gateway");
+                        self.inflight_transactions.remove(&tx_sig);
+                    } else {
+                        tracing::trace!(
+                            "received dropped transaction without signature metadata for {}",
+                            tx_drop.remote_peer_identity
+                        );
+                    }
                 }
             }
         }
@@ -809,7 +833,8 @@ impl TransactionFanout {
                     continue;
                 }
                 sent_mask[i] = true;
-                let tpu_txn = TpuSenderTxn::from_bytes(tx.signature, *dest, txn_wire.clone());
+                let txn_info = TpuSenderTxnInfo::new(tx.signature);
+                let tpu_txn = TpuSenderTxn::from_bytes(*dest, txn_wire.clone(), Some(txn_info));
                 tpu_sink
                     .send(tpu_txn)
                     .await
@@ -827,7 +852,8 @@ impl TransactionFanout {
                     continue;
                 }
 
-                let tpu_txn = TpuSenderTxn::from_bytes(tx.signature, *extra, txn_wire.clone());
+                let txn_info = TpuSenderTxnInfo::new(tx.signature);
+                let tpu_txn = TpuSenderTxn::from_bytes(*extra, txn_wire.clone(), Some(txn_info));
 
                 tpu_sink
                     .send(tpu_txn)

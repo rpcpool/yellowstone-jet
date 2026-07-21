@@ -30,7 +30,7 @@ use {
             ConnectionEvictionStrategy, IgnorantLeaderPredictor, LeaderTpuInfoService, Nothing,
             PACKET_DATA_SIZE, StakeBasedEvictionStrategy, StakeSortedPeerSet,
             TpuSenderDriverSpawner, TpuSenderResponse, TpuSenderSessionContext, TpuSenderTxn,
-            TxDropReason, UpcomingLeaderPredictor, ValidatorStakeInfoService,
+            TpuSenderTxnInfo, TxDropReason, UpcomingLeaderPredictor, ValidatorStakeInfoService,
         },
     },
 };
@@ -141,6 +141,13 @@ pub fn get_pubkey_from_tls_certificate(
         PublicKey::Unknown(key) => Pubkey::try_from(key).ok(),
         _ => None,
     }
+}
+
+fn signature_from_txn_info(info: Option<TpuSenderTxnInfo>) -> Signature {
+    info.as_ref()
+        .and_then(|i| i.downcast_ref::<Signature>())
+        .copied()
+        .expect("downcast_ref::<Signature>")
 }
 
 ///
@@ -266,9 +273,9 @@ async fn send_buffer_should_land_properly() {
     );
     let tx_sig = Signature::new_unique();
     let txn = TpuSenderTxn::from_owned(
-        tx_sig,
         rx_server_identity.pubkey(),
         "helloworld".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(tx_sig)),
     );
     transaction_sink.send(txn).await.expect("send tx");
 
@@ -279,7 +286,7 @@ async fn send_buffer_should_land_properly() {
         panic!("Expected TpuSenderResponse::TxSent, got something else");
     };
 
-    assert_eq!(actual_resp.tx_sig, tx_sig);
+    assert_eq!(signature_from_txn_info(actual_resp.info), tx_sig);
     assert_eq!(
         actual_resp.remote_peer_identity,
         rx_server_identity.pubkey()
@@ -326,9 +333,9 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         .collect::<Vec<_>>();
     for (i, tx_sig) in tx_sig_vec.iter().enumerate() {
         let txn = TpuSenderTxn::from_owned(
-            *tx_sig,
             rx_server_identity.pubkey(),
             format!("helloworld{i}").as_bytes().to_vec(),
+            Some(TpuSenderTxnInfo::new(*tx_sig)),
         );
         transaction_sink.send(txn).await.expect("send tx");
     }
@@ -341,7 +348,10 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         else {
             panic!("Expected TpuSenderResponse::TxSent, got something else");
         };
-        assert_eq!(actual_resp.tx_sig, tx_sig_vec[i as usize]);
+        assert_eq!(
+            signature_from_txn_info(actual_resp.info),
+            tx_sig_vec[i as usize]
+        );
         let spy_request = client_rx.recv().await.expect("recv");
 
         connection_id_spy.push(spy_request.connection_id);
@@ -353,7 +363,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         );
         tracing::info!(
             "received tx: {} from remote peer: {} with connection id: {}",
-            actual_resp.tx_sig,
+            signature_from_txn_info(actual_resp.info),
             rx_server_identity.pubkey(),
             spy_request.connection_id
         );
@@ -399,10 +409,11 @@ async fn gateway_should_handle_connection_refused_by_peer() {
     });
 
     let tx_sig = Signature::new_unique();
+    let txn_info = TpuSenderTxnInfo::new(tx_sig);
     let txn = TpuSenderTxn::from_owned(
-        tx_sig,
         rx_server_identity.pubkey(),
         "helloworld".as_bytes().to_vec(),
+        Some(txn_info),
     );
     transaction_sink.send(txn).await.expect("send tx");
 
@@ -413,8 +424,15 @@ async fn gateway_should_handle_connection_refused_by_peer() {
     let TpuSenderResponse::TxDrop(mut actual_resp) = resp else {
         panic!("Expected TpuSenderResponse::TxSent, got something {resp:?}");
     };
-    let (actual_tx_sig, _curr_attempt) = actual_resp.dropped_tx_vec.pop_front().unwrap();
-    assert_eq!(actual_tx_sig.tx_sig, tx_sig);
+    let (actual_txn, _curr_attempt) = actual_resp.dropped_tx_vec.pop_front().unwrap();
+    let actual_sig = actual_txn
+        .info
+        .as_ref()
+        .unwrap()
+        .downcast_ref::<Signature>()
+        .copied()
+        .expect("downcast_ref::<Signature>");
+    assert_eq!(actual_sig, tx_sig);
     assert!(matches!(
         actual_resp.drop_reason,
         TxDropReason::RemotePeerUnreachable
@@ -463,9 +481,9 @@ async fn it_should_update_gatway_identity() {
     );
 
     let txn = TpuSenderTxn::from_owned(
-        Signature::new_unique(),
         rx_server_identity.pubkey(),
         "helloworld".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(Signature::new_unique())),
     );
     transaction_sink.send(txn).await.expect("send tx");
 
@@ -481,9 +499,9 @@ async fn it_should_update_gatway_identity() {
         .unwrap();
 
     let txn = TpuSenderTxn::from_owned(
-        Signature::new_unique(),
         rx_server_identity.pubkey(),
         "helloworld".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(Signature::new_unique())),
     );
     transaction_sink.send(txn).await.expect("send tx");
 
@@ -553,18 +571,18 @@ async fn it_should_support_concurrent_remote_peer_connection() {
     );
 
     let txn = TpuSenderTxn::from_owned(
-        Signature::new_unique(),
         remote_validator_identity1.pubkey(),
         "helloworld".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(Signature::new_unique())),
     );
     // Send it to the first remote peer
     transaction_sink.send(txn).await.expect("send tx");
 
     // Send it to the second remote peer
     let txn2 = TpuSenderTxn::from_owned(
-        Signature::new_unique(),
         remote_validator_identity2.pubkey(),
         "helloworld2".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(Signature::new_unique())),
     );
     transaction_sink.send(txn2).await.expect("send tx");
 
@@ -658,9 +676,9 @@ async fn it_should_evict_connection() {
         ReceiverStream::new(validator_rx2),
     );
     let txn = TpuSenderTxn::from_owned(
-        Signature::new_unique(),
         remote_validator_identity1.pubkey(),
         "helloworld".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(Signature::new_unique())),
     );
     transaction_sink.send(txn).await.expect("send tx");
     tracing::trace!("Sent tx to remote_validator_identity1");
@@ -675,9 +693,9 @@ async fn it_should_evict_connection() {
 
     // Now we send a tx to the second remote peer, this should evict the first connection
     let txn2 = TpuSenderTxn::from_owned(
-        Signature::new_unique(),
         remote_validator_identity2.pubkey(),
         "helloworld2".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(Signature::new_unique())),
     );
     transaction_sink.send(txn2).await.expect("send tx");
     tracing::trace!("Sent tx to remote_validator_identity2");
@@ -696,9 +714,9 @@ async fn it_should_evict_connection() {
 
     // Finally, send it back to the first remote peer, this should evict the second connection
     let txn3 = TpuSenderTxn::from_owned(
-        Signature::new_unique(),
         remote_validator_identity1.pubkey(),
         "helloworld3".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(Signature::new_unique())),
     );
     transaction_sink.send(txn3).await.expect("send tx");
     tracing::trace!("Sent tx to remote_validator_identity1 again");
@@ -773,7 +791,11 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     });
 
     let tx_sig = Signature::new_unique();
-    let txn = TpuSenderTxn::from_owned(tx_sig, rx_server_identity.pubkey(), huge_payload.clone());
+    let txn = TpuSenderTxn::from_owned(
+        rx_server_identity.pubkey(),
+        huge_payload.clone(),
+        Some(TpuSenderTxnInfo::new(tx_sig)),
+    );
     transaction_sink.send(txn).await.expect("send tx");
 
     // This handle should return after MAX_CONN_ATTEMPT attempts
@@ -787,7 +809,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         panic!("Expected TpuSenderResponse::TxSent");
     };
 
-    assert_eq!(actual_resp.tx_sig, tx_sig);
+    assert_eq!(signature_from_txn_info(actual_resp.info), tx_sig);
 }
 
 #[tokio::test]
@@ -839,7 +861,11 @@ async fn it_should_refuse_txn_bigger_than_1232_bytes() {
     });
 
     let tx_sig = Signature::new_unique();
-    let txn = TpuSenderTxn::from_owned(tx_sig, rx_server_identity.pubkey(), huge_payload.clone());
+    let txn = TpuSenderTxn::from_owned(
+        rx_server_identity.pubkey(),
+        huge_payload.clone(),
+        Some(TpuSenderTxnInfo::new(tx_sig)),
+    );
     transaction_sink.send(txn).await.expect("send tx");
 
     // This handle should return after MAX_CONN_ATTEMPT attempts
@@ -906,9 +932,9 @@ async fn it_should_detect_remote_peer_address_change() {
     );
     let tx_sig = Signature::new_unique();
     let txn = TpuSenderTxn::from_owned(
-        tx_sig,
         rx_server_identity.pubkey(),
         "helloworld".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(tx_sig)),
     );
     transaction_sink.send(txn).await.expect("send tx");
 
@@ -919,7 +945,7 @@ async fn it_should_detect_remote_peer_address_change() {
         panic!("Expected TpuSenderResponse::TxSent, got something else");
     };
 
-    assert_eq!(actual_resp.tx_sig, tx_sig);
+    assert_eq!(signature_from_txn_info(actual_resp.info), tx_sig);
 
     // Now we change the remote peer address
     let new_rx_server_addr = generate_random_local_addr();
@@ -940,9 +966,9 @@ async fn it_should_detect_remote_peer_address_change() {
     // Send a new transaction to the new address
     let tx_sig2 = Signature::new_unique();
     let txn2 = TpuSenderTxn::from_owned(
-        tx_sig2,
         rx_server_identity.pubkey(),
         "helloworld2".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(tx_sig2)),
     );
     transaction_sink.send(txn2).await.expect("send tx");
 
@@ -951,7 +977,7 @@ async fn it_should_detect_remote_peer_address_change() {
     else {
         panic!("Expected TpuSenderResponse::TxSent, got something else");
     };
-    assert_eq!(actual_resp.tx_sig, tx_sig2);
+    assert_eq!(signature_from_txn_info(actual_resp.info), tx_sig2);
 }
 
 #[tokio::test]
@@ -1069,9 +1095,9 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
     for (i, validator_rx) in validator_rx_vec.iter_mut().enumerate() {
         let tx_sig = Signature::new_unique();
         let txn = TpuSenderTxn::from_owned(
-            tx_sig,
             validators_kp_vec[i].pubkey(),
             format!("helloworld{i}").as_bytes().to_vec(),
+            Some(TpuSenderTxnInfo::new(tx_sig)),
         );
         transaction_sink.send(txn).await.expect("send tx");
 
@@ -1207,9 +1233,9 @@ async fn it_should_support_multiplexed_connection() {
             .cloned()
             .unwrap();
         let txn = TpuSenderTxn::from_owned(
-            *tx_sig,
             remote_peer_identity,
             tx_sig.to_string().as_bytes().to_vec(),
+            Some(TpuSenderTxnInfo::new(*tx_sig)),
         );
         tracing::trace!("sending tx {i} {tx_sig}");
         transaction_sink.send(txn).await.expect("send tx");
@@ -1225,7 +1251,10 @@ async fn it_should_support_multiplexed_connection() {
         else {
             panic!("Expected TpuSenderResponse::TxSent, got something else");
         };
-        tracing::trace!("received tx response {i} -- {}", actual_resp.tx_sig);
+        tracing::trace!(
+            "received tx response {i} -- {}",
+            signature_from_txn_info(actual_resp.info)
+        );
         actual_tx_send.push(actual_resp);
         let spy_request = mocked_remote_validator_spy_rx1.recv().await.expect("recv");
         connection_id_set1.insert(spy_request.connection_id);
@@ -1239,7 +1268,7 @@ async fn it_should_support_multiplexed_connection() {
         "Expected all tx to use the same connection id"
     );
 
-    actual_tx_send.sort_by_key(|resp| resp.tx_sig);
+    actual_tx_send.sort_by_key(|resp| signature_from_txn_info(resp.info));
     actual_spy_req.sort_unstable();
 
     for i in 0..MAX_TX {
@@ -1248,7 +1277,10 @@ async fn it_should_support_multiplexed_connection() {
             .cloned()
             .unwrap();
         let actual_resp = &actual_tx_send[i as usize];
-        assert_eq!(actual_resp.tx_sig, tx_sig_vec[i as usize]);
+        assert_eq!(
+            signature_from_txn_info(actual_resp.info),
+            tx_sig_vec[i as usize]
+        );
 
         assert_eq!(actual_spy_req[i as usize], tx_sig_vec[i as usize]);
         assert_eq!(actual_resp.remote_peer_identity, expected_remote_peer,);
@@ -1264,14 +1296,14 @@ async fn it_should_support_multiplexed_connection() {
         .unwrap();
 
     let txn_remote_peer1 = TpuSenderTxn::from_owned(
-        Signature::new_unique(),
         remote_peer_identity1.pubkey(),
         "helloworld1".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(Signature::new_unique())),
     );
     let txn_remote_peer2 = TpuSenderTxn::from_owned(
-        Signature::new_unique(),
         remote_peer_identity2.pubkey(),
         "helloworld2".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(Signature::new_unique())),
     );
     transaction_sink
         .send(txn_remote_peer1)
@@ -1311,9 +1343,9 @@ async fn it_should_support_multiplexed_connection() {
 
     let txn_sig = Signature::new_unique();
     let txn_remote_peer3 = TpuSenderTxn::from_owned(
-        txn_sig,
         remote_peer_identity3.pubkey(),
         "helloworld3".as_bytes().to_vec(),
+        Some(TpuSenderTxnInfo::new(txn_sig)),
     );
     transaction_sink
         .send(txn_remote_peer3)
