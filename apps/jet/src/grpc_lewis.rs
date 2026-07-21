@@ -54,6 +54,14 @@ pub struct LewisEventHandler {
 }
 
 impl LewisEventHandler {
+    fn signature_from_info(
+        info: &Option<yellowstone_jet_tpu_client::core::TpuSenderTxnInfo>,
+    ) -> Option<Signature> {
+        info.as_ref()
+            .and_then(|txn_info| txn_info.downcast_ref::<Signature>())
+            .copied()
+    }
+
     pub fn handle_skip(
         &self,
         signature: Signature,
@@ -76,8 +84,12 @@ impl LewisEventHandler {
     pub fn handle_gateway_response(&self, response: &TpuSenderResponse, slot: Slot) {
         match response {
             TpuSenderResponse::TxSent(sent) => {
+                let Some(tx_sig) = Self::signature_from_info(&sent.info) else {
+                    warn!("Missing TpuSenderTxnInfo in TxSent response");
+                    return;
+                };
                 let event = self.build_event(
-                    sent.tx_sig,
+                    tx_sig,
                     sent.remote_peer_identity,
                     Some(sent.remote_peer_addr),
                     slot,
@@ -88,8 +100,12 @@ impl LewisEventHandler {
                 self.emit(event);
             }
             TpuSenderResponse::TxFailed(failed) => {
+                let Some(tx_sig) = Self::signature_from_info(&failed.info) else {
+                    warn!("Missing TpuSenderTxnInfo in TxFailed response");
+                    return;
+                };
                 let event = self.build_event(
-                    failed.tx_sig,
+                    tx_sig,
                     failed.remote_peer_identity,
                     Some(failed.remote_peer_addr),
                     slot,
@@ -102,8 +118,12 @@ impl LewisEventHandler {
             TpuSenderResponse::TxDrop(dropped) => {
                 let drop_reason_str = dropped.drop_reason.to_string();
                 for (gateway_tx, _attempt_count) in &dropped.dropped_tx_vec {
+                    let Some(tx_sig) = Self::signature_from_info(&gateway_tx.info) else {
+                        warn!("Missing TpuSenderTxnInfo in TxDrop response");
+                        continue;
+                    };
                     let event = self.build_event(
-                        gateway_tx.tx_sig,
+                        tx_sig,
                         dropped.remote_peer_identity,
                         None, // No TPU addr for dropped
                         slot,
@@ -396,7 +416,7 @@ mod tests {
         solana_pubkey::Pubkey,
         solana_signature::Signature,
         std::net::{IpAddr, Ipv4Addr},
-        yellowstone_jet_tpu_client::core::{TpuSenderResponse, TxSent},
+        yellowstone_jet_tpu_client::core::{TpuSenderResponse, TpuSenderTxnInfo, TxSent},
     };
 
     #[test]
@@ -434,10 +454,12 @@ mod tests {
             jet_id: "test-jet".to_string(),
         };
 
+        let tx_sig = Signature::new_unique();
+
         let response = TpuSenderResponse::TxSent(TxSent {
             remote_peer_identity: Pubkey::new_unique(),
-            tx_sig: Signature::new_unique(),
             remote_peer_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000),
+            info: Some(TpuSenderTxnInfo::new(tx_sig)),
         });
 
         handler.handle_gateway_response(&response, 100);
@@ -448,6 +470,7 @@ mod tests {
                 assert!(!jet_event.skipped);
                 assert!(jet_event.error.is_empty());
                 assert!(!jet_event.tpu_addr.is_empty());
+                assert_eq!(jet_event.sig, tx_sig.as_ref());
             }
             _ => panic!("Expected Jet event"),
         }

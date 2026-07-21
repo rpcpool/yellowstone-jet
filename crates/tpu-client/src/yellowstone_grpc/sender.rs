@@ -3,7 +3,7 @@ use {
         config::{TpuPortKind, TpuSenderConfig},
         core::{
             Nothing, StakeBasedEvictionStrategy, TpuSenderResponse, TpuSenderResponseCallback,
-            TpuSenderTxn, UpdateIdentity,
+            TpuSenderTxn, TpuSenderTxnInfo, UpdateIdentity,
         },
         rpc::{
             schedule::{
@@ -28,7 +28,7 @@ use {
         client_error::ClientError, nonblocking::rpc_client, rpc_client::RpcClientConfig,
     },
     solana_commitment_config::CommitmentConfig,
-    solana_keypair::{Keypair, Signature},
+    solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_rpc_client::http_sender::HttpSender,
     std::{
@@ -161,8 +161,9 @@ pub enum CreateTpuSenderError {
 /// let signature = transaction.signatures[0];
 /// tracing::info!("generate transaction {signature} with send lamports {lamports}");
 /// let bincoded_txn = bincode::serialize(&transaction).expect("bincode::serialize");
+/// let txn_info = TpuSenderTxnInfo::new(signature);
 /// sender
-///     .send_txn(signature, bincoded_txn)
+///     .send_txn(bincoded_txn, Some(txn_info))
 ///     .await
 ///     .expect("send_transaction");
 /// ```
@@ -174,7 +175,13 @@ pub enum CreateTpuSenderError {
 /// ```ignore
 ///
 /// let leader_to_block = vec![Pubkey::from_str("HEL1UZMZKAL2odpNBj2oCjffnFGaYwmbGmyewGv1e2TU").expect("from_str")];
-/// sender.send_txn_with_blocklist(signature, bincoded_txn, Some(leader_to_block)).await;
+/// sender
+///     .send_txn_with_blocklist(
+///         bincoded_txn,
+///         Some(leader_to_block),
+///         Some(TpuSenderTxnInfo::new(signature)),
+///     )
+///     .await;
 /// ```
 ///
 /// If you are using [Yellowstone Shield crate](https://crates.io/crates/yellowstone-shield-store),
@@ -194,7 +201,13 @@ pub enum CreateTpuSenderError {
 ///     default_return_value: true, // allow sending when in doubt
 /// };
 ///
-/// sender.send_txn_with_shield_policies(signature, bincoded_txn, shield_blocklist).await;
+/// sender
+///     .send_txn_with_shield_policies(
+///         bincoded_txn,
+///         shield_blocklist,
+///         Some(TpuSenderTxnInfo::new(signature)),
+///     )
+///     .await;
 ///
 /// ```
 ///
@@ -206,7 +219,13 @@ pub enum CreateTpuSenderError {
 ///     Pubkey::from_str("EdGevanA2MZsDpxDXK6b36FH7RCcTuDZZRcc6MEyE9hy").expect("from_str"),
 /// ];
 ///
-/// sender.send_txn_many_dest(signature, bincoded_txn, dests).await;
+/// sender
+///     .send_txn_many_dest(
+///         bincoded_txn,
+///         &dests,
+///         Some(TpuSenderTxnInfo::new(signature)),
+///     )
+///     .await;
 ///
 /// ```
 ///
@@ -251,27 +270,92 @@ pub enum CreateTpuSenderError {
 /// #[derive(Clone)]
 /// struct LoggingCallback;
 ///
+/// impl LoggingCallback {
+///     fn signature_from_info(
+///         info: &Option<TpuSenderTxnInfo>,
+///     ) -> Option<Signature> {
+///         info.as_ref()
+///             .and_then(|txn_info| txn_info.downcast_ref::<Signature>())
+///             .copied()
+///     }
+/// }
+///
 /// impl TpuSenderResponseCallback for LoggingCallback {
 ///     fn call(&self, response: TpuSenderResponse) {
 ///         use std::io::Write;
 ///         let mut stdout = std::io::stdout();
 ///         match response {
 ///             TpuSenderResponse::TxSent(info) => {
-///                 writeln!(
-///                     &mut stdout,
-///                     "Transaction {} send to {}",
-///                     info.tx_sig, info.remote_peer_identity
-///                 )
-///                 .expect("writeln");
+///                 if let Some(sig) = Self::signature_from_info(&info.info) {
+///                     writeln!(
+///                         &mut stdout,
+///                         "Transaction {} send to {}",
+///                         sig,
+///                         info.remote_peer_identity
+///                     )
+///                     .expect("writeln");
+///                 }
 ///             }
 ///             TpuSenderResponse::TxFailed(info) => {
-///                 writeln!(&mut stdout, "Transaction failed: {}", info.tx_sig).expect("writeln");
+///                 if let Some(sig) = Self::signature_from_info(&info.info) {
+///                     writeln!(&mut stdout, "Transaction failed: {}", sig).expect("writeln");
+///                 }
 ///             }
 ///             TpuSenderResponse::TxDrop(info) => {
 ///                 for (txn, _) in info.dropped_tx_vec {
-///                     writeln!(&mut stdout, "Transaction dropped: {}", txn.tx_sig)
-///                         .expect("writeln");
+///                     if let Some(sig) = Self::signature_from_info(&txn.info) {
+///                         writeln!(&mut stdout, "Transaction dropped: {}", sig)
+///                             .expect("writeln");
+///                     }
 ///                 }
+///             }
+///         }
+///     }
+/// }
+/// ```
+///
+/// # `TpuSenderTxnInfo`
+///
+/// `TpuSenderTxnInfo` is the typed metadata container attached to each send request.
+/// It is propagated to all response variants so callers can correlate responses with
+/// their own request context.
+///
+/// ```ignore
+/// #[derive(Clone, Copy, Debug)]
+/// struct TxMeta {
+///     signature: Signature,
+///     shard: u8,
+/// }
+///
+/// let meta = TxMeta {
+///     signature,
+///     shard: 2,
+/// };
+///
+/// sender
+///     .send_txn(
+///         bincoded_txn,
+///         Some(TpuSenderTxnInfo::new(meta)),
+///     )
+///     .await
+///     .expect("send_txn");
+///
+/// // Later, decode the same metadata from a callback/receiver response.
+/// match response {
+///     TpuSenderResponse::TxSent(ok) => {
+///         if let Some(meta) = ok.info.as_ref().and_then(|i| i.downcast_ref::<TxMeta>()) {
+///             tracing::info!("sent {} shard {}", meta.signature, meta.shard);
+///         }
+///     }
+///     TpuSenderResponse::TxFailed(err) => {
+///         if let Some(meta) = err.info.as_ref().and_then(|i| i.downcast_ref::<TxMeta>()) {
+///             tracing::warn!("failed {} shard {}", meta.signature, meta.shard);
+///         }
+///     }
+///     TpuSenderResponse::TxDrop(drop) => {
+///         for (txn, _) in drop.dropped_tx_vec {
+///             if let Some(meta) = txn.info.as_ref().and_then(|i| i.downcast_ref::<TxMeta>()) {
+///                 tracing::warn!("dropped {} shard {}", meta.signature, meta.shard);
 ///             }
 ///         }
 ///     }
@@ -556,9 +640,9 @@ impl YellowstoneTpuSender {
     ///
     pub async fn send_txn_many_dest<T>(
         &mut self,
-        sig: Signature,
         txn: T,
         dests: &[Pubkey],
+        txn_info: Option<TpuSenderTxnInfo>,
     ) -> Result<(), SendError>
     where
         T: AsRef<[u8]> + Send + 'static,
@@ -582,9 +666,9 @@ impl YellowstoneTpuSender {
                 dest_addr_vec.push(addr);
             }
             let tpu_txn = TpuSenderTxn {
-                tx_sig: sig,
                 remote_peer: *dest,
                 wire: wire_txn.clone(),
+                info: txn_info,
             };
             if future::poll_fn(|cx| self.base_tpu_sender.poll_reserve(cx))
                 .await
@@ -624,9 +708,9 @@ impl YellowstoneTpuSender {
     ///
     pub async fn send_txn_fanout_with_blocklist<T, B>(
         &mut self,
-        sig: Signature,
         txn: T,
         blocklist: Option<B>,
+        txn_info: Option<TpuSenderTxnInfo>,
     ) -> Result<(), SendError>
     where
         T: AsRef<[u8]> + Send + 'static,
@@ -681,7 +765,7 @@ impl YellowstoneTpuSender {
                         txn: wire_txn,
                     })
                 } else {
-                    self.send_txn_many_dest(sig, wire_txn, &leaders).await
+                    self.send_txn_many_dest(wire_txn, &leaders, txn_info).await
                 }
             }
             Err(err_kind) => Err(SendError {
@@ -713,23 +797,27 @@ impl YellowstoneTpuSender {
     ///
     /// Sends a transaction to the TPU of the current leader.
     ///
-    /// Same as calling [`YellowstoneTpuSender::send_txn_with_blocklist`] with `Some(NoBlocklist)`
+    /// Same as calling [`YellowstoneTpuSender::send_txn_with_blocklist`] with `Some(NoBlocklist)`.
     ///
     /// # Arguments
     ///
-    /// * `sig` - The signature identifying the transaction.
     /// * `txn` - The bincoded transaction slice to send.
+    /// * `txn_info` - Optional [`TpuSenderTxnInfo`].
     ///
     /// # Returns
     ///
     /// `Ok(())` if the transaction was sent successfully, or a `SendError` if there was an error.
     ///
     ///
-    pub async fn send_txn<T>(&mut self, sig: Signature, txn: T) -> Result<(), SendError>
+    pub async fn send_txn<T>(
+        &mut self,
+        txn: T,
+        txn_info: Option<TpuSenderTxnInfo>,
+    ) -> Result<(), SendError>
     where
         T: AsRef<[u8]> + Send + 'static,
     {
-        self.send_txn_with_blocklist(sig, txn, Some(NoBlocklist))
+        self.send_txn_with_blocklist(txn, Some(NoBlocklist), txn_info)
             .await
     }
 
@@ -749,15 +837,15 @@ impl YellowstoneTpuSender {
     ///
     pub async fn send_txn_with_blocklist<T, B>(
         &mut self,
-        sig: Signature,
         txn: T,
         blocklist: Option<B>,
+        txn_info: Option<TpuSenderTxnInfo>,
     ) -> Result<(), SendError>
     where
         T: AsRef<[u8]> + Send + 'static,
         B: Blocklist,
     {
-        self.send_txn_fanout_with_blocklist(sig, txn, blocklist)
+        self.send_txn_fanout_with_blocklist(txn, blocklist, txn_info)
             .await
     }
 
@@ -779,14 +867,14 @@ impl YellowstoneTpuSender {
     ///  `Ok(())` if the transaction was sent successfully, or a `SendError` if there was an error.
     pub async fn send_txn_with_shield_policies<T>(
         &mut self,
-        sig: Signature,
         txn: T,
         shield: ShieldBlockList<'_>,
+        txn_info: Option<TpuSenderTxnInfo>,
     ) -> Result<(), SendError>
     where
         T: AsRef<[u8]> + Send + 'static,
     {
-        self.send_txn_fanout_with_blocklist(sig, txn, Some(shield))
+        self.send_txn_fanout_with_blocklist(txn, Some(shield), txn_info)
             .await
     }
 
@@ -811,9 +899,9 @@ impl YellowstoneTpuSender {
 /// needs a lifetime parameter.
 ///
 struct PollPendingSend {
-    sig: Signature,
     wire_txn: Bytes,
     dests: Vec<Pubkey>,
+    txn_info: Option<TpuSenderTxnInfo>,
     next_dest: usize,
     pending_txn: Option<TpuSenderTxn>,
 }
@@ -856,7 +944,6 @@ pub struct PollYellowstoneTpuSender {
 #[derive(thiserror::Error, Debug)]
 #[error("disconnected")]
 pub struct PollSendError {
-    signature: Signature,
     wire_txn: Bytes,
     dests: Vec<Pubkey>,
 }
@@ -894,7 +981,6 @@ impl PollYellowstoneTpuSender {
                             .expect("checked by pending_txn.is_some() above");
                         if self.sender.base_tpu_sender.send_item(txn).is_err() {
                             let err = PollSendError {
-                                signature: pending.sig,
                                 wire_txn: pending.wire_txn.clone(),
                                 dests: std::mem::take(&mut pending.dests),
                             };
@@ -905,7 +991,6 @@ impl PollYellowstoneTpuSender {
                     }
                     Poll::Ready(Err(_)) => {
                         let err = PollSendError {
-                            signature: pending.sig,
                             wire_txn: pending.wire_txn.clone(),
                             dests: std::mem::take(&mut pending.dests),
                         };
@@ -924,9 +1009,9 @@ impl PollYellowstoneTpuSender {
             let remote_peer = pending.dests[pending.next_dest];
             pending.next_dest += 1;
             pending.pending_txn = Some(TpuSenderTxn {
-                tx_sig: pending.sig,
                 remote_peer,
                 wire: pending.wire_txn.clone(),
+                info: pending.txn_info,
             });
         }
     }
@@ -948,9 +1033,9 @@ impl PollYellowstoneTpuSender {
     ///
     pub fn start_send_txn_many_dest<T>(
         &mut self,
-        sig: Signature,
         txn: T,
         dests: &[Pubkey],
+        txn_info: Option<TpuSenderTxnInfo>,
     ) -> Result<(), SendError>
     where
         T: AsRef<[u8]> + Send + 'static,
@@ -981,9 +1066,9 @@ impl PollYellowstoneTpuSender {
         }
 
         self.pending = Some(PollPendingSend {
-            sig,
             wire_txn,
             dests: selected_dests,
+            txn_info,
             next_dest: 0,
             pending_txn: None,
         });
@@ -1000,9 +1085,9 @@ impl PollYellowstoneTpuSender {
     ///
     pub fn start_send_txn_with_blocklist<T, B>(
         &mut self,
-        sig: Signature,
         txn: T,
         blocklist: Option<B>,
+        txn_info: Option<TpuSenderTxnInfo>,
     ) -> Result<(), SendError>
     where
         T: AsRef<[u8]> + Send + 'static,
@@ -1058,7 +1143,7 @@ impl PollYellowstoneTpuSender {
                         txn: wire_txn,
                     })
                 } else {
-                    self.start_send_txn_many_dest(sig, wire_txn, &leaders)
+                    self.start_send_txn_many_dest(wire_txn, &leaders, txn_info)
                 }
             }
             Err(err_kind) => Err(SendError {
@@ -1076,11 +1161,15 @@ impl PollYellowstoneTpuSender {
     /// Panics if called before a previously started send was fully drained via
     /// [`PollYellowstoneTpuSender::poll_send`].
     ///
-    pub fn start_send_txn<T>(&mut self, sig: Signature, txn: T) -> Result<(), SendError>
+    pub fn start_send_txn<T>(
+        &mut self,
+        txn: T,
+        txn_info: Option<TpuSenderTxnInfo>,
+    ) -> Result<(), SendError>
     where
         T: AsRef<[u8]> + Send + 'static,
     {
-        self.start_send_txn_with_blocklist(sig, txn, Some(NoBlocklist))
+        self.start_send_txn_with_blocklist(txn, Some(NoBlocklist), txn_info)
     }
 
     #[cfg_attr(
@@ -1102,14 +1191,14 @@ impl PollYellowstoneTpuSender {
     ///
     pub fn start_send_txn_with_shield_policies<T>(
         &mut self,
-        sig: Signature,
         txn: T,
         shield: ShieldBlockList<'_>,
+        txn_info: Option<TpuSenderTxnInfo>,
     ) -> Result<(), SendError>
     where
         T: AsRef<[u8]> + Send + 'static,
     {
-        self.start_send_txn_with_blocklist(sig, txn, Some(shield))
+        self.start_send_txn_with_blocklist(txn, Some(shield), txn_info)
     }
 
     ///
@@ -1193,11 +1282,7 @@ mod tests {
         let (mut sender, mut rx) = test_yellowstone_sender(addrs, true, 0, vec![]);
 
         sender
-            .start_send_txn_many_dest(
-                Signature::new_unique(),
-                Bytes::from_static(b"wire"),
-                &[peer1, peer2],
-            )
+            .start_send_txn_many_dest(Bytes::from_static(b"wire"), &[peer1, peer2], None)
             .expect("start_send_txn_many_dest");
 
         futures::future::poll_fn(|cx| sender.poll_send(cx))
@@ -1219,7 +1304,7 @@ mod tests {
         let (mut sender, _rx) = test_yellowstone_sender(HashMap::new(), true, 0, vec![]);
 
         sender
-            .start_send_txn_many_dest(Signature::new_unique(), Bytes::from_static(b"wire"), &[])
+            .start_send_txn_many_dest(Bytes::from_static(b"wire"), &[], None)
             .expect("start_send_txn_many_dest");
 
         // No destinations were resolved, so there's nothing to drain: poll_send should
@@ -1239,11 +1324,7 @@ mod tests {
         let (mut sender, mut rx) = test_yellowstone_sender(addrs, true, 0, vec![]);
 
         sender
-            .start_send_txn_many_dest(
-                Signature::new_unique(),
-                Bytes::from_static(b"wire"),
-                &[peer1, peer2],
-            )
+            .start_send_txn_many_dest(Bytes::from_static(b"wire"), &[peer1, peer2], None)
             .expect("start_send_txn_many_dest");
 
         futures::future::poll_fn(|cx| sender.poll_send(cx))
@@ -1269,18 +1350,10 @@ mod tests {
         let (mut sender, _rx) = test_yellowstone_sender(addrs, true, 0, vec![]);
 
         sender
-            .start_send_txn_many_dest(
-                Signature::new_unique(),
-                Bytes::from_static(b"wire"),
-                &[peer],
-            )
+            .start_send_txn_many_dest(Bytes::from_static(b"wire"), &[peer], None)
             .expect("first start_send_txn_many_dest");
         // Second call before draining the first via `poll_send` must panic.
-        let _ = sender.start_send_txn_many_dest(
-            Signature::new_unique(),
-            Bytes::from_static(b"wire"),
-            &[peer],
-        );
+        let _ = sender.start_send_txn_many_dest(Bytes::from_static(b"wire"), &[peer], None);
     }
 
     #[tokio::test]
@@ -1292,11 +1365,7 @@ mod tests {
         let (mut sender, _rx) = test_yellowstone_sender(addrs, true, 0, vec![leader]);
 
         let err = sender
-            .start_send_txn_with_blocklist(
-                Signature::new_unique(),
-                Bytes::from_static(b"wire"),
-                Some(vec![leader]),
-            )
+            .start_send_txn_with_blocklist(Bytes::from_static(b"wire"), Some(vec![leader]), None)
             .expect_err("expected the only resolved leader to be blocked");
 
         assert!(matches!(err.kind, SendErrorKind::RemotePeerBlocked));
@@ -1311,9 +1380,9 @@ mod tests {
 
         sender
             .start_send_txn_with_blocklist(
-                Signature::new_unique(),
                 Bytes::from_static(b"wire"),
                 Some(vec![other]), // blocklist doesn't include `leader`
+                None,
             )
             .expect("start_send_txn_with_blocklist");
 

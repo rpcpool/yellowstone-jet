@@ -20,7 +20,7 @@ use {
     tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt},
     url::Url,
     yellowstone_jet_tpu_client::{
-        core::TpuSenderResponse,
+        core::{TpuSenderResponse, TpuSenderTxnInfo},
         yellowstone_grpc::sender::{
             Endpoints, NewYellowstoneTpuSender, YellowstoneTpuSender, YellowstoneTpuSenderConfig,
             create_yellowstone_tpu_sender_with_callback,
@@ -61,9 +61,10 @@ async fn send_lamports(
     tracing::info!("generate transaction {signature} with send lamports {lamports}");
     let bincoded_txn = bincode::serialize(&transaction).expect("bincode::serialize");
 
+    let txn_info = TpuSenderTxnInfo::new(signature);
     // Send the transaction to the current leader
     tpu_sender
-        .send_txn(signature, bincoded_txn)
+        .send_txn(bincoded_txn, Some(txn_info))
         .await
         .expect("send_transaction");
 
@@ -184,15 +185,24 @@ async fn main() {
         panic!("unexpected tpu sender response");
     };
 
+    let Some(txn_info) = resp.info else {
+        panic!("unexpected tpu sender response without txn info");
+    };
+
+    let actual_sig = txn_info
+        .downcast_ref::<Signature>()
+        .copied()
+        .expect("downcast_ref::<Signature>");
+
     assert!(
-        resp.tx_sig == signature,
+        actual_sig == signature,
         "unexpected tx signature in response"
     );
 
     writeln!(
         &mut out,
         "sent transaction with signature `{}` to validator `{}`",
-        resp.tx_sig, resp.remote_peer_identity
+        actual_sig, resp.remote_peer_identity
     )
     .expect("writeln");
 }

@@ -7,6 +7,7 @@ use {
     solana_commitment_config::CommitmentConfig,
     solana_keypair::Keypair,
     solana_rpc_client::http_sender::HttpSender,
+    solana_signature::Signature,
     std::{
         collections::HashMap,
         net::SocketAddr,
@@ -197,26 +198,62 @@ async fn run_jet(
     #[derive(Clone)]
     struct LoggingCallback;
 
+    impl LoggingCallback {
+        fn signature_from_info(
+            info: &Option<yellowstone_jet_tpu_client::core::TpuSenderTxnInfo>,
+        ) -> Option<Signature> {
+            info.as_ref()
+                .and_then(|txn_info| txn_info.downcast_ref::<Signature>())
+                .copied()
+        }
+    }
+
     impl TpuSenderResponseCallback for LoggingCallback {
         fn call(&self, response: TpuSenderResponse) {
             use std::io::Write;
             let mut stdout = std::io::stdout();
             match response {
                 TpuSenderResponse::TxSent(info) => {
-                    writeln!(
-                        &mut stdout,
-                        "Transaction {} send to {}",
-                        info.tx_sig, info.remote_peer_identity
-                    )
-                    .expect("writeln");
+                    if let Some(sig) = Self::signature_from_info(&info.info) {
+                        writeln!(
+                            &mut stdout,
+                            "Transaction {} send to {}",
+                            sig, info.remote_peer_identity
+                        )
+                        .expect("writeln");
+                    } else {
+                        writeln!(
+                            &mut stdout,
+                            "Transaction sent to {} (missing signature metadata)",
+                            info.remote_peer_identity
+                        )
+                        .expect("writeln");
+                    }
                 }
                 TpuSenderResponse::TxFailed(info) => {
-                    writeln!(&mut stdout, "Transaction failed: {}", info.tx_sig).expect("writeln");
+                    if let Some(sig) = Self::signature_from_info(&info.info) {
+                        writeln!(&mut stdout, "Transaction failed: {}", sig).expect("writeln");
+                    } else {
+                        writeln!(
+                            &mut stdout,
+                            "Transaction failed for {} (missing signature metadata)",
+                            info.remote_peer_identity
+                        )
+                        .expect("writeln");
+                    }
                 }
                 TpuSenderResponse::TxDrop(info) => {
                     for (txn, _) in info.dropped_tx_vec {
-                        writeln!(&mut stdout, "Transaction dropped: {}", txn.tx_sig)
+                        if let Some(sig) = Self::signature_from_info(&txn.info) {
+                            writeln!(&mut stdout, "Transaction dropped: {}", sig).expect("writeln");
+                        } else {
+                            writeln!(
+                                &mut stdout,
+                                "Transaction dropped for {} (missing signature metadata)",
+                                info.remote_peer_identity
+                            )
                             .expect("writeln");
+                        }
                     }
                 }
             }
@@ -445,7 +482,13 @@ pub async fn tpu_sender_loop(
         });
 
         let result = tpu_sender
-            .send_txn_with_blocklist(signature, wire_transaction, blocklist)
+            .send_txn_with_blocklist(
+                wire_transaction,
+                blocklist,
+                Some(yellowstone_jet_tpu_client::core::TpuSenderTxnInfo::new(
+                    signature,
+                )),
+            )
             .await;
         if let Err(e) = result {
             tracing::error!(

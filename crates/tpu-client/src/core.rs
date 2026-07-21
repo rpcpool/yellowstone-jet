@@ -38,6 +38,8 @@
 //!
 //!
 
+include!(concat!(env!("OUT_DIR"), "/txn_info_cap.rs"));
+
 #[cfg(feature = "prometheus")]
 use crate::prom;
 use {
@@ -54,10 +56,10 @@ use {
     solana_clock::DEFAULT_MS_PER_SLOT,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_signature::Signature,
     solana_signer::Signer,
     solana_tls_utils::{QuicClientCertificate, SkipServerVerification, new_dummy_x509_certificate},
     std::{
+        any::TypeId,
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         future,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -612,36 +614,107 @@ where
             .or_else(|| self.other.get_quic_tpu_fwd_socket_addr(leader_pubkey))
     }
 }
+
+#[repr(align(16))]
+#[derive(Clone, Copy)]
+struct TxnInfoStorage([u8; TXN_INFO_CAP]);
+
+#[derive(Clone, Copy)]
+pub struct TpuSenderTxnInfo {
+    inner: TxnInfoStorage,
+    type_id: TypeId,
+}
+
+impl fmt::Debug for TpuSenderTxnInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TpuSenderTxnInfo")
+            .field("type_id", &self.type_id)
+            .finish()
+    }
+}
+
+impl TpuSenderTxnInfo {
+    pub fn new<T: Sized + Copy + 'static>(val: T) -> Self {
+        assert!(
+            std::mem::size_of::<T>() <= TXN_INFO_CAP,
+            "TpuSenderTxnInfo can only hold up to {} bytes, but T is {} bytes",
+            TXN_INFO_CAP,
+            std::mem::size_of::<T>()
+        );
+        let mut storage = TxnInfoStorage([0u8; TXN_INFO_CAP]);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (&val as *const T).cast::<u8>(),
+                storage.0.as_mut_ptr(),
+                std::mem::size_of::<T>(),
+            );
+        }
+        Self {
+            inner: storage,
+            type_id: TypeId::of::<T>(),
+        }
+    }
+
+    pub fn downcast_ref<T: Sized + Copy + 'static>(&self) -> Option<&T> {
+        let size = std::mem::size_of::<T>();
+        assert!(
+            size <= TXN_INFO_CAP,
+            "TpuSenderTxnInfo can only hold up to {} bytes, but T is {} bytes",
+            TXN_INFO_CAP,
+            size
+        );
+
+        if self.type_id != TypeId::of::<T>() {
+            return None;
+        }
+
+        let bytes = &self.inner.0;
+        let ptr = bytes.as_ptr();
+        let align = std::mem::align_of::<T>();
+        if !(ptr as usize).is_multiple_of(align) {
+            return None;
+        }
+
+        let value = unsafe { &*ptr.cast::<T>() };
+        Some(value)
+    }
+}
+
 ///
 /// A transaction with destination details to be sent to a remote peer.
 ///
 #[derive(Debug)]
 pub struct TpuSenderTxn {
-    /// Id set by the sender to identify the transaction. Only meaningful to the sender.
-    pub tx_sig: Signature,
     /// The wire format of the transaction.
     pub(crate) wire: Bytes,
     /// The pubkey of the remote peer to send the transaction to.
     pub remote_peer: Pubkey,
+    ///
+    /// Arbitrary information about the transaction. This can be used to store additional metadata or context about the transaction.
+    pub info: Option<TpuSenderTxnInfo>,
 }
 
 impl TpuSenderTxn {
-    pub const fn from_bytes(tx_sig: Signature, remote_peer: Pubkey, wire: Bytes) -> Self {
+    pub const fn from_bytes(
+        remote_peer: Pubkey,
+        wire: Bytes,
+        info: Option<TpuSenderTxnInfo>,
+    ) -> Self {
         Self {
-            tx_sig,
             wire,
             remote_peer,
+            info,
         }
     }
 
-    pub fn from_owned<T>(tx_sig: Signature, remote_peer: Pubkey, wire: T) -> Self
+    pub fn from_owned<T>(remote_peer: Pubkey, wire: T, info: Option<TpuSenderTxnInfo>) -> Self
     where
         T: AsRef<[u8]> + Send + 'static,
     {
         Self {
-            tx_sig,
             wire: Bytes::from_owner(wire),
             remote_peer,
+            info,
         }
     }
 }
@@ -699,9 +772,8 @@ pub struct TxSent {
     ///
     pub remote_peer_addr: SocketAddr,
     ///
-    /// The transaction signature.
-    ///
-    pub tx_sig: Signature,
+    /// Arbitrary information about the transaction send attempt. This can be used to store additional metadata or context about the transaction.
+    pub info: Option<TpuSenderTxnInfo>,
 }
 
 ///
@@ -717,13 +789,13 @@ pub struct TxFailed {
     ///
     pub remote_peer_addr: SocketAddr,
     ///
-    /// The transaction signature.
-    ///
-    pub tx_sig: Signature,
-    ///
     /// Low-level reason for the failure.
     ///
     pub failure_reason: String,
+
+    ///
+    /// Arbitrary information about the transaction send attempt. This can be used to store additional metadata or context about the transaction.
+    pub info: Option<TpuSenderTxnInfo>,
 }
 
 ///
@@ -960,7 +1032,7 @@ where
     ) -> Option<TxSenderWorkerError> {
         let result = self.send_tx(tx.wire.as_ref()).await;
         let remote_addr = self.remote_peer_addr;
-        let tx_sig = tx.tx_sig;
+        let tx_info = tx.info;
         match result {
             Ok(sent_ok) => {
                 tracing::debug!(
@@ -971,7 +1043,7 @@ where
                 let resp = TxSent {
                     remote_peer_identity: self.remote_peer,
                     remote_peer_addr: remote_addr,
-                    tx_sig,
+                    info: tx_info,
                 };
                 if let Some(callback) = &self.output_tx {
                     callback.call(TpuSenderResponse::TxSent(resp));
@@ -1011,15 +1083,14 @@ where
                         remote_peer_identity: self.remote_peer,
                         remote_peer_addr: self.remote_peer_addr,
                         failure_reason: e.to_string(),
-                        tx_sig,
+                        info: tx_info,
                     };
                     if let Some(callback) = &self.output_tx {
                         callback.call(TpuSenderResponse::TxFailed(resp));
                     }
                 } else {
                     tracing::trace!(
-                        "Retrying to send transaction: {} to remote peer: {} after {} attempts: {:?}",
-                        tx_sig,
+                        "Retrying to send transaction to remote peer: {} after {} attempts: {:?}",
                         self.remote_peer,
                         attempt,
                         e
@@ -1033,18 +1104,13 @@ where
                     }
                     SendTxError::StreamStopped(_) | SendTxError::StreamClosed => {
                         tracing::trace!(
-                            "Stream stopped or closed for tx: {} to remote peer: {}",
-                            tx_sig,
+                            "Stream stopped or closed to remote peer: {}",
                             self.remote_peer
                         );
                         None
                     }
                     SendTxError::ZeroRttRejected => {
-                        tracing::warn!(
-                            "0-RTT rejected by remote peer: {} for tx: {}",
-                            self.remote_peer,
-                            tx_sig
-                        );
+                        tracing::warn!("0-RTT rejected by remote peer: {}", self.remote_peer);
                         Some(TxSenderWorkerError::ZeroRttRejected)
                     }
                 }
@@ -1054,12 +1120,6 @@ where
 
     async fn try_process_tx_in_queue(&mut self) -> Option<TxSenderWorkerError> {
         while let Some((tx, attempt)) = self.tx_queue.pop_front() {
-            tracing::trace!(
-                "Processing tx: {} for remote peer: {} with attempt: {}",
-                tx.tx_sig,
-                self.remote_peer,
-                attempt
-            );
             if let Some(e) = self.process_tx(tx, attempt).await {
                 return Some(e);
             }
@@ -1091,7 +1151,6 @@ where
                     match maybe {
                         Some(tx) => {
                             last_activity = Instant::now();
-                            tracing::trace!("Received tx: {} for remote peer: {}", tx.tx_sig, self.remote_peer);
                             self.tx_queue.push_back((tx, 1));
                         }
                         None => {
@@ -2297,7 +2356,6 @@ where
         let remote_peer_identity = tx.remote_peer;
         self.last_peer_activity
             .insert(remote_peer_identity, Instant::now());
-        let tx_id = tx.tx_sig;
 
         // Check size
         if tx.wire.len() > PACKET_DATA_SIZE && !self.config.unsafe_allow_arbitrary_txn_size {
@@ -2326,7 +2384,6 @@ where
             }
             match handle.sender.try_send(tx) {
                 Ok(_) => {
-                    tracing::trace!("{tx_id} sent to worker");
                     #[cfg(feature = "prometheus")]
                     {
                         prom::incr_quic_gw_tx_relayed_to_worker(remote_peer_identity);
@@ -2335,9 +2392,8 @@ where
                 Err(e) => match e {
                     mpsc::error::TrySendError::Full(tx) => {
                         tracing::warn!(
-                            "Remote peer: {:?} tx queue is full, dropping tx: {:?}",
+                            "Remote peer: {:?} tx queue is full, dropping tx",
                             remote_peer_identity,
-                            tx_id
                         );
                         let txdrop = TxDrop {
                             remote_peer_identity,
@@ -2353,7 +2409,6 @@ where
                         }
                     }
                     mpsc::error::TrySendError::Closed(tx) => {
-                        tracing::debug!("Enqueuing tx: {tx_id:.10}",);
                         self.tx_queues
                             .entry(remote_peer_identity)
                             .or_default()
@@ -2372,7 +2427,7 @@ where
                 .entry(remote_peer_identity)
                 .or_default()
                 .push_back((tx, 1));
-            tracing::trace!("queuing tx: {:?}", tx_id);
+            tracing::trace!("queuing tx for remote peer: {:?}", remote_peer_identity);
 
             // Check if we are not already connecting to this remote peer.
             // If the remote peer is already being connected, just queue the tx.
@@ -4194,5 +4249,26 @@ mod leader_tpu_info_service_test {
         let actual_normal = override_svc.get_quic_dest_addr(&pk1, TpuPortKind::Normal);
         assert_eq!(actual_normal, Some("127.0.0.1:8000".parse().unwrap()));
         assert_eq!(actual_fwd, Some("127.0.0.1:8001".parse().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod test_tpu_sender_txn_info {
+    use crate::core::TpuSenderTxnInfo;
+
+    #[test]
+    fn test_txn_info() {
+        #[derive(Debug, Clone, PartialEq, Eq, Copy)]
+        struct TestTxnInfo {
+            data: [u8; 4],
+        }
+
+        let expected = TestTxnInfo {
+            data: [0xDE, 0xAD, 0xBE, 0xEF],
+        };
+        let info = TpuSenderTxnInfo::new(expected);
+
+        let actual = info.downcast_ref::<TestTxnInfo>().copied().unwrap();
+        assert_eq!(actual, expected);
     }
 }

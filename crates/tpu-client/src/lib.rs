@@ -22,6 +22,43 @@
 //!
 //! This crate come with a _smart_ TPU sender implementation: [YellowstoneTpuSender](`crate::yellowstone_grpc::sender::YellowstoneTpuSender`)
 //!
+//! ## `TpuSenderTxnInfo` metadata model
+//!
+//! The sender no longer carries a dedicated `tx_sig` field in response types.
+//! Instead, callers can attach typed metadata using
+//! [TpuSenderTxnInfo](`crate::core::TpuSenderTxnInfo`) and recover it from
+//! [TpuSenderResponse](`crate::core::TpuSenderResponse`) values.
+//!
+//! Typical usage:
+//!
+//! 1. Build metadata: `let info = TpuSenderTxnInfo::new(signature);`
+//! 2. Send: `sender.send_txn(wire_txn, Some(info)).await?;`
+//! 3. Decode in callback: `resp.info.as_ref().and_then(|i| i.downcast_ref::<Signature>())`
+//!
+//! Metadata constraints:
+//!
+//! - Must be `Copy + Sized + 'static`.
+//! - Must fit in [TXN_INFO_CAP](`crate::TXN_INFO_CAP`) bytes.
+//!
+//! Compile-time capacity tuning:
+//!
+//! - Set `TXN_INFO_CAP` before build to change metadata storage capacity.
+//! - Default capacity is `64` bytes.
+//!
+//! ```sh
+//! TXN_INFO_CAP=128 cargo build -p yellowstone-jet-tpu-client
+//! ```
+//!
+//! You can inspect the value at runtime:
+//!
+//! ```ignore
+//! use yellowstone_jet_tpu_client::TXN_INFO_CAP;
+//! println!("TXN_INFO_CAP={}", TXN_INFO_CAP);
+//! ```
+//!
+//! See [YellowstoneTpuSender](`crate::yellowstone_grpc::sender::YellowstoneTpuSender`) rustdoc
+//! for a complete end-to-end example covering `TxSent`, `TxFailed`, and `TxDrop`.
+//!
 //! This sender implementation supports three different sending strategies:
 //!
 //! 1. Send transaction to one or more remote peers
@@ -74,3 +111,5 @@ pub mod slot;
 ///
 #[cfg(feature = "yellowstone-grpc")]
 pub mod yellowstone_grpc;
+
+pub use core::TXN_INFO_CAP;

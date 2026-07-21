@@ -316,7 +316,7 @@ impl Sink<TpuSenderTxn> for PollTpuSender {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, bytes::Bytes, solana_pubkey::Pubkey, solana_signature::Signature};
+    use {super::*, bytes::Bytes, solana_pubkey::Pubkey};
 
     fn test_sender(capacity: usize) -> (PollTpuSender, tokio::sync::mpsc::Receiver<TpuSenderTxn>) {
         let (tpu_sender, rx) = TpuSender::new_test(capacity);
@@ -325,9 +325,9 @@ mod tests {
 
     fn sample_txn(remote_peer: Pubkey) -> TpuSenderTxn {
         TpuSenderTxn {
-            tx_sig: Signature::new_unique(),
             wire: Bytes::from_static(b"wire-bytes"),
             remote_peer,
+            info: None,
         }
     }
 
