@@ -298,8 +298,8 @@ impl TransactionRetrySchedulerRuntime {
             );
         }
         deprecrated_tx
-            .into_iter()
-            .flat_map(|(_, signatures)| signatures)
+            .into_values()
+            .flatten()
             .for_each(|signature| {
                 self.tx_pool.remove(&signature);
                 self.rooted_transactions.unsubscribe_signature(signature);

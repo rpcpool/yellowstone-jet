@@ -628,7 +628,7 @@ async fn run_jet(
         }
     }
     if !tg.is_empty() {
-        for (_id, name) in tg_name_map.iter() {
+        for name in tg_name_map.values() {
             warn!("task -- {name} : did not finish in time, aborting");
         }
     }

@@ -327,10 +327,8 @@ impl TransactionDecoder {
             TransactionPayload::New(wrapper) => {
                 let tx = bincode::deserialize(&wrapper.transaction)?;
                 let config = if let Some(proto_config) = &wrapper.config {
-                    match proto_config.try_into() {
-                        Ok(config) => Some(config),
-                        Err(err) => return Err(err),
-                    }
+                    let config = proto_config.try_into()?;
+                    Some(config)
                 } else {
                     None
                 };

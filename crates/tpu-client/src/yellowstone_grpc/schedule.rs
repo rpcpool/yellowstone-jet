@@ -15,11 +15,9 @@
 //!
 use {
     crate::{
-        core::UpcomingLeaderPredictor, rpc::schedule::ManagedLeaderSchedule,
-        slot::AtomicSlotTracker,
+        core::UpcomingLeaderPredictor, rpc::schedule::ManagedLeaderSchedule, slot::SlotTracker,
     },
     solana_pubkey::Pubkey,
-    std::sync::Arc,
 };
 
 ///
@@ -31,7 +29,7 @@ use {
 ///
 #[derive(Clone)]
 pub struct YellowstoneUpcomingLeader {
-    pub slot_tracker: Arc<AtomicSlotTracker>,
+    pub slot_tracker: SlotTracker,
     pub managed_schedule: ManagedLeaderSchedule,
 }
 

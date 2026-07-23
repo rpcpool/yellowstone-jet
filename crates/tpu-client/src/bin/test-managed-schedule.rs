@@ -12,11 +12,8 @@ use {
     tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt},
     yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcBuilder, GeyserGrpcClient},
     yellowstone_jet_tpu_client::{
-        core::UpcomingLeaderPredictor,
-        rpc::schedule::spawn_managed_leader_schedule,
-        yellowstone_grpc::{
-            schedule::YellowstoneUpcomingLeader, slot_tracker::YellowstoneSlotTrackerOk,
-        },
+        core::UpcomingLeaderPredictor, rpc::schedule::spawn_managed_leader_schedule,
+        yellowstone_grpc::schedule::YellowstoneUpcomingLeader,
     },
 };
 
@@ -109,22 +106,20 @@ async fn main() {
             .await
             .expect("spawn_managed_leader_schedule");
 
-    let YellowstoneSlotTrackerOk {
-        atomic_slot_tracker,
-        join_handle: mut slot_tracker_jh,
-    } = yellowstone_jet_tpu_client::yellowstone_grpc::slot_tracker::atomic_slot_tracker(
-        geyser_client,
-    )
-    .await
-    .expect("atomic_slot_tracker")
-    .expect("some");
+    let atomic_slot_tracker =
+        yellowstone_jet_tpu_client::yellowstone_grpc::slot_tracker::atomic_slot_tracker(
+            geyser_client,
+        )
+        .await
+        .expect("atomic_slot_tracker")
+        .expect("some");
 
     let mut ctrlc = tokio::spawn(tokio::signal::ctrl_c());
 
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(400));
     let leader_predictor = YellowstoneUpcomingLeader {
         managed_schedule: managed_leader_schedule.clone(),
-        slot_tracker: Arc::clone(&atomic_slot_tracker),
+        slot_tracker: atomic_slot_tracker.clone(),
     };
     loop {
         tokio::select! {
@@ -132,10 +127,6 @@ async fn main() {
             _ = &mut ctrlc => break,
             _ = &mut managed_leader_schedule_jh => {
                 tracing::error!("managed leader schedule task exited unexpectedly");
-                break;
-            }
-            _ = &mut slot_tracker_jh => {
-                tracing::error!("Yellowstone slot tracker task exited unexpectedly");
                 break;
             }
         }
