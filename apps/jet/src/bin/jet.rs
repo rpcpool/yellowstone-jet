@@ -3,7 +3,6 @@ use tikv_jemallocator::Jemalloc;
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
-    futures::future::FutureExt,
     jsonrpsee::http_client::HttpClientBuilder,
     reqwest::{Client, Url},
     solana_client::rpc_client::RpcClientConfig,
@@ -29,16 +28,15 @@ use {
         task::{self, JoinHandle, JoinSet},
         time::Instant,
     },
+    tokio_stream::wrappers::UnboundedReceiverStream,
     tokio_util::sync::CancellationToken,
-    tracing::{error, info, warn},
+    tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{ConfigJet, PrometheusConfig, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
-        grpc_lewis::create_lewis_pipeline,
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
-        jet_gateway::spawn_jet_gw_listener,
         metrics::{REGISTRY, collect_to_text, jet as metrics},
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
@@ -46,16 +44,19 @@ use {
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         transaction_handler::TransactionHandler,
         transactions::{
-            AlwaysAllowTransactionPolicyStore, FanoutConfig, GrpcRootedTxReceiver, QuicGatewayBidi,
+            AlwaysAllowTransactionPolicyStore, FanoutConfig, GrpcRootedTxReceiver,
             TransactionFanout, TransactionNoRetryScheduler, TransactionPolicyStore,
             TransactionRetryScheduler, TransactionRetrySchedulerConfig,
         },
+        txn_tracing_drain::HttpTxnTraceDrain,
         util::{WaitShutdown, prom::inject_job_label},
     },
-    yellowstone_jet_tpu_client::core::{
-        IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
-        StakeBasedEvictionStrategy, TpuSenderDriverSpawner, TpuSenderSessionContext,
-        UpcomingLeaderPredictor,
+    yellowstone_jet_tpu_client::{
+        core::{
+            IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
+            StakeBasedEvictionStrategy, UpcomingLeaderPredictor,
+        },
+        sender::{PollTpuSender, create_base_tpu_client},
     },
     yellowstone_shield_store::PolicyStore,
 };
@@ -334,42 +335,40 @@ async fn run_jet(
             other: cluster_tpu_info.clone(),
         });
 
-    let quic_gateway_spawner = TpuSenderDriverSpawner {
-        stake_info_map: Arc::new(stake_info_map.clone()),
-        driver_tx_channel_capacity: 10000,
-        leader_tpu_info_service,
-    };
-
     let connection_predictor = if config.quic.tpu_sender.leader_prediction_lookahead.is_some() {
         Arc::new(cluster_tpu_info.clone()) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>
     } else {
         Arc::new(IgnorantLeaderPredictor)
     };
 
-    let (gateway_callback_tx, gateway_response_source) = tokio::sync::mpsc::unbounded_channel();
-    let TpuSenderSessionContext {
-        identity_updater: gateway_identity_updater,
-        driver_tx_sink: gateway_tx_sink,
-        driver_join_handle: gateway_join_handle,
-    } = quic_gateway_spawner.spawn(
-        initial_identity.insecure_clone(),
+    let maybe_callback_sink = if let Some(drain_config) = config.http_txn_trace_drain {
+        let (tpu_client_callback_tx, tpu_client_callback_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let drain = HttpTxnTraceDrain::with_config(
+            UnboundedReceiverStream::new(tpu_client_callback_rx),
+            drain_config,
+        );
+        tokio::spawn(drain);
+        Some(tpu_client_callback_tx)
+    } else {
+        None
+    };
+
+    let tpu_sender = create_base_tpu_client(
         config.quic.tpu_sender.clone(),
+        initial_identity.insecure_clone(),
+        leader_tpu_info_service,
+        Arc::new(stake_info_map.clone()),
         Arc::new(StakeBasedEvictionStrategy {
             peer_idle_eviction_grace_period: config.quic.connection_idle_eviction_grace,
         }),
         connection_predictor,
-        Some(gateway_callback_tx),
-    );
-
-    let ah = tg.spawn(async move {
-        gateway_join_handle.await.expect("quic gateway join handle");
-    });
-    tg_name_map.insert(ah.id(), "quic_gateway".to_string());
-
-    let quic_gateway_bidi = QuicGatewayBidi {
-        sink: gateway_tx_sink,
-        source: gateway_response_source,
-    };
+        maybe_callback_sink,
+        10_000,
+    )
+    .await;
+    let identity_updater = tpu_sender.get_owned_identity_updater();
+    let tpu_sender = PollTpuSender::new(tpu_sender);
 
     let (scheduler_in, scheduler_out) = if !config.send_transaction_service.relay_only_mode {
         info!(
@@ -397,31 +396,24 @@ async fn run_jet(
         (sink, source)
     };
 
-    // Set up Lewis event tracking pipeline
-    let (lewis_handler, lewis_fut) = create_lewis_pipeline(
-        config.lewis_events.clone(),
-        jet_cancellation_token.child_token(),
-    );
-
     #[allow(deprecated)]
     let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
         shield_policy_store,
-        scheduler_out,
-        quic_gateway_bidi,
+        UnboundedReceiverStream::new(scheduler_out),
+        tpu_sender,
         config
             .send_transaction_service
             .leader_forward_count
             .map_or(FanoutConfig::SmartFanout, FanoutConfig::Custom),
         config.send_transaction_service.extra_fanout,
-        lewis_handler,
     );
 
     let ah = tg.spawn(async move { tx_forwader.run().await });
     tg_name_map.insert(ah.id(), "transaction_fanout".to_string());
 
-    let mut jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
-        vec![Box::new(gateway_identity_updater)];
+    let jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
+        vec![Box::new(identity_updater)];
 
     let tx_handler = TransactionHandler {
         transaction_sink: scheduler_in,
@@ -435,43 +427,6 @@ async fn run_jet(
         },
     )
     .await;
-
-    let jet_gw_listener = match config.jet_gateway {
-        Some(config_jet_gateway) => {
-            let jet_gw_cancellation_token = jet_cancellation_token.child_token();
-            if config_jet_gateway.endpoints.is_empty() {
-                warn!("no endpoints for jet-gateway with existed config");
-                None
-            } else {
-                let jet_gw_config = config_jet_gateway.clone();
-                let expected_identity = config.identity.expected;
-
-                info!("starting jet-gateway listener");
-                let stake_info = stake_info_map.clone();
-                let jet_gw_identity = initial_identity.insecure_clone();
-                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(
-                    tx_handler,
-                    config.log_invalid_txn,
-                );
-                let (jet_gw_identity_updater, jet_gw_fut) = spawn_jet_gw_listener(
-                    stake_info,
-                    jet_gw_config,
-                    tx_sender,
-                    expected_identity,
-                    config.features,
-                    jet_gw_identity,
-                    jet_gw_cancellation_token,
-                );
-                jet_identity_sync_members.push(Box::new(jet_gw_identity_updater));
-                Some(jet_gw_fut.boxed())
-            }
-        }
-        _ => {
-            drop(tx_handler);
-            warn!("Skipping jet-gateway listener, no config provided");
-            None
-        }
-    };
 
     let mut sigint = signal(SignalKind::interrupt())?;
 
@@ -498,19 +453,6 @@ async fn run_jet(
     ));
     tg_name_map.insert(ah.id(), "stake_info_metrics_update".to_string());
 
-    // Spawn Lewis client task if configured
-    if let Some(fut) = lewis_fut {
-        let ah = tg.spawn(
-            fut.inspect(|result| {
-                if let Err(e) = result {
-                    error!("Lewis client error: {e}");
-                }
-            })
-            .map(drop),
-        );
-        tg_name_map.insert(ah.id(), "lewis_client".to_string());
-    }
-
     let ah = tg.spawn(async move {
         geyser_handle
             .await
@@ -536,11 +478,6 @@ async fn run_jet(
         rooted_tx_loop_fut.await;
     });
     tg_name_map.insert(ah.id(), "rooted_tx_receiver".to_string());
-
-    if let Some(jet_gw_listener_fut) = jet_gw_listener {
-        let ah = tg.spawn(jet_gw_listener_fut);
-        tg_name_map.insert(ah.id(), "jet_gw_listener".to_string());
-    }
 
     if let Some(config_prometheus) = config.prometheus {
         let push_gw_task = spawn_push_prometheus_metrics(
@@ -582,6 +519,7 @@ async fn run_jet(
     let Some(result) = tg.join_next_with_id().await else {
         panic!("no task in the task group can ever happen");
     };
+
     macro_rules! get_id {
         ($joinset_join_result_with_id:expr) => {
             match $joinset_join_result_with_id {

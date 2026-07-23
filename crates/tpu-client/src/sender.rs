@@ -98,6 +98,10 @@ impl TpuSender {
         };
         (sender, rx)
     }
+
+    pub fn get_owned_identity_updater(&self) -> TpuSenderIdentityUpdater {
+        self.identity_updater.clone()
+    }
 }
 
 ///

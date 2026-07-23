@@ -52,7 +52,7 @@ pub mod jet {
     use {
         super::{REGISTRY, init2},
         crate::{
-            grpc_lewis,
+            txn_tracing_drain,
             util::{CommitmentLevel, SlotStatus},
         },
         prometheus::{
@@ -280,7 +280,7 @@ pub mod jet {
             register!(HTTP_TX_REQUEST_DURATION);
 
             yellowstone_jet_tpu_client::prom::register_metrics(&REGISTRY);
-            grpc_lewis::prom::register_metrics(&REGISTRY);
+            txn_tracing_drain::prom::register_metrics(&REGISTRY);
         });
     }
 

@@ -51,6 +51,7 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
         wire_transaction: wire_transaction.into(),
         transaction: tx,
         policies: vec![],
+        x_request_id: None,
     }
 }
 
@@ -92,6 +93,7 @@ pub fn create_durable_nonce_txn_request(
         wire_transaction: wire_transaction.into(),
         transaction: tx,
         policies: vec![],
+        x_request_id: None,
     }
 }
 
