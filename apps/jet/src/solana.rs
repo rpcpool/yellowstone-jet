@@ -83,7 +83,7 @@ where
             Err(invalid_params(format!(
                 "failed to deserialize {}: {}",
                 type_name::<T>(),
-                &err.to_string()
+                err,
             )))
         }
     }

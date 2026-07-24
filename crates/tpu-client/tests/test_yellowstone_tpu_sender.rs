@@ -29,7 +29,7 @@ use {
         },
         rpc::schedule::ManagedLeaderSchedule,
         sender::create_base_tpu_client,
-        slot::AtomicSlotTracker,
+        slot::SlotTracker,
         yellowstone_grpc::sender::YellowstoneTpuSender,
     },
 };
@@ -206,7 +206,7 @@ async fn build_sender_from_parts(
         base_tpu_sender,
         leader_tpu_info,
         ManagedLeaderSchedule::new_for_test(0, schedule),
-        Arc::new(AtomicSlotTracker::new_for_test(current_slot)),
+        SlotTracker::new_for_test(current_slot),
         TpuPortKind::Forwards,
     )
 }

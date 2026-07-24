@@ -84,10 +84,8 @@ impl RequestParams {
                         }
                     };
                 }
-                "max_retries" => {
-                    if !value.is_empty() {
-                        max_retries = value.parse().ok();
-                    }
+                "max_retries" if !value.is_empty() => {
+                    max_retries = value.parse().ok();
                 }
                 _ => {}
             }

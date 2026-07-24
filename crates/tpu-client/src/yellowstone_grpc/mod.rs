@@ -4,3 +4,5 @@ pub mod schedule;
 pub mod sender;
 /// Yellowstone modules to track the current slot using gRPC+RPC services.
 pub mod slot_tracker;
+
+pub mod subscribe;

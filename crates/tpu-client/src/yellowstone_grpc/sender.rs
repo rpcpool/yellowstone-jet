@@ -14,10 +14,10 @@ use {
             tpu_info::{RpcClusterTpuQuicInfoServiceConfig, rpc_cluster_tpu_info_service},
         },
         sender::{PollTpuSender, create_base_tpu_client},
-        slot::AtomicSlotTracker,
+        slot::SlotTracker,
         yellowstone_grpc::{
             schedule::YellowstoneUpcomingLeader,
-            slot_tracker::{self, YellowstoneSlotTrackerOk},
+            slot_tracker::{self},
         },
     },
     bytes::Bytes,
@@ -387,7 +387,7 @@ pub struct YellowstoneTpuSender {
     /// By enabling this option, the sender will coalesce multiple sends to the same address into a single send, reducing network overhead.
     ///
     coalesce_send_many_tpu_port_collision: bool,
-    atomic_slot_tracker: Arc<AtomicSlotTracker>,
+    atomic_slot_tracker: SlotTracker,
     leader_schedule: ManagedLeaderSchedule,
     leader_tpu_info: Arc<dyn crate::core::LeaderTpuInfoService + Send + Sync>,
     tpu_port_kind: TpuPortKind,
@@ -607,7 +607,7 @@ impl YellowstoneTpuSender {
         tpu_sender: impl Into<PollTpuSender>,
         leader_tpu_info: Arc<dyn crate::core::LeaderTpuInfoService + Send + Sync>,
         managed_leader_schedule: ManagedLeaderSchedule,
-        atomic_slot_tracker: Arc<AtomicSlotTracker>,
+        atomic_slot_tracker: SlotTracker,
         tpu_port_kind: TpuPortKind,
     ) -> Self {
         YellowstoneTpuSender {
@@ -1262,7 +1262,7 @@ mod tests {
         let sender = YellowstoneTpuSender {
             base_tpu_sender: PollTpuSender::new(tpu_sender),
             coalesce_send_many_tpu_port_collision: coalesce,
-            atomic_slot_tracker: Arc::new(AtomicSlotTracker::new(current_slot)),
+            atomic_slot_tracker: SlotTracker::new(current_slot),
             leader_schedule: ManagedLeaderSchedule::new_for_test(0, schedule),
             leader_tpu_info: Arc::new(FakeLeaderTpuInfo(addrs)),
             tpu_port_kind: TpuPortKind::Forwards,
@@ -1480,10 +1480,7 @@ where
 
     tracing::debug!("spawned stake info service");
 
-    let YellowstoneSlotTrackerOk {
-        atomic_slot_tracker,
-        join_handle: slot_tracker_jh,
-    } = slot_tracker::atomic_slot_tracker(grpc_client)
+    let atomic_slot_tracker = slot_tracker::atomic_slot_tracker(grpc_client)
         .await?
         .ok_or(CreateTpuSenderError::GeyserSubscriptionEnded)?;
 
@@ -1495,7 +1492,7 @@ where
     };
 
     let leader_predictor = YellowstoneUpcomingLeader {
-        slot_tracker: Arc::clone(&atomic_slot_tracker),
+        slot_tracker: atomic_slot_tracker.clone(),
         managed_schedule: managed_leader_schedule.clone(),
     };
     let tpu_port_kind = config.tpu.tpu_port;
@@ -1519,7 +1516,7 @@ where
 
     let sender = YellowstoneTpuSender {
         base_tpu_sender: PollTpuSender::new(base_tpu_sender),
-        atomic_slot_tracker,
+        atomic_slot_tracker: atomic_slot_tracker.clone(),
         coalesce_send_many_tpu_port_collision: true,
         leader_schedule: managed_leader_schedule,
         leader_tpu_info: Arc::clone(&tpu_info_service),
@@ -1531,13 +1528,11 @@ where
         tpu_info_service_jh,
         managed_leader_schedule_jh,
         stake_info_jh,
-        slot_tracker_jh,
     ];
     let handle_name_vec = vec![
         "tpu-info-service",
         "managed-leader-schedule",
         "stake-info-service",
-        "slot-tracker",
     ];
 
     Ok(NewYellowstoneTpuSender {
