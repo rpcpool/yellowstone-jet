@@ -38,7 +38,6 @@ use {
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_lewis::create_lewis_pipeline,
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
-        jet_gateway::spawn_jet_gw_listener,
         metrics::{REGISTRY, collect_to_text, jet as metrics},
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
@@ -285,10 +284,7 @@ async fn run_jet(
     )
     .await;
 
-    let shield_policy_store = if config
-        .features
-        .is_feature_enabled(yellowstone_jet::proto::jet::Feature::YellowstoneShield)
-    {
+    let shield_policy_store = if config.enable_yellowstone_shield {
         let policy_store_config = config.upstream.clone().into();
         let policy_store = PolicyStore::build()
             .config(policy_store_config)
@@ -420,7 +416,7 @@ async fn run_jet(
     let ah = tg.spawn(async move { tx_forwader.run().await });
     tg_name_map.insert(ah.id(), "transaction_fanout".to_string());
 
-    let mut jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
+    let jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
         vec![Box::new(gateway_identity_updater)];
 
     let tx_handler = TransactionHandler {
@@ -435,43 +431,6 @@ async fn run_jet(
         },
     )
     .await;
-
-    let jet_gw_listener = match config.jet_gateway {
-        Some(config_jet_gateway) => {
-            let jet_gw_cancellation_token = jet_cancellation_token.child_token();
-            if config_jet_gateway.endpoints.is_empty() {
-                warn!("no endpoints for jet-gateway with existed config");
-                None
-            } else {
-                let jet_gw_config = config_jet_gateway.clone();
-                let expected_identity = config.identity.expected;
-
-                info!("starting jet-gateway listener");
-                let stake_info = stake_info_map.clone();
-                let jet_gw_identity = initial_identity.insecure_clone();
-                let tx_sender = RpcServer::create_solana_like_rpc_server_impl(
-                    tx_handler,
-                    config.log_invalid_txn,
-                );
-                let (jet_gw_identity_updater, jet_gw_fut) = spawn_jet_gw_listener(
-                    stake_info,
-                    jet_gw_config,
-                    tx_sender,
-                    expected_identity,
-                    config.features,
-                    jet_gw_identity,
-                    jet_gw_cancellation_token,
-                );
-                jet_identity_sync_members.push(Box::new(jet_gw_identity_updater));
-                Some(jet_gw_fut.boxed())
-            }
-        }
-        _ => {
-            drop(tx_handler);
-            warn!("Skipping jet-gateway listener, no config provided");
-            None
-        }
-    };
 
     let mut sigint = signal(SignalKind::interrupt())?;
 
@@ -536,11 +495,6 @@ async fn run_jet(
         rooted_tx_loop_fut.await;
     });
     tg_name_map.insert(ah.id(), "rooted_tx_receiver".to_string());
-
-    if let Some(jet_gw_listener_fut) = jet_gw_listener {
-        let ah = tg.spawn(jet_gw_listener_fut);
-        tg_name_map.insert(ah.id(), "jet_gw_listener".to_string());
-    }
 
     if let Some(config_prometheus) = config.prometheus {
         let push_gw_task = spawn_push_prometheus_metrics(

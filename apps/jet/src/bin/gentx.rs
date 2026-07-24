@@ -2,7 +2,7 @@ use {
     anyhow::Context,
     base64::{Engine, prelude::BASE64_STANDARD},
     clap::Parser,
-    futures::{channel::mpsc, future::TryFutureExt, sink::SinkExt},
+    futures::future::TryFutureExt,
     reqwest::Client,
     serde::{Deserialize, Deserializer, de},
     solana_client::{
@@ -30,22 +30,10 @@ use {
     },
     tokio::{
         fs,
-        sync::Mutex,
         time::{Duration, sleep},
     },
-    tonic::{
-        Response, Streaming,
-        transport::{Endpoint, channel::ClientTlsConfig},
-    },
     tracing::{error, info},
-    yellowstone_jet::{
-        payload::{JetRpcSendTransactionConfig, TransactionPayload},
-        proto::jet::{
-            PublishRequest, PublishResponse, PublishTransaction,
-            jet_gateway_client::JetGatewayClient, publish_request::Message as PublishMessage,
-        },
-        setup_tracing,
-    },
+    yellowstone_jet::{payload::JetRpcSendTransactionConfig, setup_tracing},
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -132,8 +120,6 @@ impl Config {
 enum ConfigOutput {
     /// Jet-like endpoint for sending generated transactions
     Jet { jet: String },
-    /// jet-gateway details
-    JetGateway { gateway: String },
 }
 
 impl Default for ConfigOutput {
@@ -145,12 +131,7 @@ impl Default for ConfigOutput {
 }
 
 enum TransactionSender {
-    Jet {
-        rpc: RpcClient,
-    },
-    JetGateway {
-        tx: Mutex<mpsc::Sender<PublishRequest>>,
-    },
+    Jet { rpc: RpcClient },
 }
 
 impl TransactionSender {
@@ -159,27 +140,6 @@ impl TransactionSender {
             ConfigOutput::Jet { jet } => Self::Jet {
                 rpc: RpcClient::new(jet),
             },
-            ConfigOutput::JetGateway { gateway } => {
-                let channel = Endpoint::from_shared(gateway)?
-                    .connect_timeout(Duration::from_secs(3))
-                    .timeout(Duration::from_secs(1))
-                    .tls_config(ClientTlsConfig::new().with_native_roots())?
-                    .connect()
-                    .await
-                    .context("failed to connect")?;
-                let mut client = JetGatewayClient::new(channel);
-
-                let (tx, rx) = mpsc::channel(1);
-                let mut response: Response<Streaming<PublishResponse>> = client.publish(rx).await?;
-                tokio::spawn(async move {
-                    while let Ok(Some(message)) = response.get_mut().message().await {
-                        info!(?message, "new message from gateway");
-                    }
-                    error!("gateway streaming finished");
-                });
-
-                Self::JetGateway { tx: Mutex::new(tx) }
-            }
         })
     }
 }
@@ -243,19 +203,6 @@ impl TransactionSender {
                         .await
                         .map_err(Into::into)
                 }
-            }
-            Self::JetGateway { tx } => {
-                let signature = transaction.signatures[0];
-                let payload =
-                    TransactionPayload::create(&transaction, config, should_use_legacy_txn)?;
-                let proto_tx = payload.to_proto::<PublishTransaction>()?;
-                tx.lock()
-                    .await
-                    .send(PublishRequest {
-                        message: Some(PublishMessage::Transaction(proto_tx)),
-                    })
-                    .await?;
-                Ok(signature)
             }
         }
     }
