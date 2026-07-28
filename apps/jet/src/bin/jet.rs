@@ -3,7 +3,6 @@ use tikv_jemallocator::Jemalloc;
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
-    futures::future::FutureExt,
     jsonrpsee::http_client::HttpClientBuilder,
     reqwest::{Client, Url},
     solana_client::rpc_client::RpcClientConfig,
@@ -31,13 +30,13 @@ use {
     },
     tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream},
     tokio_util::sync::CancellationToken,
-    tracing::{error, info, warn},
+    tracing::{info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{ConfigJet, PrometheusConfig, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
-        grpc_lewis::create_lewis_pipeline,
+        // grpc_lewis::create_lewis_pipeline,
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         metrics::{REGISTRY, collect_to_text, jet as metrics},
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
@@ -355,22 +354,23 @@ async fn run_jet(
         }),
         connection_predictor,
         maybe_callback_sink,
-        10_000,
+        1000, // This capacity should not be too deep, so transaction does not sits too long in the queue.
     )
     .await;
     let identity_updater = tpu_sender.get_owned_identity_updater();
     let tpu_sender = PollTpuSender::new(tpu_sender);
 
     // Root means the first stage of the transaction pipeline.
+    // the root channel can have deeper queue, because the transaction will be processed by the fanout stage, and then sent to the tpu stage.
     let (root_txn_inlet, root_txn_outlet) = mpsc::channel::<SendTransactionRequest>(10_000);
 
     let root_txn_outlet = ReceiverStream::new(root_txn_outlet);
     let root_txn_outlet = DropExpiredTransactions::new(root_txn_outlet, blockhash_queue.clone());
     // Set up Lewis event tracking pipeline
-    let (_lewis_handler, lewis_fut) = create_lewis_pipeline(
-        config.lewis_events.clone(),
-        jet_cancellation_token.child_token(),
-    );
+    // let (lewis_handler, lewis_fut) = create_lewis_pipeline(
+    //     config.lewis_events.clone(),
+    //     jet_cancellation_token.child_token(),
+    // );
 
     #[allow(deprecated)]
     let mut tx_forwader = TransactionFanout::new(
@@ -430,17 +430,17 @@ async fn run_jet(
     tg_name_map.insert(ah.id(), "stake_info_metrics_update".to_string());
 
     // Spawn Lewis client task if configured
-    if let Some(fut) = lewis_fut {
-        let ah = tg.spawn(
-            fut.inspect(|result| {
-                if let Err(e) = result {
-                    error!("Lewis client error: {e}");
-                }
-            })
-            .map(drop),
-        );
-        tg_name_map.insert(ah.id(), "lewis_client".to_string());
-    }
+    // if let Some(fut) = lewis_fut {
+    //     let ah = tg.spawn(
+    //         fut.inspect(|result| {
+    //             if let Err(e) = result {
+    //                 error!("Lewis client error: {e}");
+    //             }
+    //         })
+    //         .map(drop),
+    //     );
+    //     tg_name_map.insert(ah.id(), "lewis_client".to_string());
+    // }
 
     let ah = tg.spawn(async move {
         geyser_handle

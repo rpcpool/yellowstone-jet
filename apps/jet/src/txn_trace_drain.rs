@@ -136,9 +136,9 @@ impl<'a, T> IntoIterator for &'a OneOrMany<T> {
     }
 }
 
-struct OneOrManyIterator<T> {
-    inner: OneOrMany<T>,
-    index: usize,
+enum OneOrManyIterator<T> {
+    One(Option<T>),
+    Many(std::vec::IntoIter<T>),
 }
 
 impl<T> IntoIterator for OneOrMany<T> {
@@ -146,9 +146,9 @@ impl<T> IntoIterator for OneOrMany<T> {
     type IntoIter = OneOrManyIterator<T>;
 
     fn into_iter(self) -> Self::IntoIter {
-        OneOrManyIterator {
-            inner: self,
-            index: 0,
+        match self {
+            OneOrMany::One(item) => OneOrManyIterator::One(Some(item)),
+            OneOrMany::Many(items) => OneOrManyIterator::Many(items.into_iter()),
         }
     }
 }
@@ -157,25 +157,9 @@ impl<T> Iterator for OneOrManyIterator<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match &mut self.inner {
-            OneOrMany::One(item) => {
-                if self.index == 0 {
-                    self.index += 1;
-                    Some(std::mem::replace(item, unsafe { std::mem::zeroed() }))
-                } else {
-                    None
-                }
-            }
-            OneOrMany::Many(items) => {
-                if self.index < items.len() {
-                    let item =
-                        std::mem::replace(&mut items[self.index], unsafe { std::mem::zeroed() });
-                    self.index += 1;
-                    Some(item)
-                } else {
-                    None
-                }
-            }
+        match self {
+            OneOrManyIterator::One(opt) => opt.take(),
+            OneOrManyIterator::Many(iter) => iter.next(),
         }
     }
 }

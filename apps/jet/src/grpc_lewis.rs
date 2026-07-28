@@ -13,7 +13,6 @@ use {
     std::{
         future::Future,
         net::SocketAddr,
-        sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     },
     tokio::{sync::mpsc, time::Duration},
@@ -184,7 +183,7 @@ pub fn create_lewis_pipeline(
     config: Option<ConfigLewisEvents>,
     cancellation_token: CancellationToken,
 ) -> (
-    Option<Arc<LewisEventHandler>>,
+    Option<LewisEventHandler>,
     Option<impl Future<Output = Result<(), LewisClientError>> + Send>,
 ) {
     let Some(config) = config else {
@@ -194,7 +193,7 @@ pub fn create_lewis_pipeline(
     let (tx, rx) = mpsc::channel(config.event_buffer_size);
     let jet_id = config.jet_id.clone().unwrap_or_default();
 
-    let handler = Arc::new(LewisEventHandler { tx, jet_id });
+    let handler = LewisEventHandler { tx, jet_id };
     let fut = run_lewis_client(config, rx, cancellation_token);
 
     info!("Lewis event pipeline created");
