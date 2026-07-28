@@ -48,7 +48,7 @@ txn-info-cap-128 = []
 txn-info-cap-custom = []
 prometheus = ["dep:prometheus"]
 examples = [
-    "dep:bincode",
+    "dep:wincode",
     "dep:clap",
     "dep:dotenvy",
     "dep:solana-hash",
@@ -68,7 +68,7 @@ intg-testing = []
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }
-bincode = { workspace = true, optional = true }
+wincode = { workspace = true, optional = true }
 borsh = { workspace = true }
 bs58 = { workspace = true }
 bytes = { workspace = true }
@@ -106,7 +106,7 @@ solana-client = { workspace = true }
 solana-net-utils = { workspace = true, features = ["agave-unstable-api"] }
 solana-rpc-client = { workspace = true, optional = true }
 solana-rpc-client-api = { workspace = true }
-solana-system-interface = { workspace = true, optional = true, features = ["bincode"] }
+solana-system-interface = { workspace = true, optional = true }
 solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
 solana-version = { workspace = true }
 

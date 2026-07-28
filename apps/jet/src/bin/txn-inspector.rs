@@ -40,7 +40,7 @@ fn main() -> Result<()> {
     let normalized = normalize_input(&input)?;
     let (encoding, bytes) = decode_input(&normalized, args.encoding)?;
 
-    let tx: VersionedTransaction = bincode::deserialize(&bytes).with_context(|| {
+    let tx: VersionedTransaction = wincode::deserialize(&bytes).with_context(|| {
         format!(
             "failed to deserialize {} bytes as VersionedTransaction",
             bytes.len()

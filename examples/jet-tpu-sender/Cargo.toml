@@ -29,6 +29,5 @@ solana-signature = "3.0.0"
 solana-signer = "3.0.0"
 solana-transaction = "3.0.0"
 solana-transaction-error = "3.0.0"
-
 # Yellowstone
 yellowstone-jet-tpu-client = { version = "0.3.0", features = ["yellowstone-grpc"] }

@@ -38,7 +38,7 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
     )
     .expect("try new");
 
-    let wire_transaction = bincode::serialize(&tx).expect("Error getting wire_transaction");
+    let wire_transaction = wincode::serialize(&tx).expect("Error getting wire_transaction");
 
     SendTransactionRequest {
         max_retries: Some(max_resent),

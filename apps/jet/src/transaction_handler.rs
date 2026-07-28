@@ -23,7 +23,7 @@ pub enum TransactionHandlerError {
     InvalidTransaction(String),
 
     #[error("failed to serialize transaction: {0}")]
-    SerializationFailed(#[from] bincode::Error),
+    SerializationFailed(#[from] wincode::WriteError),
 
     #[error("preflight check is not supported")]
     PreflightNotSupported,
@@ -96,7 +96,7 @@ impl TransactionHandler {
             .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         let signature = transaction.signatures[0];
-        let wire_transaction = bincode::serialize(&transaction)?;
+        let wire_transaction = wincode::serialize(&transaction)?;
         if wire_transaction.len() > PACKET_DATA_SIZE {
             return Err(TransactionHandlerError::InvalidTransaction(format!(
                 "transaction size {} exceeds maximum allowed size of {} bytes",
@@ -134,7 +134,7 @@ impl TransactionHandler {
             )));
         }
 
-        let transaction: VersionedTransaction = bincode::deserialize(wire_transaction.as_ref())
+        let transaction: VersionedTransaction = wincode::deserialize(wire_transaction.as_ref())
             .map_err(|e| {
                 TransactionHandlerError::InvalidParams(format!(
                     "failed to deserialize transaction: {e}"

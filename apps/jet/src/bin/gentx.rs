@@ -157,7 +157,7 @@ impl TransactionSender {
                 if !config.forwarding_policies.is_empty() && !should_use_legacy_txn {
                     let client = Client::new();
 
-                    let tx_bytes = bincode::serialize(&transaction)?;
+                    let tx_bytes = wincode::serialize(&transaction)?;
                     let encoded_tx = BASE64_STANDARD.encode(tx_bytes);
 
                     let payload = serde_json::json!({
