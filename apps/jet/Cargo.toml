@@ -94,7 +94,7 @@ solana-transaction-error = { workspace = true }
 # Yellowstone
 yellowstone-grpc-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
-yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yellowstone-grpc", "shield"] }
+yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yellowstone-grpc", "shield", "txn-info-cap-128"] }
 yellowstone-shield-store = { workspace = true }
 
 [build-dependencies]

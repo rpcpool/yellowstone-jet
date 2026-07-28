@@ -29,6 +29,7 @@ use {
         task::{self, JoinHandle, JoinSet},
         time::Instant,
     },
+    tokio_stream::wrappers::UnboundedReceiverStream,
     tokio_util::sync::CancellationToken,
     tracing::{error, info, warn},
     yellowstone_jet::{
@@ -45,15 +46,18 @@ use {
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         transaction_handler::TransactionHandler,
         transactions::{
-            AlwaysAllowTransactionPolicyStore, FanoutConfig, QuicGatewayBidi, TransactionFanout,
+            AlwaysAllowTransactionPolicyStore, FanoutConfig, TransactionFanout,
             TransactionNoRetryScheduler, TransactionPolicyStore,
         },
+        txn_trace_drain::HttpTxnTraceDrain,
         util::{WaitShutdown, prom::inject_job_label},
     },
-    yellowstone_jet_tpu_client::core::{
-        IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
-        StakeBasedEvictionStrategy, TpuSenderDriverSpawner, TpuSenderSessionContext,
-        UpcomingLeaderPredictor,
+    yellowstone_jet_tpu_client::{
+        core::{
+            IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
+            StakeBasedEvictionStrategy, UpcomingLeaderPredictor,
+        },
+        sender::{PollTpuSender, create_base_tpu_client},
     },
     yellowstone_shield_store::PolicyStore,
 };
@@ -322,42 +326,40 @@ async fn run_jet(
             other: cluster_tpu_info.clone(),
         });
 
-    let quic_gateway_spawner = TpuSenderDriverSpawner {
-        stake_info_map: Arc::new(stake_info_map.clone()),
-        driver_tx_channel_capacity: 10000,
-        leader_tpu_info_service,
-    };
-
     let connection_predictor = if config.quic.tpu_sender.leader_prediction_lookahead.is_some() {
         Arc::new(cluster_tpu_info.clone()) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>
     } else {
         Arc::new(IgnorantLeaderPredictor)
     };
 
-    let (gateway_callback_tx, gateway_response_source) = tokio::sync::mpsc::unbounded_channel();
-    let TpuSenderSessionContext {
-        identity_updater: gateway_identity_updater,
-        driver_tx_sink: gateway_tx_sink,
-        driver_join_handle: gateway_join_handle,
-    } = quic_gateway_spawner.spawn(
-        initial_identity.insecure_clone(),
+    let maybe_callback_sink = if let Some(drain_config) = config.http_txn_trace_drain {
+        let (tpu_client_callback_tx, tpu_client_callback_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let drain = HttpTxnTraceDrain::with_config(
+            UnboundedReceiverStream::new(tpu_client_callback_rx),
+            drain_config,
+        );
+        tokio::spawn(drain);
+        Some(tpu_client_callback_tx)
+    } else {
+        None
+    };
+
+    let tpu_sender = create_base_tpu_client(
         config.quic.tpu_sender.clone(),
+        initial_identity.insecure_clone(),
+        leader_tpu_info_service,
+        Arc::new(stake_info_map.clone()),
         Arc::new(StakeBasedEvictionStrategy {
             peer_idle_eviction_grace_period: config.quic.connection_idle_eviction_grace,
         }),
         connection_predictor,
-        Some(gateway_callback_tx),
-    );
-
-    let ah = tg.spawn(async move {
-        gateway_join_handle.await.expect("quic gateway join handle");
-    });
-    tg_name_map.insert(ah.id(), "quic_gateway".to_string());
-
-    let quic_gateway_bidi = QuicGatewayBidi {
-        sink: gateway_tx_sink,
-        source: gateway_response_source,
-    };
+        maybe_callback_sink,
+        10_000,
+    )
+    .await;
+    let identity_updater = tpu_sender.get_owned_identity_updater();
+    let tpu_sender = PollTpuSender::new(tpu_sender);
 
     let (scheduler_in, scheduler_out) = {
         let TransactionNoRetryScheduler { sink, source } =
@@ -366,7 +368,7 @@ async fn run_jet(
     };
 
     // Set up Lewis event tracking pipeline
-    let (lewis_handler, lewis_fut) = create_lewis_pipeline(
+    let (_lewis_handler, lewis_fut) = create_lewis_pipeline(
         config.lewis_events.clone(),
         jet_cancellation_token.child_token(),
     );
@@ -375,21 +377,20 @@ async fn run_jet(
     let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
         shield_policy_store,
-        scheduler_out,
-        quic_gateway_bidi,
+        UnboundedReceiverStream::new(scheduler_out),
+        tpu_sender,
         config
             .send_transaction_service
             .leader_forward_count
             .map_or(FanoutConfig::SmartFanout, FanoutConfig::Custom),
         config.send_transaction_service.extra_fanout,
-        lewis_handler,
     );
 
     let ah = tg.spawn(async move { tx_forwader.run().await });
     tg_name_map.insert(ah.id(), "transaction_fanout".to_string());
 
     let jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
-        vec![Box::new(gateway_identity_updater)];
+        vec![Box::new(identity_updater)];
 
     let tx_handler = TransactionHandler {
         transaction_sink: scheduler_in,

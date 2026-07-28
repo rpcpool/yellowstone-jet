@@ -28,6 +28,7 @@ pub mod stake;
 pub mod tpu_drain;
 pub mod transaction_handler;
 pub mod transactions;
+pub mod txn_trace_drain;
 pub mod util;
 pub mod version;
 

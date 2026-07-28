@@ -34,7 +34,18 @@ path = "src/bin/test-slot-tracker.rs"
 required-features = ["examples"]
 
 [features]
-default = ["yellowstone-grpc"]
+default = ["yellowstone-grpc", "txn-info-cap-64"]
+###
+### `TXN_INFO_CAP` capacity tuning -- enable exactly one. See build.rs.
+###
+txn-info-cap-0 = []
+txn-info-cap-64 = []
+txn-info-cap-128 = []
+###
+### Reads the `TXN_INFO_CAP` env var at build time (defaults to 64 if unset), for callers who
+### need a capacity not covered by the fixed tiers above.
+###
+txn-info-cap-custom = []
 prometheus = ["dep:prometheus"]
 examples = [
     "dep:bincode",

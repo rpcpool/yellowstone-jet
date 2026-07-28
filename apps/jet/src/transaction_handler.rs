@@ -11,9 +11,9 @@ use {
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status_client_types::UiTransactionEncoding,
     solana_version::Version,
-    std::sync::Arc,
     thiserror::Error,
     tokio::sync::mpsc,
+    uuid::Uuid,
     yellowstone_jet_tpu_client::core::PACKET_DATA_SIZE,
 };
 
@@ -61,11 +61,11 @@ impl From<TransactionHandlerError> for ErrorObjectOwned {
 
 #[derive(Clone)]
 pub struct TransactionHandler {
-    pub transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>,
+    pub transaction_sink: mpsc::UnboundedSender<SendTransactionRequest>,
 }
 
 impl TransactionHandler {
-    pub const fn new(transaction_sink: mpsc::UnboundedSender<Arc<SendTransactionRequest>>) -> Self {
+    pub const fn new(transaction_sink: mpsc::UnboundedSender<SendTransactionRequest>) -> Self {
         Self { transaction_sink }
     }
 
@@ -81,6 +81,7 @@ impl TransactionHandler {
         &self,
         transaction: VersionedTransaction,
         config_with_forwarding_policies: JetRpcSendTransactionConfig,
+        x_request_id: Option<Uuid>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         let config = config_with_forwarding_policies.config;
 
@@ -105,13 +106,14 @@ impl TransactionHandler {
         }
 
         self.transaction_sink
-            .send(Arc::new(SendTransactionRequest {
+            .send(SendTransactionRequest {
                 signature,
                 transaction,
                 wire_transaction: wire_transaction.into(),
                 max_retries: config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
-            }))
+                x_request_id,
+            })
             .expect("transaction sink closed");
 
         Ok(signature.to_string())
@@ -121,6 +123,7 @@ impl TransactionHandler {
         &self,
         wire_transaction: Bytes,
         config_with_forwarding_policies: JetRpcSendTransactionConfig,
+        x_request_id: Option<Uuid>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         if wire_transaction.len() > PACKET_DATA_SIZE {
             return Err(TransactionHandlerError::InvalidTransaction(format!(
@@ -144,13 +147,14 @@ impl TransactionHandler {
         let signature = transaction.signatures[0];
 
         self.transaction_sink
-            .send(Arc::new(SendTransactionRequest {
+            .send(SendTransactionRequest {
                 signature,
                 transaction,
                 wire_transaction,
                 max_retries: config_with_forwarding_policies.config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
-            }))
+                x_request_id,
+            })
             .expect("transaction sink closed");
 
         Ok(signature.to_string())
@@ -160,6 +164,7 @@ impl TransactionHandler {
         &self,
         data: String,
         config_with_forwarding_policies: Option<JetRpcSendTransactionConfig>,
+        x_request_id: Option<Uuid>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         let config_with_forwarding_policies = config_with_forwarding_policies.unwrap_or_default();
         let config = config_with_forwarding_policies.config;
@@ -168,13 +173,14 @@ impl TransactionHandler {
         let signature = transaction.signatures[0];
 
         self.transaction_sink
-            .send(Arc::new(SendTransactionRequest {
+            .send(SendTransactionRequest {
                 signature,
                 transaction,
                 wire_transaction: wire_transaction.into(),
                 max_retries: config.max_retries,
                 policies: config_with_forwarding_policies.forwarding_policies,
-            }))
+                x_request_id,
+            })
             .expect("transaction sink closed");
 
         Ok(signature.to_string())

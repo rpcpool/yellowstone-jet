@@ -1,4 +1,5 @@
 use {
+    crate::txn_trace_drain::HttpTxnTraceDrainConfig,
     anyhow::Context,
     reqwest::Url,
     serde::{
@@ -84,6 +85,9 @@ pub struct ConfigJet {
     /// This is useful for debugging transaction handling errors, but may cause log spam if there are many invalid transactions.
     #[serde(default)]
     pub log_invalid_txn: bool,
+
+    #[serde(default)]
+    pub http_txn_trace_drain: Option<HttpTxnTraceDrainConfig>,
 }
 
 const fn default_true() -> bool {

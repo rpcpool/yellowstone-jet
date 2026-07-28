@@ -82,6 +82,10 @@ impl TpuSender {
         self.identity_updater.update_identity(new_identity)
     }
 
+    pub fn get_owned_identity_updater(&self) -> TpuSenderIdentityUpdater {
+        self.identity_updater.clone()
+    }
+
     ///
     /// Builds a [`TpuSender`] backed by a plain in-memory channel of the given capacity, for
     /// tests that need a working [`TpuSender`]/[`PollTpuSender`] without spawning the real TPU
