@@ -45,9 +45,8 @@ use {
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         transaction_handler::TransactionHandler,
         transactions::{
-            AlwaysAllowTransactionPolicyStore, FanoutConfig, GrpcRootedTxReceiver, QuicGatewayBidi,
-            TransactionFanout, TransactionNoRetryScheduler, TransactionPolicyStore,
-            TransactionRetryScheduler, TransactionRetrySchedulerConfig,
+            AlwaysAllowTransactionPolicyStore, FanoutConfig, QuicGatewayBidi, TransactionFanout,
+            TransactionNoRetryScheduler, TransactionPolicyStore,
         },
         util::{WaitShutdown, prom::inject_job_label},
     },
@@ -298,7 +297,7 @@ async fn run_jet(
 
     let (geyser, geyser_handle) = GeyserSubscriber::new(
         config.upstream.grpc.clone(),
-        !config.send_transaction_service.relay_only_mode,
+        false,
         jet_cancellation_token.child_token(),
     );
     let blockhash_queue = BlockhashQueue::new(geyser.subscribe_block_meta());
@@ -314,13 +313,6 @@ async fn run_jet(
         jet_cancellation_token.child_token(),
     )
     .await;
-
-    let rooted_tx_geyser_rx = geyser
-        .subscribe_transactions()
-        .await
-        .expect("failed to subscribe geyser transactions");
-    let (rooted_transactions_rx, rooted_tx_loop_fut) =
-        GrpcRootedTxReceiver::new(rooted_tx_geyser_rx);
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
 
@@ -367,27 +359,7 @@ async fn run_jet(
         source: gateway_response_source,
     };
 
-    let (scheduler_in, scheduler_out) = if !config.send_transaction_service.relay_only_mode {
-        info!(
-            "Disabled relay-only mode, transactions retry will be enabled -- this should be used only by unstaked jet instance"
-        );
-        let TransactionRetryScheduler { sink, source } = TransactionRetryScheduler::new(
-            TransactionRetrySchedulerConfig {
-                retry_rate: config.send_transaction_service.retry_rate,
-                stop_send_on_commitment: config.send_transaction_service.stop_send_on_commitment,
-                max_retry: config
-                    .send_transaction_service
-                    .default_max_retries
-                    .unwrap_or(config.send_transaction_service.service_max_retries),
-                ..Default::default()
-            },
-            Arc::new(blockhash_queue.clone()),
-            Box::new(rooted_transactions_rx),
-            None,
-        );
-        (sink, source)
-    } else {
-        tracing::info!("Running in relay-only mode, transactions retry will be disabled");
+    let (scheduler_in, scheduler_out) = {
         let TransactionNoRetryScheduler { sink, source } =
             TransactionNoRetryScheduler::new(Arc::new(blockhash_queue.clone()));
         (sink, source)
@@ -490,11 +462,6 @@ async fn run_jet(
         cluster_tpu_info_tasks.await;
     });
     tg_name_map.insert(ah.id(), "cluster_tpu_info".to_string());
-
-    let ah = tg.spawn(async move {
-        rooted_tx_loop_fut.await;
-    });
-    tg_name_map.insert(ah.id(), "rooted_tx_receiver".to_string());
 
     if let Some(config_prometheus) = config.prometheus {
         let push_gw_task = spawn_push_prometheus_metrics(

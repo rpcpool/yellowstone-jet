@@ -1,5 +1,4 @@
 use {
-    crate::util::CommitmentLevel,
     anyhow::Context,
     reqwest::Url,
     serde::{
@@ -270,34 +269,12 @@ pub struct ConfigListenSolanaLike {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigSendTransactionService {
-    /// Default max retries of sending transaction
-    pub default_max_retries: Option<usize>,
-
-    /// Service max retries
-    #[serde(default = "ConfigSendTransactionService::default_service_max_retries")]
-    pub service_max_retries: usize,
-
-    /// Stop send transaction when landed at specified commitment
-    #[serde(default = "ConfigSendTransactionService::default_stop_send_on_commitment")]
-    pub stop_send_on_commitment: CommitmentLevel,
-
     /// The number of upcoming leaders to which to forward transactions
     #[deprecated(
         note = "jet already implements smart fanout based on slot timing. Having too high fanout creates jitter."
     )]
     #[serde(default = "ConfigSendTransactionService::default_leader_forward_count")]
     pub leader_forward_count: Option<usize>,
-
-    /// Try to send transaction every retry_rate duration
-    #[serde(
-        default = "ConfigSendTransactionService::default_retry_rate",
-        with = "humantime_serde"
-    )]
-    pub retry_rate: Duration,
-
-    /// Drop transactions from the pool once max retries limit is reached (landed statistic would be invalid)
-    #[serde(default)]
-    pub relay_only_mode: bool,
 
     /// Extra forward (transactions would be always sent to these nodes)
     /// regardless of the transaction yellowstone-shield policies.
@@ -306,20 +283,8 @@ pub struct ConfigSendTransactionService {
 }
 
 impl ConfigSendTransactionService {
-    const fn default_service_max_retries() -> usize {
-        usize::MAX
-    }
-
-    const fn default_stop_send_on_commitment() -> CommitmentLevel {
-        CommitmentLevel::Confirmed
-    }
-
     const fn default_leader_forward_count() -> Option<usize> {
         None
-    }
-
-    const fn default_retry_rate() -> Duration {
-        Duration::from_millis(1_000)
     }
 }
 

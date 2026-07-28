@@ -1,13 +1,8 @@
 use {
-    futures::future::Either,
     serde::Deserialize,
-    solana_keypair::Keypair,
-    solana_pubkey::Pubkey,
-    solana_signature::Signature,
-    solana_signer::{Signer, SignerError},
     std::{cmp::Ordering, future::Future, sync::Arc},
     tokio::{
-        sync::{Mutex, oneshot, watch},
+        sync::Mutex,
         task::{JoinError, JoinHandle},
         time::{Duration, sleep},
     },
@@ -186,138 +181,11 @@ pub trait WaitShutdown: Sized {
     }
 }
 
-///
-/// A Pubkey that can sign.
-///
-/// This struct wraps a Keypair and implements the Signer trait.
-/// It doesn't expose the private key.
-pub struct PubkeySigner(Keypair);
-
-impl Clone for PubkeySigner {
-    fn clone(&self) -> Self {
-        Self(self.0.insecure_clone())
-    }
-}
-
-impl PartialEq for PubkeySigner {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.pubkey() == other.0.pubkey()
-    }
-}
-
-impl PubkeySigner {
-    pub const fn new(keypair: Keypair) -> Self {
-        Self(keypair)
-    }
-
-    pub fn pubkey(&self) -> Pubkey {
-        self.0.pubkey()
-    }
-}
-
-impl Signer for PubkeySigner {
-    fn sign_message(&self, message: &[u8]) -> Signature {
-        self.0.sign_message(message)
-    }
-
-    fn try_pubkey(&self) -> Result<Pubkey, SignerError> {
-        self.0.try_pubkey()
-    }
-
-    fn try_sign_message(&self, message: &[u8]) -> Result<Signature, SignerError> {
-        self.0.try_sign_message(message)
-    }
-
-    fn is_interactive(&self) -> bool {
-        self.0.is_interactive()
-    }
-}
-
-pub fn ms_since_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("failed to get system time")
-        .as_millis() as u64
-}
-
-#[derive(Clone)]
-pub struct ValueObserver<T> {
-    last_val: T,
-    rx: watch::Receiver<T>,
-}
-
-impl<T: Clone> From<watch::Receiver<T>> for ValueObserver<T> {
-    fn from(mut val: watch::Receiver<T>) -> ValueObserver<T> {
-        let x = val.borrow_and_update().clone();
-
-        ValueObserver {
-            last_val: x,
-            rx: val,
-        }
-    }
-}
-
-impl<T: Clone + PartialEq> ValueObserver<T> {
-    ///
-    /// Get the current identity.
-    pub fn get_current(&self) -> T {
-        self.last_val.clone()
-    }
-
-    ///
-    /// Wait for the identity to change and return the new identity.
-    pub async fn observe(&mut self) -> T {
-        let last_val = self.last_val.clone();
-        let new_val = self
-            .rx
-            .wait_for(|new_val| new_val != &last_val)
-            .await
-            .expect("sender dropped")
-            .clone();
-        self.last_val = new_val;
-        self.get_current()
-    }
-
-    pub async fn until_value_change<F, Fut, O>(&mut self, f: F) -> Either<T, O>
-    where
-        F: FnOnce(T) -> Fut,
-        Fut: Future<Output = O>,
-    {
-        let current = self.get_current();
-        tokio::select! {
-            new_val = self.observe() => Either::Left(new_val),
-            output = f(current) => Either::Right(output),
-        }
-    }
-}
-
-///
-/// Fork a oneshot receiver into two receivers.
-///
-pub fn fork_oneshot<T>(rx: oneshot::Receiver<T>) -> (oneshot::Receiver<T>, oneshot::Receiver<T>)
-where
-    T: Clone + Send + 'static,
-{
-    let (tx1, rx1) = oneshot::channel();
-    let (tx2, rx2) = oneshot::channel();
-    tokio::spawn(async move {
-        let x = match rx.await {
-            Ok(x) => x,
-            Err(_) => return,
-        };
-        let _ = tx1.send(x.clone());
-        let _ = tx2.send(x.clone());
-    });
-    (rx1, rx2)
-}
-
 #[cfg(test)]
 mod tests {
-    use {super::*, futures::future};
-
     #[test]
     fn commitment_level_cmp() {
-        use CommitmentLevel::*;
+        use super::CommitmentLevel::*;
 
         assert!(Processed <= Processed);
         assert!(Processed >= Processed);
@@ -328,78 +196,5 @@ mod tests {
 
         assert!(Finalized > Confirmed);
         assert!(Finalized >= Confirmed);
-    }
-
-    #[tokio::test]
-    pub async fn value_observer_should_return_right_when_fut_finish_first() {
-        let (tx, rx) = watch::channel(0);
-        let mut observer: ValueObserver<i32> = rx.into();
-
-        // Test when custom future finished first
-        let result = observer.until_value_change(|_| future::ready(0)).await;
-        assert!(matches!(result, Either::Right(0)));
-
-        // Test when value changed first
-        let fut = tokio::spawn(async move {
-            observer
-                .until_value_change(|_| future::pending::<()>())
-                .await
-        });
-
-        tx.send(1).unwrap();
-        let result = fut.await.unwrap();
-        assert!(matches!(result, Either::Left(1)));
-    }
-
-    #[tokio::test]
-    pub async fn value_observer_should_return_left_when_inner_value_change_first() {
-        let (tx, rx) = watch::channel(0);
-        let mut observer: ValueObserver<i32> = rx.into();
-
-        // Test when value changed first
-        let fut = tokio::spawn(async move {
-            observer
-                .until_value_change(|_| future::pending::<()>())
-                .await
-        });
-
-        tx.send(1).unwrap();
-        let result = fut.await.unwrap();
-        assert!(matches!(result, Either::Left(1)));
-    }
-
-    #[tokio::test]
-    pub async fn value_observer_until_value_change_should_ignore_unchanged_value() {
-        let (tx, rx) = watch::channel(0);
-        let mut observer: ValueObserver<i32> = rx.into();
-        // Test when value changed first
-        let fut = tokio::spawn(async move {
-            observer
-                .until_value_change(|_| future::pending::<()>())
-                .await
-        });
-        // The first value is 0, so it should be ignored
-        tx.send(0).unwrap();
-        tx.send_replace(10);
-        let result = fut.await.unwrap();
-        // If the first value has been ignored, the result should be 10
-        assert!(matches!(result, Either::Left(10)));
-    }
-
-    #[tokio::test]
-    pub async fn value_observer_until_value_change_should_error_when_sender_close() {
-        let (tx, rx) = watch::channel(0);
-        let mut observer: ValueObserver<i32> = rx.into();
-
-        // Test when value changed first
-        let fut = tokio::spawn(async move {
-            observer
-                .until_value_change(|_| future::pending::<()>())
-                .await
-        });
-        // The first value is 0, so it should be ignored
-        drop(tx);
-        let result = fut.await;
-        assert!(result.is_err());
     }
 }
