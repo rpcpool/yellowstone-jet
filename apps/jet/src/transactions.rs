@@ -4,14 +4,13 @@ use {
         metrics::jet as metrics, solana::get_durable_nonce, util::CommitmentLevel,
     },
     bytes::Bytes,
-    futures::{Sink, SinkExt, Stream},
+    futures::{Sink, SinkExt, Stream, StreamExt},
     solana_clock::{MAX_PROCESSING_AGE, Slot},
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_transaction::versioned::VersionedTransaction,
     std::{collections::HashSet, sync::Arc},
     tokio::sync::mpsc::{self},
-    tokio_stream::StreamExt,
     uuid::Uuid,
     yellowstone_jet_tpu_client::core::{TpuSenderResponse, TpuSenderTxn, TpuSenderTxnInfo},
     yellowstone_shield_store::{CheckError, PolicyStoreTrait},
@@ -57,82 +56,68 @@ pub struct SendTransactionRequest {
     pub x_request_id: Option<Uuid>,
 }
 
-///
-/// Transaction scheduler that does not retry transactions.
-/// It forwards transactions to the next leader if the transaction's last valid block height is less than the current block height.
-///
-pub struct TransactionNoRetryScheduler {
-    pub sink: mpsc::UnboundedSender<SendTransactionRequest>,
-    pub source: mpsc::UnboundedReceiver<SendTransactionRequest>,
+pub struct DropExpiredTransactions<St, BH> {
+    inner: St,
+    blockheight_service: BH,
 }
 
-impl TransactionNoRetryScheduler {
-    pub fn new(blockheight_service: Arc<dyn BlockHeightService + Send + Sync + 'static>) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (scheduler_resp_tx, scheduler_resp_rx) =
-            mpsc::unbounded_channel::<SendTransactionRequest>();
-
-        tokio::spawn(
-            async move { Self::fwd_loop(blockheight_service, rx, scheduler_resp_tx).await },
-        );
+impl<St, BH> DropExpiredTransactions<St, BH> {
+    pub fn new(stream: St, blockheight_svc: BH) -> Self {
         Self {
-            sink: tx,
-            source: scheduler_resp_rx,
+            inner: stream,
+            blockheight_service: blockheight_svc,
         }
     }
+}
 
-    async fn fwd_loop(
-        blockheight_service: Arc<dyn BlockHeightService + Send + Sync + 'static>,
-        mut incoming_transaction_rx: mpsc::UnboundedReceiver<SendTransactionRequest>,
-        response_sink: mpsc::UnboundedSender<SendTransactionRequest>,
-    ) {
+impl<St, BH> Stream for DropExpiredTransactions<St, BH>
+where
+    St: Stream<Item = SendTransactionRequest> + Unpin,
+    BH: BlockHeightService + Unpin + Send + Sync + 'static,
+{
+    type Item = SendTransactionRequest;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
         loop {
-            let Some(tx) = incoming_transaction_rx.recv().await else {
-                tracing::trace!("incoming transaction channel is closed");
-                break;
-            };
-            // Make sure to not double count this metric elsewhere.
-            metrics::sts_received_inc();
-            let durable_nonce = get_durable_nonce(&tx.transaction);
-            if let Some(durable_nonce) = durable_nonce {
-                let signature = tx.signature;
-                tracing::trace!(
-                    %signature,
-                    %durable_nonce,
-                    "forwarding durable nonce transaction without blockhash validation"
-                );
-                if response_sink.send(tx).is_err() {
-                    tracing::trace!("response sink is closed, stopping transaction forwarding");
-                    break;
+            let maybe_tx = futures::ready!(this.inner.poll_next_unpin(cx));
+            if let Some(tx) = maybe_tx {
+                metrics::sts_received_inc();
+                let durable_nonce = get_durable_nonce(&tx.transaction);
+                if durable_nonce.is_some() {
+                    tracing::trace!(
+                        %tx.signature,
+                        "forwarding durable nonce transaction without blockhash validation"
+                    );
+                    return std::task::Poll::Ready(Some(tx));
                 }
-                continue;
+
+                let current_block_height = this
+                    .blockheight_service
+                    .get_block_height_for_commitment(CommitmentLevel::Confirmed)
+                    .unwrap_or(0);
+                let last_valid_block_height = this
+                    .blockheight_service
+                    .get_block_height(tx.transaction.message.recent_blockhash())
+                    .unwrap_or(0)
+                    + MAX_PROCESSING_AGE as u64;
+
+                if last_valid_block_height >= current_block_height {
+                    return std::task::Poll::Ready(Some(tx));
+                } else {
+                    tracing::trace!(
+                        "transaction {} last valid block height {} is less than current block height {}, dropping transaction",
+                        tx.signature,
+                        last_valid_block_height,
+                        current_block_height
+                    );
+                    continue;
+                }
+            } else {
+                return std::task::Poll::Ready(None);
             }
-
-            let current_block_height = blockheight_service
-                .get_block_height_for_commitment(CommitmentLevel::Confirmed)
-                .unwrap_or(0);
-            let last_valid_block_height = blockheight_service
-                .get_block_height(tx.transaction.message.recent_blockhash())
-                .unwrap_or(0)
-                + MAX_PROCESSING_AGE as u64;
-
-            if last_valid_block_height < current_block_height {
-                tracing::trace!(
-                    "transaction {} last valid block height {} is less than current block height {}, dropping transaction",
-                    tx.signature,
-                    last_valid_block_height,
-                    current_block_height
-                );
-                continue;
-            }
-
-            let signature = tx.signature;
-            if response_sink.send(tx).is_err() {
-                tracing::trace!("response sink is closed, stopping transaction forwarding");
-                break;
-            }
-
-            tracing::trace!("forwarding transaction {signature}");
         }
     }
 }

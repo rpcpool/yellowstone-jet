@@ -61,11 +61,11 @@ impl From<TransactionHandlerError> for ErrorObjectOwned {
 
 #[derive(Clone)]
 pub struct TransactionHandler {
-    pub transaction_sink: mpsc::UnboundedSender<SendTransactionRequest>,
+    pub transaction_sink: mpsc::Sender<SendTransactionRequest>,
 }
 
 impl TransactionHandler {
-    pub const fn new(transaction_sink: mpsc::UnboundedSender<SendTransactionRequest>) -> Self {
+    pub const fn new(transaction_sink: mpsc::Sender<SendTransactionRequest>) -> Self {
         Self { transaction_sink }
     }
 
@@ -114,6 +114,7 @@ impl TransactionHandler {
                 policies: config_with_forwarding_policies.forwarding_policies,
                 x_request_id,
             })
+            .await
             .expect("transaction sink closed");
 
         Ok(signature.to_string())
@@ -155,6 +156,7 @@ impl TransactionHandler {
                 policies: config_with_forwarding_policies.forwarding_policies,
                 x_request_id,
             })
+            .await
             .expect("transaction sink closed");
 
         Ok(signature.to_string())
@@ -181,6 +183,7 @@ impl TransactionHandler {
                 policies: config_with_forwarding_policies.forwarding_policies,
                 x_request_id,
             })
+            .await
             .expect("transaction sink closed");
 
         Ok(signature.to_string())

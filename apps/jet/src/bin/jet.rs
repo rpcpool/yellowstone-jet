@@ -25,11 +25,11 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{SignalKind, signal},
-        sync::{Mutex, watch},
+        sync::{Mutex, mpsc, watch},
         task::{self, JoinHandle, JoinSet},
         time::Instant,
     },
-    tokio_stream::wrappers::UnboundedReceiverStream,
+    tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream},
     tokio_util::sync::CancellationToken,
     tracing::{error, info, warn},
     yellowstone_jet::{
@@ -46,8 +46,8 @@ use {
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         transaction_handler::TransactionHandler,
         transactions::{
-            AlwaysAllowTransactionPolicyStore, FanoutConfig, TransactionFanout,
-            TransactionNoRetryScheduler, TransactionPolicyStore,
+            AlwaysAllowTransactionPolicyStore, DropExpiredTransactions, FanoutConfig,
+            SendTransactionRequest, TransactionFanout, TransactionPolicyStore,
         },
         txn_trace_drain::HttpTxnTraceDrain,
         util::{WaitShutdown, prom::inject_job_label},
@@ -361,12 +361,11 @@ async fn run_jet(
     let identity_updater = tpu_sender.get_owned_identity_updater();
     let tpu_sender = PollTpuSender::new(tpu_sender);
 
-    let (scheduler_in, scheduler_out) = {
-        let TransactionNoRetryScheduler { sink, source } =
-            TransactionNoRetryScheduler::new(Arc::new(blockhash_queue.clone()));
-        (sink, source)
-    };
+    // Root means the first stage of the transaction pipeline.
+    let (root_txn_inlet, root_txn_outlet) = mpsc::channel::<SendTransactionRequest>(10_000);
 
+    let root_txn_outlet = ReceiverStream::new(root_txn_outlet);
+    let root_txn_outlet = DropExpiredTransactions::new(root_txn_outlet, blockhash_queue.clone());
     // Set up Lewis event tracking pipeline
     let (_lewis_handler, lewis_fut) = create_lewis_pipeline(
         config.lewis_events.clone(),
@@ -377,7 +376,7 @@ async fn run_jet(
     let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
         shield_policy_store,
-        UnboundedReceiverStream::new(scheduler_out),
+        root_txn_outlet,
         tpu_sender,
         config
             .send_transaction_service
@@ -393,7 +392,7 @@ async fn run_jet(
         vec![Box::new(identity_updater)];
 
     let tx_handler = TransactionHandler {
-        transaction_sink: scheduler_in,
+        transaction_sink: root_txn_inlet,
     };
 
     let rpc_solana_like = RpcServer::new(
