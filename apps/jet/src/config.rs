@@ -65,6 +65,12 @@ pub struct ConfigJet {
     /// Send retry options
     pub send_transaction_service: ConfigSendTransactionService,
 
+    #[serde(default)]
+    #[deprecated(
+        note = "This option is deprecated and is ignored. Use `enable_yellowstone_shield` instead."
+    )]
+    pub features: Option<String>,
+
     /// Quic config
     pub quic: ConfigQuic,
 
@@ -395,12 +401,11 @@ pub struct ConfigLewisEvents {
     )]
     pub reconnect_max_interval: Duration,
 
-    /// Maximum time for the entire stream
-    #[serde(
-        default = "ConfigLewisEvents::default_stream_timeout",
-        with = "humantime_serde"
+    #[serde(default)]
+    #[deprecated(
+        note = "This option is deprecated and is ignored"
     )]
-    pub stream_timeout: Duration,
+    pub stream_timeout: Option<Duration>,
 }
 
 impl ConfigLewisEvents {
@@ -446,10 +451,6 @@ impl ConfigLewisEvents {
 
     const fn default_reconnect_max_interval() -> Duration {
         Duration::from_secs(30)
-    }
-
-    const fn default_stream_timeout() -> Duration {
-        Duration::from_secs(300) // 0 means no timeout
     }
 }
 
