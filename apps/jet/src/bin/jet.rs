@@ -3,6 +3,7 @@ use tikv_jemallocator::Jemalloc;
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
+    futures::FutureExt,
     jsonrpsee::http_client::HttpClientBuilder,
     reqwest::{Client, Url},
     solana_client::rpc_client::RpcClientConfig,
@@ -30,13 +31,13 @@ use {
     },
     tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream},
     tokio_util::sync::CancellationToken,
-    tracing::{info, warn},
+    tracing::{error, info, warn},
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
         config::{ConfigJet, PrometheusConfig, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
-        // grpc_lewis::create_lewis_pipeline,
+        grpc_lewis::create_lewis_pipeline,
         identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
         metrics::{REGISTRY, collect_to_text, jet as metrics},
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
@@ -331,17 +332,39 @@ async fn run_jet(
         Arc::new(IgnorantLeaderPredictor)
     };
 
-    let maybe_callback_sink = if let Some(drain_config) = config.http_txn_trace_drain {
-        let (tpu_client_callback_tx, tpu_client_callback_rx) =
-            tokio::sync::mpsc::unbounded_channel();
-        let drain = HttpTxnTraceDrain::with_config(
-            UnboundedReceiverStream::new(tpu_client_callback_rx),
-            drain_config,
-        );
-        tokio::spawn(drain);
-        Some(tpu_client_callback_tx)
-    } else {
-        None
+    // Set up Lewis event tracking pipeline
+    let maybe_callback_sink = match (config.http_txn_trace_drain, config.lewis_events) {
+        (None, None) => None,
+        (None, Some(lewis_config)) => {
+            let (tpu_client_callback_tx, tpu_client_callback_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let tpu_client_callback_rx = UnboundedReceiverStream::new(tpu_client_callback_rx);
+            let lewis_fut = create_lewis_pipeline(lewis_config, tpu_client_callback_rx);
+            let ah = tg.spawn(
+                lewis_fut
+                    .inspect(|result| {
+                        if let Err(e) = result {
+                            error!("Lewis client error: {e}");
+                        }
+                    })
+                    .map(drop),
+            );
+            tg_name_map.insert(ah.id(), "lewis_client".to_string());
+            Some(tpu_client_callback_tx)
+        }
+        (Some(http_txn_drain_config), None) => {
+            let (tpu_client_callback_tx, tpu_client_callback_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let drain = HttpTxnTraceDrain::with_config(
+                UnboundedReceiverStream::new(tpu_client_callback_rx),
+                http_txn_drain_config,
+            );
+            tokio::spawn(drain);
+            Some(tpu_client_callback_tx)
+        }
+        (Some(_), Some(_)) => {
+            panic!("http_txn_trace_drain and lewis_events cannot be used together")
+        }
     };
 
     let tpu_sender = create_base_tpu_client(
@@ -366,11 +389,6 @@ async fn run_jet(
 
     let root_txn_outlet = ReceiverStream::new(root_txn_outlet);
     let root_txn_outlet = DropExpiredTransactions::new(root_txn_outlet, blockhash_queue.clone());
-    // Set up Lewis event tracking pipeline
-    // let (lewis_handler, lewis_fut) = create_lewis_pipeline(
-    //     config.lewis_events.clone(),
-    //     jet_cancellation_token.child_token(),
-    // );
 
     #[allow(deprecated)]
     let mut tx_forwader = TransactionFanout::new(
@@ -428,19 +446,6 @@ async fn run_jet(
         jet_cancellation_token.child_token(),
     ));
     tg_name_map.insert(ah.id(), "stake_info_metrics_update".to_string());
-
-    // Spawn Lewis client task if configured
-    // if let Some(fut) = lewis_fut {
-    //     let ah = tg.spawn(
-    //         fut.inspect(|result| {
-    //             if let Err(e) = result {
-    //                 error!("Lewis client error: {e}");
-    //             }
-    //         })
-    //         .map(drop),
-    //     );
-    //     tg_name_map.insert(ah.id(), "lewis_client".to_string());
-    // }
 
     let ah = tg.spawn(async move {
         geyser_handle

@@ -394,13 +394,6 @@ pub struct ConfigLewisEvents {
         with = "humantime_serde"
     )]
     pub reconnect_max_interval: Duration,
-
-    /// Maximum time for the entire stream
-    #[serde(
-        default = "ConfigLewisEvents::default_stream_timeout",
-        with = "humantime_serde"
-    )]
-    pub stream_timeout: Duration,
 }
 
 impl ConfigLewisEvents {
@@ -446,10 +439,6 @@ impl ConfigLewisEvents {
 
     const fn default_reconnect_max_interval() -> Duration {
         Duration::from_secs(30)
-    }
-
-    const fn default_stream_timeout() -> Duration {
-        Duration::from_secs(300) // 0 means no timeout
     }
 }
 
