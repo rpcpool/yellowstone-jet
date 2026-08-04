@@ -71,22 +71,6 @@ where
             PACKET_DATA_SIZE
         )));
     }
-    // match bincode::options()
-    //     .with_limit(PACKET_DATA_SIZE as u64)
-    //     .with_fixint_encoding()
-    //     .allow_trailing_bytes()
-    //     .deserialize_from(&wire_output[..])
-    // {
-    //     Ok(output) => Ok((wire_output, output)),
-    //     Err(err) => {
-    //         metrics::jet::increment_transaction_deserialize_error("bincode");
-    //         Err(invalid_params(format!(
-    //             "failed to deserialize {}: {}",
-    //             type_name::<T>(),
-    //             err,
-    //         )))
-    //     }
-    // }
     wincode::deserialize(&wire_output[..])
         .map(|output| (wire_output, output))
         .map_err(|err| {
