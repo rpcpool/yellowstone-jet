@@ -69,7 +69,7 @@ pub struct ConfigJet {
     #[deprecated(
         note = "This option is deprecated and is ignored. Use `enable_yellowstone_shield` instead."
     )]
-    pub features: Option<String>,
+    pub features: Option<de::IgnoredAny>,
 
     /// Quic config
     pub quic: ConfigQuic,
