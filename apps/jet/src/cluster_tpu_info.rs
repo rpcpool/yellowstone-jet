@@ -31,27 +31,12 @@ use {
 #[async_trait::async_trait]
 pub trait ClusterTpuInfoProvider: Send + Sync {
     fn latest_seen_slot(&self) -> Slot;
-    fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo>;
-    fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey>;
-    fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo>;
 }
 
 #[async_trait::async_trait]
 impl ClusterTpuInfoProvider for ClusterTpuInfo {
     fn latest_seen_slot(&self) -> Slot {
         self.latest_seen_slot()
-    }
-
-    fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
-        self.get_cluster_nodes()
-    }
-
-    fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey> {
-        self.get_leader_schedule()
-    }
-
-    fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo> {
-        self.get_leader_tpus(leader_forward_count)
     }
 }
 
@@ -198,6 +183,15 @@ impl ClusterTpuInfo {
             .expect("rwlock schedule poisoned")
             .cluster_nodes
             .clone()
+    }
+
+    pub fn get_rpc_contact_info(&self, pubkey: &Pubkey) -> Option<RpcContactInfo> {
+        self.inner
+            .read()
+            .expect("rwlock schedule poisoned")
+            .cluster_nodes
+            .get(pubkey)
+            .cloned()
     }
 
     pub fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey> {

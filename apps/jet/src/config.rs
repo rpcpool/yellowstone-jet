@@ -402,9 +402,7 @@ pub struct ConfigLewisEvents {
     pub reconnect_max_interval: Duration,
 
     #[serde(default)]
-    #[deprecated(
-        note = "This option is deprecated and is ignored"
-    )]
+    #[deprecated(note = "This option is deprecated and is ignored")]
     pub stream_timeout: Option<Duration>,
 }
 

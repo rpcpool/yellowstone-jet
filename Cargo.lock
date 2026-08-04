@@ -6955,6 +6955,7 @@ name = "yellowstone-jet"
 version = "16.0.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "borsh",
