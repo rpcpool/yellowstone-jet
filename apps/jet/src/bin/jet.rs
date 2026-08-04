@@ -357,6 +357,7 @@ async fn run_jet(
                 tokio::sync::mpsc::unbounded_channel();
             let drain = HttpTxnTraceDrain::with_config(
                 UnboundedReceiverStream::new(tpu_client_callback_rx),
+                cluster_tpu_info.clone(),
                 http_txn_drain_config,
             );
             tokio::spawn(drain);

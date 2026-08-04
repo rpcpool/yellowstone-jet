@@ -17,20 +17,12 @@ use {
     },
 };
 #[cfg(test)]
-use {
-    solana_client::rpc_response::RpcContactInfo,
-    solana_clock::Slot,
-    solana_pubkey::Pubkey,
-    std::collections::HashMap,
-    yellowstone_jet::cluster_tpu_info::{ClusterTpuInfoProvider, TpuInfo},
-};
+use {solana_clock::Slot, yellowstone_jet::cluster_tpu_info::ClusterTpuInfoProvider};
 
 #[cfg(test)]
 #[derive(Default)]
 pub struct MockClusterTpuInfo {
     latest_slot: Slot,
-    cluster_nodes: HashMap<Pubkey, RpcContactInfo>,
-    leader_schedule: HashMap<Slot, Pubkey>,
 }
 
 #[cfg(test)]
@@ -38,18 +30,6 @@ pub struct MockClusterTpuInfo {
 impl ClusterTpuInfoProvider for MockClusterTpuInfo {
     fn latest_seen_slot(&self) -> Slot {
         self.latest_slot
-    }
-
-    fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
-        self.cluster_nodes.clone()
-    }
-
-    fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey> {
-        self.leader_schedule.clone()
-    }
-
-    fn get_leader_tpus(&self, _leader_forward_count: usize) -> Vec<TpuInfo> {
-        vec![]
     }
 }
 
@@ -333,8 +313,6 @@ pub async fn test_get_latest_slot_updates() {
     let initial_slot = 1000u64;
     let mock_cluster_info = Arc::new(RwLock::new(MockClusterTpuInfo {
         latest_slot: initial_slot,
-        cluster_nodes: HashMap::new(),
-        leader_schedule: HashMap::new(),
     }));
 
     struct UpdatableMockClusterTpuInfo {
@@ -345,18 +323,6 @@ pub async fn test_get_latest_slot_updates() {
     impl ClusterTpuInfoProvider for UpdatableMockClusterTpuInfo {
         fn latest_seen_slot(&self) -> Slot {
             self.inner.read().unwrap().latest_slot
-        }
-
-        fn get_cluster_nodes(&self) -> HashMap<Pubkey, RpcContactInfo> {
-            self.inner.read().unwrap().cluster_nodes.clone()
-        }
-
-        fn get_leader_schedule(&self) -> HashMap<Slot, Pubkey> {
-            self.inner.read().unwrap().leader_schedule.clone()
-        }
-
-        fn get_leader_tpus(&self, _leader_forward_count: usize) -> Vec<TpuInfo> {
-            vec![]
         }
     }
 

@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS txn_trace
     x_request_id Nullable(UUID),
     state LowCardinality(String),
     error_msg Nullable(String),
+    remote_peer_solana_client_id Nullable(String),
     remote_peer_identity Nullable(String),
     remote_peer_addr Nullable(String),
     drop_reason Nullable(String),

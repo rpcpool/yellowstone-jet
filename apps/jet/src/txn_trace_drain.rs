@@ -1,15 +1,26 @@
 use {
-    crate::transactions::JetTxnInfo,
+    crate::{cluster_tpu_info::ClusterTpuInfo, transactions::JetTxnInfo},
     bytes::{BufMut, Bytes, BytesMut},
     futures::{Stream, StreamExt},
     hyper::{Method, header::CONTENT_TYPE},
     serde::{Deserialize, Serialize},
+    solana_pubkey::Pubkey,
     std::{borrow::Cow, collections::VecDeque, net::SocketAddr},
     tokio::task::JoinSet,
     url::Url,
     uuid::Uuid,
     yellowstone_jet_tpu_client::core::TpuSenderResponse,
 };
+
+pub trait SolanaClientResolver {
+    fn get_solana_client(&self, peer_pubkey: &Pubkey) -> Option<String>;
+}
+
+impl SolanaClientResolver for ClusterTpuInfo {
+    fn get_solana_client(&self, peer_pubkey: &Pubkey) -> Option<String> {
+        self.get_solana_client_for_peer(peer_pubkey)
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct XHeaderEntry {
@@ -33,11 +44,12 @@ impl From<NdjsonPayload> for reqwest::Body {
     }
 }
 
-pub struct HttpTxnTraceDrain<St> {
+pub struct HttpTxnTraceDrain<St, SolanaClientResolverT> {
     url: Url,
     credentials: Option<Credentials>,
     client: reqwest::Client,
     source: St,
+    solana_client_resolver: SolanaClientResolverT,
     ndjson_buffer: BytesMut,
     ndjson_len: usize,
     max_ndjson_len: usize,
@@ -70,6 +82,7 @@ pub struct TxnTraceEntry<'a> {
     pub x_request_id: Option<Uuid>,
     pub state: TxnState,
     pub error_msg: Option<&'a str>,
+    pub remote_peer_solana_client_id: Option<Cow<'a, str>>,
     pub remote_peer_identity: Option<Cow<'a, str>>,
     pub remote_peer_addr: Option<SocketAddr>,
     pub drop_reason: Option<&'a str>,
@@ -195,6 +208,7 @@ fn get_txn_info<'a>(txn_response: &TpuSenderResponse) -> Option<OneOrMany<&JetTx
 fn into_txn_trace_entry<'resp, 'info>(
     txn_response: &'resp TpuSenderResponse,
     one_or_many: OneOrMany<&'info JetTxnInfo>,
+    solana_client_resolver: &dyn SolanaClientResolver,
 ) -> OneOrMany<TxnTraceEntry<'info>>
 where
     'resp: 'info,
@@ -206,6 +220,9 @@ where
             x_request_id: info.x_request_id.clone(),
             state: TxnState::Sent,
             error_msg: None,
+            remote_peer_solana_client_id: solana_client_resolver
+                .get_solana_client(&tx_sent.remote_peer_identity)
+                .map(Cow::Owned),
             remote_peer_identity: Some(Cow::Owned(tx_sent.remote_peer_identity.to_string())),
             remote_peer_addr: Some(tx_sent.remote_peer_addr),
             drop_reason: None,
@@ -216,6 +233,9 @@ where
             x_request_id: info.x_request_id.clone(),
             state: TxnState::Failed,
             error_msg: Some(&tx_failed.failure_reason),
+            remote_peer_solana_client_id: solana_client_resolver
+                .get_solana_client(&tx_failed.remote_peer_identity)
+                .map(Cow::Owned),
             remote_peer_identity: Some(Cow::Owned(tx_failed.remote_peer_identity.to_string())),
             remote_peer_addr: Some(tx_failed.remote_peer_addr),
             drop_reason: None,
@@ -231,6 +251,9 @@ where
                     x_request_id: info.x_request_id.clone(),
                     state: TxnState::Drop,
                     error_msg: None,
+                    remote_peer_solana_client_id: solana_client_resolver
+                        .get_solana_client(&tx_drop.remote_peer_identity)
+                        .map(Cow::Owned),
                     remote_peer_identity: Some(Cow::Owned(
                         tx_drop.remote_peer_identity.to_string(),
                     )),
@@ -291,13 +314,21 @@ impl Default for HttpTxnTraceDrainConfig {
     }
 }
 
-impl<St> HttpTxnTraceDrain<St> {
-    pub fn with_config(source: St, config: HttpTxnTraceDrainConfig) -> Self {
+impl<St, SolanaClientResolverT> HttpTxnTraceDrain<St, SolanaClientResolverT>
+where
+    SolanaClientResolverT: SolanaClientResolver,
+{
+    pub fn with_config(
+        source: St,
+        solana_client_resolver: SolanaClientResolverT,
+        config: HttpTxnTraceDrainConfig,
+    ) -> Self {
         Self {
             url: config.url,
             credentials: config.credentials,
             client: reqwest::Client::new(),
             source,
+            solana_client_resolver,
             ndjson_buffer: BytesMut::new(),
             ndjson_len: 0,
             max_ndjson_len: config.max_ndjson_len,
@@ -312,7 +343,8 @@ impl<St> HttpTxnTraceDrain<St> {
         let Some(infos) = get_txn_info(&txn_response) else {
             return;
         };
-        let txn_trace_entries = into_txn_trace_entry(&txn_response, infos);
+        let txn_trace_entries =
+            into_txn_trace_entry(&txn_response, infos, &self.solana_client_resolver);
 
         for entry in txn_trace_entries {
             // Serialize the entry to JSON
@@ -379,9 +411,10 @@ impl<St> HttpTxnTraceDrain<St> {
     }
 }
 
-impl<St> HttpTxnTraceDrain<St>
+impl<St, SolanaClientResolverT> HttpTxnTraceDrain<St, SolanaClientResolverT>
 where
     St: Stream<Item = TpuSenderResponse> + Unpin,
+    SolanaClientResolverT: SolanaClientResolver,
 {
     fn poll_drain_source(&mut self, cx: &mut std::task::Context<'_>) -> PollDrain {
         if !self.pending_ndjson_payloads.is_empty() {
@@ -411,9 +444,10 @@ where
     }
 }
 
-impl<St> Future for HttpTxnTraceDrain<St>
+impl<St, SolanaClientResolverT> Future for HttpTxnTraceDrain<St, SolanaClientResolverT>
 where
     St: Stream<Item = TpuSenderResponse> + Unpin,
+    SolanaClientResolverT: SolanaClientResolver + Unpin,
 {
     type Output = Result<(), HttpTxnTraceDrainError>;
 
@@ -535,11 +569,25 @@ mod tests {
         futures::stream,
         solana_keypair::Signature,
         solana_pubkey::Pubkey,
-        std::task::{Context, Waker},
+        std::{
+            collections::HashMap,
+            task::{Context, Waker},
+        },
         yellowstone_jet_tpu_client::core::{
             TpuSenderTxn, TpuSenderTxnInfo, TxDrop, TxDropReason, TxFailed, TxSent,
         },
     };
+
+    #[derive(Default)]
+    struct MockSolanaClientResolver {
+        peer_to_client: HashMap<Pubkey, String>,
+    }
+
+    impl SolanaClientResolver for MockSolanaClientResolver {
+        fn get_solana_client(&self, peer_pubkey: &Pubkey) -> Option<String> {
+            self.peer_to_client.get(peer_pubkey).cloned()
+        }
+    }
 
     fn addr() -> SocketAddr {
         "127.0.0.1:8001".parse().unwrap()
@@ -641,7 +689,8 @@ mod tests {
     fn into_txn_trace_entry_maps_tx_sent() {
         let (response, sig) = tx_sent(true);
         let infos = get_txn_info(&response).unwrap();
-        let result = into_txn_trace_entry(&response, infos);
+        let resolver = MockSolanaClientResolver::default();
+        let result = into_txn_trace_entry(&response, infos, &resolver);
         let entries: Vec<_> = result.iter().collect();
 
         assert_eq!(entries.len(), 1);
@@ -658,7 +707,8 @@ mod tests {
     fn into_txn_trace_entry_maps_tx_failed() {
         let (response, sig) = tx_failed(true);
         let infos = get_txn_info(&response).unwrap();
-        let result = into_txn_trace_entry(&response, infos);
+        let resolver = MockSolanaClientResolver::default();
+        let result = into_txn_trace_entry(&response, infos, &resolver);
         let entries: Vec<_> = result.iter().collect();
 
         assert_eq!(entries.len(), 1);
@@ -672,12 +722,16 @@ mod tests {
     // Note: `into_txn_trace_entry`'s `TxDrop` branch currently ends in `todo!()`, so it isn't
     // exercised here -- doing so would panic the test. Add coverage once that branch is implemented.
 
-    fn test_drain<St>(source: St, max_ndjson_buffer_size: usize) -> HttpTxnTraceDrain<St> {
+    fn test_drain<St>(
+        source: St,
+        max_ndjson_buffer_size: usize,
+    ) -> HttpTxnTraceDrain<St, MockSolanaClientResolver> {
         HttpTxnTraceDrain {
             url: Url::parse("http://127.0.0.1:1").unwrap(),
             credentials: None,
             client: reqwest::Client::new(),
             source,
+            solana_client_resolver: MockSolanaClientResolver::default(),
             ndjson_buffer: BytesMut::new(),
             ndjson_len: 0,
             max_ndjson_len: max_ndjson_buffer_size,
@@ -817,8 +871,10 @@ mod tests {
     /// `.await` on the same thread would hang the test runner forever. A background thread lets
     /// the timeout actually fire.
     fn assert_poll_returns_pending_within(
-        build: impl FnOnce() -> HttpTxnTraceDrain<futures::stream::Pending<TpuSenderResponse>>
-        + Send
+        build: impl FnOnce() -> HttpTxnTraceDrain<
+            futures::stream::Pending<TpuSenderResponse>,
+            MockSolanaClientResolver,
+        > + Send
         + 'static,
     ) {
         let handle = tokio::runtime::Handle::current();

@@ -19,6 +19,7 @@ keywords = ["yellowstone", "solana", "rpc", "jet", "tpu", "triton"]
 publish = false
 
 [workspace.dependencies]
+arc-swap = "1.9.2"
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 base64 = "0.22.1"
