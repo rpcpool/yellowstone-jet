@@ -277,7 +277,6 @@ pub struct ConfigListenSolanaLike {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigSendTransactionService {
     /// The number of upcoming leaders to which to forward transactions
     #[deprecated(
