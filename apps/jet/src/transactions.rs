@@ -62,7 +62,7 @@ pub struct DropExpiredTransactions<St, BH> {
 }
 
 impl<St, BH> DropExpiredTransactions<St, BH> {
-    pub fn new(stream: St, blockheight_svc: BH) -> Self {
+    pub const fn new(stream: St, blockheight_svc: BH) -> Self {
         Self {
             inner: stream,
             blockheight_service: blockheight_svc,

@@ -274,6 +274,10 @@ pub struct ConfigListenSolanaLike {
     /// RPC listen addresses
     #[serde(deserialize_with = "deserialize_listen")]
     pub bind: Vec<SocketAddr>,
+    ///
+    /// If true (default), the handler will reject transactions that request preflight checks, as preflight is not supported.
+    #[serde(default = "default_true")]
+    pub fail_on_preflight: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

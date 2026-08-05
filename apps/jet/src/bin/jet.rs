@@ -360,7 +360,12 @@ async fn run_jet(
                 cluster_tpu_info.clone(),
                 http_txn_drain_config,
             );
-            tokio::spawn(drain);
+            let ah = tg.spawn(async move {
+                let _ = drain.await.inspect_err(|e| {
+                    error!("HTTP txn trace drain error: {e}");
+                });
+            });
+            tg_name_map.insert(ah.id(), "http_txn_trace_drain".to_string());
             Some(tpu_client_callback_tx)
         }
         (Some(_), Some(_)) => {
@@ -410,9 +415,8 @@ async fn run_jet(
     let jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
         vec![Box::new(identity_updater)];
 
-    let tx_handler = TransactionHandler {
-        transaction_sink: root_txn_inlet,
-    };
+    let tx_handler =
+        TransactionHandler::new(root_txn_inlet, config.listen_solana_like.fail_on_preflight);
 
     let rpc_solana_like = RpcServer::new(
         config.listen_solana_like.bind[0],

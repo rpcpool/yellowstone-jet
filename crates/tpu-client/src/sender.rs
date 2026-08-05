@@ -3,8 +3,9 @@ use {
         config::TpuSenderConfig,
         core::{
             ConnectionEvictionStrategy, LeaderTpuInfoService, TpuSenderDriverSpawner,
-            TpuSenderIdentityUpdater, TpuSenderResponseCallback, TpuSenderSessionContext,
-            TpuSenderTxn, UpcomingLeaderPredictor, UpdateIdentity, ValidatorStakeInfoService,
+            TpuSenderIdentityUpdater, TpuSenderResponse, TpuSenderResponseCallback,
+            TpuSenderSessionContext, TpuSenderTxn, UpcomingLeaderPredictor, UpdateIdentity,
+            ValidatorStakeInfoService,
         },
     },
     futures::{Sink, SinkExt},
@@ -15,6 +16,7 @@ use {
         sync::Arc,
         task::{Context, Poll, ready},
     },
+    tokio::sync::{broadcast, mpsc::UnboundedSender},
     tokio_util::sync::PollSender,
 };
 
@@ -162,6 +164,18 @@ where
     TpuSender {
         identity_updater,
         txn_tx: PollSender::new(driver_tx_sink),
+    }
+}
+
+impl TpuSenderResponseCallback for UnboundedSender<TpuSenderResponse> {
+    fn call(&self, response: TpuSenderResponse) {
+        let _ = self.send(response);
+    }
+}
+
+impl TpuSenderResponseCallback for broadcast::Sender<TpuSenderResponse> {
+    fn call(&self, response: TpuSenderResponse) {
+        let _ = self.send(response);
     }
 }
 

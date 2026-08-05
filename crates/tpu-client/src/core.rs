@@ -836,7 +836,7 @@ pub enum TxDropReason {
 }
 
 impl TxDropReason {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             TxDropReason::RateLimited => "rate-limited",
             TxDropReason::RemotePeerUnreachable => "remote-peer-unreachable",

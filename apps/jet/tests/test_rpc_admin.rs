@@ -270,7 +270,6 @@ pub async fn test_get_latest_slot() {
 
     let mock_cluster_info = MockClusterTpuInfo {
         latest_slot: expected_slot,
-        ..Default::default()
     };
 
     let rpc_admin = RpcServer::new(

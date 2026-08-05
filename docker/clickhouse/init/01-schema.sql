@@ -20,4 +20,4 @@ CREATE TABLE IF NOT EXISTS txn_trace
 )
 ENGINE = MergeTree
 PARTITION BY toDate(ts)
-ORDER BY (x_request_id, signature, ts);
+ORDER BY (ts, signature);
