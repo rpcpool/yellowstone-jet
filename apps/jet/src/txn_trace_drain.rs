@@ -28,10 +28,43 @@ pub struct XHeaderEntry {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone)]
 pub enum Credentials {
     XHeaders(Vec<XHeaderEntry>),
+}
+
+impl<'de> Deserialize<'de> for Credentials {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CredentialsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for CredentialsVisitor {
+            type Value = Credentials;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a map with a single key `x-headers`")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let key: String = map
+                    .next_key()?
+                    .ok_or_else(|| serde::de::Error::custom("expected a single key"))?;
+
+                if key == "x-headers" {
+                    Ok(Credentials::XHeaders(map.next_value()?))
+                } else {
+                    Err(serde::de::Error::unknown_variant(&key, &["x-headers"]))
+                }
+            }
+        }
+
+        deserializer.deserialize_map(CredentialsVisitor)
+    }
 }
 
 struct NdjsonPayload {
@@ -1071,25 +1104,23 @@ mod tests {
     #[test]
     fn deser_config() {
         let config_str = r#"
-        {
-            "url": "http://localhost:8123",
-            "credentials": {
-                "x-headers": [
-                    {
-                        "name": "X-Api-Key",
-                        "value": "secret"
-                    }
-                ]
-            }
-        }
-        "#;
+url: http://localhost:8123
+credentials:
+  x-headers:
+    - name: X-Api-Key
+      value: secret
+    - name: X-Other-Header
+      value: other-secret
+"#;
 
         let config: HttpTxnTraceDrainConfig =
-            serde_json::from_str(config_str).expect("deserialization should succeed");
+            serde_yaml::from_str(config_str).expect("deserialization should succeed");
         assert_eq!(config.url.as_str(), "http://localhost:8123/");
         assert!(matches!(config.credentials, Some(Credentials::XHeaders(_))));
         let Credentials::XHeaders(credentials) = config.credentials.as_ref().unwrap();
         assert_eq!(credentials[0].name, "X-Api-Key");
         assert_eq!(credentials[0].value, "secret");
+        assert_eq!(credentials[1].name, "X-Other-Header");
+        assert_eq!(credentials[1].value, "other-secret");
     }
 }
