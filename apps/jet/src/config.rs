@@ -63,7 +63,8 @@ pub struct ConfigJet {
     pub listen_solana_like: ConfigListenSolanaLike,
 
     /// Send retry options
-    pub send_transaction_service: ConfigSendTransactionService,
+    #[serde(default)]
+    pub send_transaction_service: Option<ConfigSendTransactionService>,
 
     #[serde(default)]
     #[deprecated(
