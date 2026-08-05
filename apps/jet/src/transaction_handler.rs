@@ -61,12 +61,21 @@ impl From<TransactionHandlerError> for ErrorObjectOwned {
 
 #[derive(Clone)]
 pub struct TransactionHandler {
-    pub transaction_sink: mpsc::Sender<SendTransactionRequest>,
+    ///
+    /// If true (default), the handler will reject transactions that request preflight checks, as preflight is not supported.
+    fail_on_preflight: bool,
+    transaction_sink: mpsc::Sender<SendTransactionRequest>,
 }
 
 impl TransactionHandler {
-    pub const fn new(transaction_sink: mpsc::Sender<SendTransactionRequest>) -> Self {
-        Self { transaction_sink }
+    pub const fn new(
+        transaction_sink: mpsc::Sender<SendTransactionRequest>,
+        fail_on_preflight: bool,
+    ) -> Self {
+        Self {
+            fail_on_preflight,
+            transaction_sink,
+        }
     }
 
     pub fn get_version() -> RpcVersionInfo {
@@ -86,7 +95,7 @@ impl TransactionHandler {
         let config = config_with_forwarding_policies.config;
 
         // Reject transactions requesting preflight, not supported
-        if !config.skip_preflight {
+        if !config.skip_preflight && self.fail_on_preflight {
             return Err(TransactionHandlerError::PreflightNotSupported);
         }
 
@@ -205,7 +214,7 @@ impl TransactionHandler {
         .map_err(|e| TransactionHandlerError::InvalidParams(e.to_string()))?;
 
         // Reject transactions requesting preflight, not supported
-        if !config.skip_preflight {
+        if !config.skip_preflight && self.fail_on_preflight {
             return Err(TransactionHandlerError::PreflightNotSupported);
         }
 

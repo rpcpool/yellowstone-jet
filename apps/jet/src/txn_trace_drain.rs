@@ -29,6 +29,7 @@ pub struct XHeaderEntry {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Credentials {
     XHeaders(Vec<XHeaderEntry>),
 }
@@ -125,7 +126,7 @@ impl<'a, T> Iterator for OneOrManyIter<'a, T> {
 }
 
 impl<T> OneOrMany<T> {
-    fn iter(&self) -> OneOrManyIter<'_, T> {
+    const fn iter(&self) -> OneOrManyIter<'_, T> {
         OneOrManyIter {
             inner: self,
             index: 0,
@@ -177,7 +178,7 @@ impl<T> Iterator for OneOrManyIterator<T> {
     }
 }
 
-fn get_txn_info<'a>(txn_response: &TpuSenderResponse) -> Option<OneOrMany<&JetTxnInfo>> {
+fn get_txn_info(txn_response: &TpuSenderResponse) -> Option<OneOrMany<&JetTxnInfo>> {
     match txn_response {
         TpuSenderResponse::TxSent(tx_sent) => tx_sent
             .info
@@ -217,7 +218,7 @@ where
         TpuSenderResponse::TxSent(tx_sent) => one_or_many.map(|info| TxnTraceEntry {
             signature: Cow::Owned(info.signature.to_string()),
             send_at_slot: info.send_at_slot,
-            x_request_id: info.x_request_id.clone(),
+            x_request_id: info.x_request_id,
             state: TxnState::Sent,
             error_msg: None,
             remote_peer_solana_client_id: solana_client_resolver
@@ -230,7 +231,7 @@ where
         TpuSenderResponse::TxFailed(tx_failed) => one_or_many.map(|info| TxnTraceEntry {
             signature: Cow::Owned(info.signature.to_string()),
             send_at_slot: info.send_at_slot,
-            x_request_id: info.x_request_id.clone(),
+            x_request_id: info.x_request_id,
             state: TxnState::Failed,
             error_msg: Some(&tx_failed.failure_reason),
             remote_peer_solana_client_id: solana_client_resolver
@@ -248,7 +249,7 @@ where
                 .map(|((_dropped_tx, _attempt), info)| TxnTraceEntry {
                     signature: Cow::Owned(info.signature.to_string()),
                     send_at_slot: info.send_at_slot,
-                    x_request_id: info.x_request_id.clone(),
+                    x_request_id: info.x_request_id,
                     state: TxnState::Drop,
                     error_msg: None,
                     remote_peer_solana_client_id: solana_client_resolver
@@ -297,11 +298,21 @@ enum PollDrain {
 pub struct HttpTxnTraceDrainConfig {
     pub url: Url,
     pub credentials: Option<Credentials>,
+    #[serde(default = "default_max_ndjson_len")]
     pub max_ndjson_len: usize,
+    #[serde(default = "default_max_inflight_sends")]
     pub max_inflight_sends: usize,
 }
 
 pub const DEFAULT_MAX_NDJSON_LEN: usize = 1000;
+
+const fn default_max_ndjson_len() -> usize {
+    DEFAULT_MAX_NDJSON_LEN
+}
+
+const fn default_max_inflight_sends() -> usize {
+    10
+}
 
 impl Default for HttpTxnTraceDrainConfig {
     fn default() -> Self {
@@ -1055,5 +1066,30 @@ mod tests {
                 "drain future (or the mock http server) did not complete within 5s -- likely hung"
             ),
         }
+    }
+
+    #[test]
+    fn deser_config() {
+        let config_str = r#"
+        {
+            "url": "http://localhost:8123",
+            "credentials": {
+                "x-headers": [
+                    {
+                        "name": "X-Api-Key",
+                        "value": "secret"
+                    }
+                ]
+            }
+        }
+        "#;
+
+        let config: HttpTxnTraceDrainConfig =
+            serde_json::from_str(config_str).expect("deserialization should succeed");
+        assert_eq!(config.url.as_str(), "http://localhost:8123/");
+        assert!(matches!(config.credentials, Some(Credentials::XHeaders(_))));
+        let Credentials::XHeaders(credentials) = config.credentials.as_ref().unwrap();
+        assert_eq!(credentials[0].name, "X-Api-Key");
+        assert_eq!(credentials[0].value, "secret");
     }
 }
