@@ -6952,7 +6952,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet"
-version = "16.0.0-rc3"
+version = "16.0.0-rc5"
 dependencies = [
  "anyhow",
  "arc-swap",
