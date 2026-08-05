@@ -404,9 +404,14 @@ async fn run_jet(
         tpu_sender,
         config
             .send_transaction_service
-            .leader_forward_count
+            .as_ref()
+            .and_then(|cfg| cfg.leader_forward_count)
             .map_or(FanoutConfig::SmartFanout, FanoutConfig::Custom),
-        config.send_transaction_service.extra_fanout,
+        config
+            .send_transaction_service
+            .as_ref()
+            .map(|cfg| cfg.extra_fanout.clone())
+            .unwrap_or_default(),
     );
 
     let ah = tg.spawn(async move { tx_forwader.run().await });
