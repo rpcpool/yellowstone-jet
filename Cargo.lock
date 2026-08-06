@@ -6952,12 +6952,12 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet"
-version = "15.0.0"
+version = "16.0.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
- "bincode",
  "borsh",
  "bs58",
  "bytes",
@@ -7035,6 +7035,7 @@ dependencies = [
  "url",
  "uuid",
  "vergen",
+ "wincode",
  "yellowstone-grpc-client",
  "yellowstone-grpc-proto",
  "yellowstone-jet-tpu-client",
@@ -7047,7 +7048,6 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "bincode",
  "borsh",
  "bs58",
  "bytes",
@@ -7099,6 +7099,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wincode",
  "x509-parser",
  "yellowstone-grpc-client",
  "yellowstone-grpc-proto",

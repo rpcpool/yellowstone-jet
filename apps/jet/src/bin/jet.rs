@@ -3,7 +3,7 @@ use tikv_jemallocator::Jemalloc;
 use {
     anyhow::Context,
     clap::{Parser, Subcommand},
-    futures::future::FutureExt,
+    futures::FutureExt,
     jsonrpsee::http_client::HttpClientBuilder,
     reqwest::{Client, Url},
     solana_client::rpc_client::RpcClientConfig,
@@ -25,10 +25,11 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{SignalKind, signal},
-        sync::{Mutex, watch},
+        sync::{Mutex, mpsc, watch},
         task::{self, JoinHandle, JoinSet},
         time::Instant,
     },
+    tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream},
     tokio_util::sync::CancellationToken,
     tracing::{error, info, warn},
     yellowstone_jet::{
@@ -45,15 +46,18 @@ use {
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         transaction_handler::TransactionHandler,
         transactions::{
-            AlwaysAllowTransactionPolicyStore, FanoutConfig, QuicGatewayBidi, TransactionFanout,
-            TransactionNoRetryScheduler, TransactionPolicyStore,
+            AlwaysAllowTransactionPolicyStore, DropExpiredTransactions, FanoutConfig,
+            SendTransactionRequest, TransactionFanout, TransactionPolicyStore,
         },
+        txn_trace_drain::HttpTxnTraceDrain,
         util::{WaitShutdown, prom::inject_job_label},
     },
-    yellowstone_jet_tpu_client::core::{
-        IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
-        StakeBasedEvictionStrategy, TpuSenderDriverSpawner, TpuSenderSessionContext,
-        UpcomingLeaderPredictor,
+    yellowstone_jet_tpu_client::{
+        core::{
+            IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
+            StakeBasedEvictionStrategy, UpcomingLeaderPredictor,
+        },
+        sender::{PollTpuSender, create_base_tpu_client},
     },
     yellowstone_shield_store::PolicyStore,
 };
@@ -322,78 +326,102 @@ async fn run_jet(
             other: cluster_tpu_info.clone(),
         });
 
-    let quic_gateway_spawner = TpuSenderDriverSpawner {
-        stake_info_map: Arc::new(stake_info_map.clone()),
-        driver_tx_channel_capacity: 10000,
-        leader_tpu_info_service,
-    };
-
     let connection_predictor = if config.quic.tpu_sender.leader_prediction_lookahead.is_some() {
         Arc::new(cluster_tpu_info.clone()) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>
     } else {
         Arc::new(IgnorantLeaderPredictor)
     };
 
-    let (gateway_callback_tx, gateway_response_source) = tokio::sync::mpsc::unbounded_channel();
-    let TpuSenderSessionContext {
-        identity_updater: gateway_identity_updater,
-        driver_tx_sink: gateway_tx_sink,
-        driver_join_handle: gateway_join_handle,
-    } = quic_gateway_spawner.spawn(
-        initial_identity.insecure_clone(),
+    // Set up Lewis event tracking pipeline
+    let maybe_callback_sink = match (config.http_txn_trace_drain, config.lewis_events) {
+        (None, None) => None,
+        (None, Some(lewis_config)) => {
+            let (tpu_client_callback_tx, tpu_client_callback_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let tpu_client_callback_rx = UnboundedReceiverStream::new(tpu_client_callback_rx);
+            let lewis_fut = create_lewis_pipeline(lewis_config, tpu_client_callback_rx);
+            let ah = tg.spawn(
+                lewis_fut
+                    .inspect(|result| {
+                        if let Err(e) = result {
+                            error!("Lewis client error: {e}");
+                        }
+                    })
+                    .map(drop),
+            );
+            tg_name_map.insert(ah.id(), "lewis_client".to_string());
+            Some(tpu_client_callback_tx)
+        }
+        (Some(http_txn_drain_config), None) => {
+            let (tpu_client_callback_tx, tpu_client_callback_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let drain = HttpTxnTraceDrain::with_config(
+                UnboundedReceiverStream::new(tpu_client_callback_rx),
+                cluster_tpu_info.clone(),
+                http_txn_drain_config,
+            );
+            let ah = tg.spawn(async move {
+                let _ = drain.await.inspect_err(|e| {
+                    error!("HTTP txn trace drain error: {e}");
+                });
+            });
+            tg_name_map.insert(ah.id(), "http_txn_trace_drain".to_string());
+            Some(tpu_client_callback_tx)
+        }
+        (Some(_), Some(_)) => {
+            panic!("http_txn_trace_drain and lewis_events cannot be used together")
+        }
+    };
+
+    let tpu_sender = create_base_tpu_client(
         config.quic.tpu_sender.clone(),
+        initial_identity.insecure_clone(),
+        leader_tpu_info_service,
+        Arc::new(stake_info_map.clone()),
         Arc::new(StakeBasedEvictionStrategy {
             peer_idle_eviction_grace_period: config.quic.connection_idle_eviction_grace,
         }),
         connection_predictor,
-        Some(gateway_callback_tx),
-    );
+        maybe_callback_sink,
+        1000, // This capacity should not be too deep, so transaction does not sits too long in the queue.
+    )
+    .await;
+    let identity_updater = tpu_sender.get_owned_identity_updater();
+    let tpu_sender = PollTpuSender::new(tpu_sender);
 
-    let ah = tg.spawn(async move {
-        gateway_join_handle.await.expect("quic gateway join handle");
-    });
-    tg_name_map.insert(ah.id(), "quic_gateway".to_string());
+    // Root means the first stage of the transaction pipeline.
+    // the root channel can have deeper queue, because the transaction will be processed by the fanout stage, and then sent to the tpu stage.
+    let (root_txn_inlet, root_txn_outlet) = mpsc::channel::<SendTransactionRequest>(10_000);
 
-    let quic_gateway_bidi = QuicGatewayBidi {
-        sink: gateway_tx_sink,
-        source: gateway_response_source,
-    };
-
-    let (scheduler_in, scheduler_out) = {
-        let TransactionNoRetryScheduler { sink, source } =
-            TransactionNoRetryScheduler::new(Arc::new(blockhash_queue.clone()));
-        (sink, source)
-    };
-
-    // Set up Lewis event tracking pipeline
-    let (lewis_handler, lewis_fut) = create_lewis_pipeline(
-        config.lewis_events.clone(),
-        jet_cancellation_token.child_token(),
-    );
+    let root_txn_outlet = ReceiverStream::new(root_txn_outlet);
+    let root_txn_outlet = DropExpiredTransactions::new(root_txn_outlet, blockhash_queue.clone());
 
     #[allow(deprecated)]
     let mut tx_forwader = TransactionFanout::new(
         Arc::new(cluster_tpu_info.clone()),
         shield_policy_store,
-        scheduler_out,
-        quic_gateway_bidi,
+        root_txn_outlet,
+        tpu_sender,
         config
             .send_transaction_service
-            .leader_forward_count
+            .as_ref()
+            .and_then(|cfg| cfg.leader_forward_count)
             .map_or(FanoutConfig::SmartFanout, FanoutConfig::Custom),
-        config.send_transaction_service.extra_fanout,
-        lewis_handler,
+        config
+            .send_transaction_service
+            .as_ref()
+            .map(|cfg| cfg.extra_fanout.clone())
+            .unwrap_or_default(),
     );
 
     let ah = tg.spawn(async move { tx_forwader.run().await });
     tg_name_map.insert(ah.id(), "transaction_fanout".to_string());
 
     let jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
-        vec![Box::new(gateway_identity_updater)];
+        vec![Box::new(identity_updater)];
 
-    let tx_handler = TransactionHandler {
-        transaction_sink: scheduler_in,
-    };
+    let tx_handler =
+        TransactionHandler::new(root_txn_inlet, config.listen_solana_like.fail_on_preflight);
 
     let rpc_solana_like = RpcServer::new(
         config.listen_solana_like.bind[0],
@@ -428,19 +456,6 @@ async fn run_jet(
         jet_cancellation_token.child_token(),
     ));
     tg_name_map.insert(ah.id(), "stake_info_metrics_update".to_string());
-
-    // Spawn Lewis client task if configured
-    if let Some(fut) = lewis_fut {
-        let ah = tg.spawn(
-            fut.inspect(|result| {
-                if let Err(e) = result {
-                    error!("Lewis client error: {e}");
-                }
-            })
-            .map(drop),
-        );
-        tg_name_map.insert(ah.id(), "lewis_client".to_string());
-    }
 
     let ah = tg.spawn(async move {
         geyser_handle

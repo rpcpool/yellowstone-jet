@@ -4,20 +4,20 @@ use {
         proto::lewis::{
             Event, EventAck, EventJet, event, transaction_tracker_client::TransactionTrackerClient,
         },
+        transactions::JetTxnInfo,
         util::{IncrementalBackoff, create_x_token_interceptor},
     },
-    futures::SinkExt,
+    futures::{SinkExt, Stream, StreamExt},
     solana_clock::Slot,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     std::{
+        collections::VecDeque,
         future::Future,
         net::SocketAddr,
-        sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     },
-    tokio::{sync::mpsc, time::Duration},
-    tokio_util::sync::CancellationToken,
+    tokio::time::Duration,
     tonic::transport::{Channel, Endpoint},
     tracing::{debug, error, info, warn},
     yellowstone_jet_tpu_client::core::TpuSenderResponse,
@@ -47,91 +47,70 @@ pub enum LewisClientError {
     MaxReconnectAttemptsExceeded,
 }
 
-#[derive(Clone)]
-pub struct LewisEventHandler {
-    tx: mpsc::Sender<Event>,
+struct LewisTpuResponseStreamAdapter<St> {
+    inner: St,
     jet_id: String,
+    pending: VecDeque<Event>,
 }
 
-impl LewisEventHandler {
-    fn signature_from_info(
+impl<St> LewisTpuResponseStreamAdapter<St> {
+    fn txn_info(
         info: &Option<yellowstone_jet_tpu_client::core::TpuSenderTxnInfo>,
-    ) -> Option<Signature> {
+    ) -> Option<&JetTxnInfo> {
         info.as_ref()
-            .and_then(|txn_info| txn_info.downcast_ref::<Signature>())
-            .copied()
+            .and_then(|txn_info| txn_info.downcast_ref::<JetTxnInfo>())
+        // .cloned()
     }
 
-    pub fn handle_skip(
-        &self,
-        signature: Signature,
-        validator: Pubkey,
-        slot: Slot,
-        policies: &[Pubkey],
-    ) {
-        let event = self.build_event(
-            signature,
-            validator,
-            None,
-            slot,
-            None,
-            true,
-            policies.iter().map(|p| p.to_string()).collect(),
-        );
-        self.emit(event);
-    }
-
-    pub fn handle_gateway_response(&self, response: &TpuSenderResponse, slot: Slot) {
+    pub fn handle_gateway_response(&mut self, response: &TpuSenderResponse) {
         match response {
             TpuSenderResponse::TxSent(sent) => {
-                let Some(tx_sig) = Self::signature_from_info(&sent.info) else {
-                    warn!("Missing TpuSenderTxnInfo in TxSent response");
+                let Some(info) = Self::txn_info(&sent.info) else {
                     return;
                 };
                 let event = self.build_event(
-                    tx_sig,
+                    &info.signature,
                     sent.remote_peer_identity,
                     Some(sent.remote_peer_addr),
-                    slot,
+                    info.send_at_slot,
                     None,
                     false,
                     vec![],
                 );
-                self.emit(event);
+                self.pending.push_back(event);
             }
             TpuSenderResponse::TxFailed(failed) => {
-                let Some(tx_sig) = Self::signature_from_info(&failed.info) else {
-                    warn!("Missing TpuSenderTxnInfo in TxFailed response");
+                let Some(info) = Self::txn_info(&failed.info) else {
                     return;
                 };
                 let event = self.build_event(
-                    tx_sig,
+                    &info.signature,
                     failed.remote_peer_identity,
                     Some(failed.remote_peer_addr),
-                    slot,
+                    info.send_at_slot,
                     Some(failed.failure_reason.clone()),
                     false,
                     vec![],
                 );
-                self.emit(event);
+                self.pending.push_back(event);
             }
             TpuSenderResponse::TxDrop(dropped) => {
                 let drop_reason_str = dropped.drop_reason.to_string();
                 for (gateway_tx, _attempt_count) in &dropped.dropped_tx_vec {
-                    let Some(tx_sig) = Self::signature_from_info(&gateway_tx.info) else {
+                    let Some(info) = Self::txn_info(&gateway_tx.info) else {
                         warn!("Missing TpuSenderTxnInfo in TxDrop response");
                         continue;
                     };
                     let event = self.build_event(
-                        tx_sig,
+                        &info.signature,
                         dropped.remote_peer_identity,
                         None, // No TPU addr for dropped
-                        slot,
+                        info.send_at_slot,
                         Some(drop_reason_str.clone()),
                         false,
                         vec![],
                     );
-                    self.emit(event);
+                    self.pending.push_back(event);
                 }
             }
         }
@@ -140,7 +119,7 @@ impl LewisEventHandler {
     #[allow(clippy::too_many_arguments)]
     fn build_event(
         &self,
-        signature: Signature,
+        signature: &Signature,
         validator: Pubkey,
         tpu_addr: Option<SocketAddr>,
         slot: Slot,
@@ -170,42 +149,68 @@ impl LewisEventHandler {
             })),
         }
     }
+}
 
-    fn emit(&self, event: Event) {
-        // Drop on buffer full
-        if let Err(e) = self.tx.try_send(event) {
-            warn!("Lewis event channel full or closed, dropping event: {}", e);
-            prom::lewis_events_dropped_inc();
+impl<St> Stream for LewisTpuResponseStreamAdapter<St>
+where
+    St: Stream<Item = TpuSenderResponse> + Unpin,
+{
+    type Item = Event;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(event) = this.pending.pop_front() {
+                return std::task::Poll::Ready(Some(event));
+            }
+
+            match this.inner.poll_next_unpin(cx) {
+                std::task::Poll::Ready(Some(response)) => {
+                    this.handle_gateway_response(&response);
+                }
+                std::task::Poll::Ready(None) => {
+                    return std::task::Poll::Ready(None);
+                }
+                std::task::Poll::Pending => {
+                    if this.pending.is_empty() {
+                        return std::task::Poll::Pending;
+                    }
+                }
+            }
         }
     }
 }
 
-pub fn create_lewis_pipeline(
-    config: Option<ConfigLewisEvents>,
-    cancellation_token: CancellationToken,
-) -> (
-    Option<Arc<LewisEventHandler>>,
-    Option<impl Future<Output = Result<(), LewisClientError>> + Send>,
-) {
-    let Some(config) = config else {
-        return (None, None);
-    };
-
-    let (tx, rx) = mpsc::channel(config.event_buffer_size);
+pub fn create_lewis_pipeline<St>(
+    config: ConfigLewisEvents,
+    rx: St,
+) -> impl Future<Output = Result<(), LewisClientError>> + Send
+where
+    St: Stream<Item = TpuSenderResponse> + Unpin + Send,
+{
     let jet_id = config.jet_id.clone().unwrap_or_default();
 
-    let handler = Arc::new(LewisEventHandler { tx, jet_id });
-    let fut = run_lewis_client(config, rx, cancellation_token);
+    let adapter_rx = LewisTpuResponseStreamAdapter {
+        inner: rx,
+        jet_id,
+        pending: Default::default(),
+    };
+    let fut = auto_reconnect_drain_loop(config, adapter_rx);
 
     info!("Lewis event pipeline created");
-    (Some(handler), Some(fut))
+    fut
 }
 
-async fn run_lewis_client(
+async fn auto_reconnect_drain_loop<St>(
     config: ConfigLewisEvents,
-    mut rx: mpsc::Receiver<Event>,
-    cancellation_token: CancellationToken,
-) -> Result<(), LewisClientError> {
+    mut rx: St,
+) -> Result<(), LewisClientError>
+where
+    St: Stream<Item = Event> + Unpin + Send,
+{
     let mut attempt = 0;
 
     let mut backoff = IncrementalBackoff::new(
@@ -217,12 +222,7 @@ async fn run_lewis_client(
         if attempt == 0 {
             backoff.init();
         }
-        if cancellation_token.is_cancelled() {
-            info!("Lewis client cancellation requested, exiting");
-            return Ok(());
-        }
-
-        match connect_and_stream(&config, &mut rx, cancellation_token.clone()).await {
+        match drain_loop(&config, &mut rx).await {
             Ok(()) => {
                 info!("Lewis event stream completed normally");
                 backoff.reset();
@@ -237,7 +237,7 @@ async fn run_lewis_client(
                         config.max_reconnect_attempts
                     );
                     // Drain remaining events to prevent blocking
-                    while rx.recv().await.is_some() {
+                    while rx.next().await.is_some() {
                         prom::lewis_events_dropped_inc();
                     }
                     return Err(LewisClientError::MaxReconnectAttemptsExceeded);
@@ -257,6 +257,7 @@ async fn run_lewis_client(
 async fn create_channel(config: &ConfigLewisEvents) -> Result<Channel, LewisClientError> {
     let endpoint = Endpoint::from_shared(config.endpoint.clone())?
         .connect_timeout(config.connect_timeout)
+        .http2_adaptive_window(true)
         .http2_keep_alive_interval(config.keepalive_interval)
         .keep_alive_timeout(config.keepalive_timeout)
         .keep_alive_while_idle(config.keep_alive_while_idle);
@@ -267,11 +268,10 @@ async fn create_channel(config: &ConfigLewisEvents) -> Result<Channel, LewisClie
         .map_err(|e| LewisClientError::ConnectionError(e.to_string()))
 }
 
-async fn connect_and_stream(
-    config: &ConfigLewisEvents,
-    rx: &mut mpsc::Receiver<Event>,
-    cancellation_token: CancellationToken,
-) -> Result<(), LewisClientError> {
+async fn drain_loop<St>(config: &ConfigLewisEvents, rx: &mut St) -> Result<(), LewisClientError>
+where
+    St: Stream<Item = Event> + Unpin,
+{
     debug!("Connecting to Lewis at {}", config.endpoint);
 
     let channel = create_channel(config).await?;
@@ -289,31 +289,13 @@ async fn connect_and_stream(
     let mut flush_interval = tokio::time::interval(config.batch_timeout);
     flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Stream timeout
-    let stream_deadline = if config.stream_timeout > Duration::ZERO {
-        Some(tokio::time::Instant::now() + config.stream_timeout)
-    } else {
-        None
-    };
-
     tokio::pin!(response);
 
     loop {
         // Check stream timeout
-        if let Some(deadline) = stream_deadline
-            && tokio::time::Instant::now() >= deadline
-        {
-            warn!("Stream timeout reached after {:?}", config.stream_timeout);
-            break;
-        }
-
         tokio::select! {
-            // Check for cancellation
-            _ = cancellation_token.cancelled() => {
-                break;
-            }
             // Handle incoming events
-            maybe = rx.recv() => {
+            maybe = rx.next() => {
                 let Some(event) = maybe else {
                     debug!("Event channel closed, finishing stream");
                     break;
@@ -413,67 +395,109 @@ async fn send_batch(
 mod tests {
     use {
         super::*,
+        crate::transactions::JetTxnInfo,
+        solana_clock::Slot,
         solana_pubkey::Pubkey,
         solana_signature::Signature,
-        std::net::{IpAddr, Ipv4Addr},
-        yellowstone_jet_tpu_client::core::{TpuSenderResponse, TpuSenderTxnInfo, TxSent},
+        std::{
+            collections::VecDeque,
+            net::{IpAddr, Ipv4Addr},
+        },
+        yellowstone_jet_tpu_client::core::{TpuSenderResponse, TpuSenderTxnInfo, TxFailed, TxSent},
     };
 
-    #[test]
-    fn test_event_creation() {
-        let (tx, mut rx) = mpsc::channel(100);
-        let handler = LewisEventHandler {
-            tx,
-            jet_id: "test-jet".to_string(),
-        };
+    fn test_adapter(
+        jet_id: &str,
+    ) -> LewisTpuResponseStreamAdapter<impl Stream<Item = TpuSenderResponse>> {
+        LewisTpuResponseStreamAdapter {
+            inner: futures::stream::empty(),
+            jet_id: jet_id.to_string(),
+            pending: VecDeque::new(),
+        }
+    }
 
+    #[test]
+    fn test_gateway_response_sent() {
+        let mut adapter = test_adapter("test-jet");
         let sig = Signature::new_unique();
         let validator = Pubkey::new_unique();
-        let policies = vec![Pubkey::new_unique(), Pubkey::new_unique()];
+        let send_at_slot: Slot = 12345;
 
-        handler.handle_skip(sig, validator, 12345, &policies);
+        let response = TpuSenderResponse::TxSent(TxSent {
+            remote_peer_identity: validator,
+            remote_peer_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000),
+            info: Some(TpuSenderTxnInfo::new(JetTxnInfo {
+                signature: sig,
+                send_at_slot,
+                x_request_id: None,
+            })),
+        });
 
-        let event = rx.try_recv().unwrap();
+        adapter.handle_gateway_response(&response);
+
+        let event = adapter.pending.pop_front().unwrap();
         match event.event {
             Some(event::Event::Jet(jet_event)) => {
                 assert_eq!(jet_event.sig, sig.as_ref());
                 assert_eq!(jet_event.validator, validator.to_string());
-                assert_eq!(jet_event.slot, 12345);
-                assert!(jet_event.skipped);
-                assert_eq!(jet_event.shield_policies.len(), 2);
+                assert_eq!(jet_event.slot, send_at_slot);
+                assert!(!jet_event.skipped);
+                assert!(jet_event.error.is_empty());
+                assert_eq!(jet_event.jet_id, "test-jet");
+                assert_eq!(jet_event.tpu_addr, "127.0.0.1:8000");
             }
             _ => panic!("Expected Jet event"),
         }
     }
 
     #[test]
-    fn test_gateway_response_sent() {
-        let (tx, mut rx) = mpsc::channel(100);
-        let handler = LewisEventHandler {
-            tx,
-            jet_id: "test-jet".to_string(),
-        };
+    fn test_gateway_response_failed() {
+        let mut adapter = test_adapter("test-jet");
 
         let tx_sig = Signature::new_unique();
+        let validator = Pubkey::new_unique();
+        let send_at_slot: Slot = 100;
+
+        let response = TpuSenderResponse::TxFailed(TxFailed {
+            remote_peer_identity: validator,
+            remote_peer_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000),
+            failure_reason: "send-failed".to_string(),
+            info: Some(TpuSenderTxnInfo::new(JetTxnInfo {
+                signature: tx_sig,
+                send_at_slot,
+                x_request_id: None,
+            })),
+        });
+
+        adapter.handle_gateway_response(&response);
+
+        let event = adapter.pending.pop_front().unwrap();
+        match event.event {
+            Some(event::Event::Jet(jet_event)) => {
+                assert!(!jet_event.skipped);
+                assert_eq!(jet_event.error, "send-failed");
+                assert!(!jet_event.tpu_addr.is_empty());
+                assert_eq!(jet_event.sig, tx_sig.as_ref());
+                assert_eq!(jet_event.validator, validator.to_string());
+                assert_eq!(jet_event.slot, send_at_slot);
+            }
+            _ => panic!("Expected Jet event"),
+        }
+    }
+
+    #[test]
+    fn test_gateway_response_ignores_non_jet_tx_info() {
+        let mut adapter = test_adapter("test-jet");
 
         let response = TpuSenderResponse::TxSent(TxSent {
             remote_peer_identity: Pubkey::new_unique(),
             remote_peer_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000),
-            info: Some(TpuSenderTxnInfo::new(tx_sig)),
+            // Wrong metadata type: adapter should ignore this response.
+            info: Some(TpuSenderTxnInfo::new(Signature::new_unique())),
         });
 
-        handler.handle_gateway_response(&response, 100);
-
-        let event = rx.try_recv().unwrap();
-        match event.event {
-            Some(event::Event::Jet(jet_event)) => {
-                assert!(!jet_event.skipped);
-                assert!(jet_event.error.is_empty());
-                assert!(!jet_event.tpu_addr.is_empty());
-                assert_eq!(jet_event.sig, tx_sig.as_ref());
-            }
-            _ => panic!("Expected Jet event"),
-        }
+        adapter.handle_gateway_response(&response);
+        assert!(adapter.pending.is_empty());
     }
 }
 

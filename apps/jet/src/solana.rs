@@ -1,7 +1,6 @@
 use {
     crate::{metrics, rpc::invalid_params},
     base64::{Engine, prelude::BASE64_STANDARD},
-    bincode::config::Options,
     jsonrpsee::core::RpcResult,
     solana_bincode::limited_deserialize,
     solana_nonce::NONCED_TX_MARKER_IX_INDEX,
@@ -11,6 +10,7 @@ use {
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status_client_types::TransactionBinaryEncoding,
     std::any::type_name,
+    wincode::{SchemaRead, config::DefaultConfig},
 };
 
 const MAX_BASE58_SIZE: usize = 1683; // Golden, bump if PACKET_DATA_SIZE changes
@@ -20,7 +20,7 @@ pub fn decode_and_deserialize<T>(
     encoding: TransactionBinaryEncoding,
 ) -> RpcResult<(Vec<u8>, T)>
 where
-    T: serde::de::DeserializeOwned,
+    T: for<'de> SchemaRead<'de, DefaultConfig, Dst = T>,
 {
     let wire_output = match encoding {
         TransactionBinaryEncoding::Base58 => {
@@ -71,22 +71,16 @@ where
             PACKET_DATA_SIZE
         )));
     }
-    match bincode::options()
-        .with_limit(PACKET_DATA_SIZE as u64)
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .deserialize_from(&wire_output[..])
-    {
-        Ok(output) => Ok((wire_output, output)),
-        Err(err) => {
-            metrics::jet::increment_transaction_deserialize_error("bincode");
-            Err(invalid_params(format!(
+    wincode::deserialize(&wire_output[..])
+        .map(|output| (wire_output, output))
+        .map_err(|err| {
+            metrics::jet::increment_transaction_deserialize_error("wincode");
+            invalid_params(format!(
                 "failed to deserialize {}: {}",
                 type_name::<T>(),
                 err,
-            )))
-        }
-    }
+            ))
+        })
 }
 
 pub fn get_durable_nonce(tx: &VersionedTransaction) -> Option<Pubkey> {

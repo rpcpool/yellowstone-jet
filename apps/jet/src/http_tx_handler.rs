@@ -20,6 +20,7 @@ use {
     },
     tower::Service,
     tracing::{debug, warn},
+    uuid::Uuid,
 };
 
 const API_TX_PATH: &str = "/api/v1/transactions";
@@ -165,12 +166,7 @@ impl HttpTransactionHandler {
             );
         }
 
-        let x_request_id = req
-            .headers()
-            .get(X_REQUEST_ID_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| Cow::Owned(s.to_owned()))
-            .unwrap_or_else(|| Cow::Borrowed("unknown"));
+        let x_request_id = req.extensions().get::<XRequestId>().map(|x| x.0);
 
         let params = match RequestParams::parse(req.uri().query(), req.headers()) {
             Ok(p) => p,
@@ -226,7 +222,7 @@ impl HttpTransactionHandler {
                 forwarding_policies: params.forwarding_policies.clone(),
             };
             self.tx_handler
-                .handle_raw_transaction(Bytes::clone(&body_bytes), config)
+                .handle_raw_transaction(Bytes::clone(&body_bytes), config, x_request_id)
                 .await
         } else {
             let data = match String::from_utf8(body_bytes.to_vec()) {
@@ -254,7 +250,9 @@ impl HttpTransactionHandler {
                 },
                 forwarding_policies: params.forwarding_policies.clone(),
             };
-            self.tx_handler.handle_transaction(data, Some(config)).await
+            self.tx_handler
+                .handle_transaction(data, Some(config), x_request_id)
+                .await
         };
 
         match result {
@@ -296,7 +294,7 @@ impl HttpTransactionHandler {
                 metrics::http_tx_requests_inc("error", encoding);
                 warn!(
                     error = %e,
-                    x_request_id = %x_request_id,
+                    x_request_id = %x_request_id.map(|x| x.to_string()).unwrap_or_else(|| "unknown".to_string()),
                     encoding = %encoding,
                     body = %body_bytes,
                     "HTTP transaction submission failed"
@@ -337,7 +335,7 @@ impl<S> HttpTxMiddleware<S> {
 }
 
 #[derive(Clone, Debug)]
-pub struct XRequestId(pub Cow<'static, str>);
+pub struct XRequestId(pub Uuid);
 
 impl<S> Service<Request<Body>> for HttpTxMiddleware<S>
 where
@@ -359,11 +357,12 @@ where
             .headers()
             .get(X_REQUEST_ID_HEADER)
             .and_then(|v| v.to_str().ok())
-            .map(|s| Cow::Owned(s.to_owned()))
-            .unwrap_or_else(|| Cow::Borrowed("unknown"));
-        let x_request_id = XRequestId(x_request_id);
+            .and_then(|x_req_id| Uuid::try_parse(x_req_id).ok())
+            .map(XRequestId);
 
-        request.extensions_mut().insert(x_request_id);
+        if let Some(x_request_id) = x_request_id {
+            request.extensions_mut().insert(x_request_id);
+        }
 
         if request.uri().path() == API_TX_PATH {
             let handler = self.handler.clone();

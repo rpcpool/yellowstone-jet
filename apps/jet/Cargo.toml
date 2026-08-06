@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "15.0.0"
+version = "16.0.0"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
@@ -11,10 +11,10 @@ publish = false
 rust-version.workspace = true
 
 [dependencies]
+arc-swap = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
-bincode = { workspace = true }
 borsh = { workspace = true }
 bs58 = { workspace = true }
 bytes = { workspace = true }
@@ -58,12 +58,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 url = { workspace = true, features = ["serde"] }
+
 # Agave Monorepo
 solana-bincode = { workspace = true }
 solana-client = { workspace = true }
 solana-rpc-client = { workspace = true }
 solana-rpc-client-api = { workspace = true }
-# solana-streamer = { workspace = true, features = ["agave-unstable-api"] }
 solana-system-interface = { workspace = true, features = ["bincode"] }
 solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
 solana-transaction-status-client-types = { workspace = true }
@@ -90,11 +90,12 @@ solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
 solana-transaction = { workspace = true }
 solana-transaction-error = { workspace = true }
+wincode = { workspace = true }
 
 # Yellowstone
 yellowstone-grpc-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
-yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yellowstone-grpc", "shield"] }
+yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yellowstone-grpc", "shield", "txn-info-cap-128"] }
 yellowstone-shield-store = { workspace = true }
 
 [build-dependencies]

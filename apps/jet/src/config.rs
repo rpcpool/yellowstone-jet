@@ -1,4 +1,5 @@
 use {
+    crate::txn_trace_drain::HttpTxnTraceDrainConfig,
     anyhow::Context,
     reqwest::Url,
     serde::{
@@ -62,7 +63,14 @@ pub struct ConfigJet {
     pub listen_solana_like: ConfigListenSolanaLike,
 
     /// Send retry options
-    pub send_transaction_service: ConfigSendTransactionService,
+    #[serde(default)]
+    pub send_transaction_service: Option<ConfigSendTransactionService>,
+
+    #[serde(default)]
+    #[deprecated(
+        note = "This option is deprecated and is ignored. Use `enable_yellowstone_shield` instead."
+    )]
+    pub features: Option<de::IgnoredAny>,
 
     /// Quic config
     pub quic: ConfigQuic,
@@ -84,6 +92,9 @@ pub struct ConfigJet {
     /// This is useful for debugging transaction handling errors, but may cause log spam if there are many invalid transactions.
     #[serde(default)]
     pub log_invalid_txn: bool,
+
+    #[serde(default)]
+    pub http_txn_trace_drain: Option<HttpTxnTraceDrainConfig>,
 }
 
 const fn default_true() -> bool {
@@ -264,10 +275,13 @@ pub struct ConfigListenSolanaLike {
     /// RPC listen addresses
     #[serde(deserialize_with = "deserialize_listen")]
     pub bind: Vec<SocketAddr>,
+    ///
+    /// If true (default), the handler will reject transactions that request preflight checks, as preflight is not supported.
+    #[serde(default = "default_true")]
+    pub fail_on_preflight: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ConfigSendTransactionService {
     /// The number of upcoming leaders to which to forward transactions
     #[deprecated(
@@ -391,12 +405,9 @@ pub struct ConfigLewisEvents {
     )]
     pub reconnect_max_interval: Duration,
 
-    /// Maximum time for the entire stream
-    #[serde(
-        default = "ConfigLewisEvents::default_stream_timeout",
-        with = "humantime_serde"
-    )]
-    pub stream_timeout: Duration,
+    #[serde(default)]
+    #[deprecated(note = "This option is deprecated and is ignored")]
+    pub stream_timeout: Option<Duration>,
 }
 
 impl ConfigLewisEvents {
@@ -442,10 +453,6 @@ impl ConfigLewisEvents {
 
     const fn default_reconnect_max_interval() -> Duration {
         Duration::from_secs(30)
-    }
-
-    const fn default_stream_timeout() -> Duration {
-        Duration::from_secs(300) // 0 means no timeout
     }
 }
 

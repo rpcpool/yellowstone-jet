@@ -337,25 +337,6 @@ pub mod rpc_solana_like {
         pub tx_handler: TransactionHandler,
     }
 
-    impl RpcServerImpl {
-        // Internal method specifically for handling VersionedTransaction directly
-        pub async fn handle_internal_transaction(
-            &self,
-            transaction: VersionedTransaction,
-            config: JetRpcSendTransactionConfig,
-        ) -> RpcResult<String /* Signature */> {
-            debug!("handling internal versioned transaction");
-            self.tx_handler
-                .handle_versioned_transaction(transaction, config)
-                .await
-                .inspect_err(|e| {
-                    let name = e.variant_name();
-                    metrics::jet::incr_versioned_txn_handler_error(name);
-                })
-                .map_err(Into::into)
-        }
-    }
-
     fn apply_simulation_performed(
         config_with_policies: &mut JetRpcSendTransactionConfig,
         extensions: &Extensions,
@@ -392,10 +373,14 @@ pub mod rpc_solana_like {
                     .ok_or_else(|| invalid_params("unsupported encoding"))?,
             )?;
             let maybe_txn_sig = transaction.signatures.first().cloned();
-            let maybe_request_id = extensions.get::<XRequestId>().map(|x| x.0.clone());
-            self.handle_internal_transaction(transaction, config_with_policies)
+            let maybe_request_id = extensions.get::<XRequestId>().map(|x| x.0);
+
+            self.tx_handler
+                .handle_versioned_transaction(transaction, config_with_policies, maybe_request_id)
                 .await
-                .inspect_err(|err| {
+                .inspect_err(|e| {
+                    let name = e.variant_name();
+                    metrics::jet::incr_versioned_txn_handler_error(name);
                     let sig = if self.log_invalid_txn {
                         if let Some(sig) = maybe_txn_sig {
                             Cow::Owned(sig.to_string())
@@ -409,11 +394,12 @@ pub mod rpc_solana_like {
                     };
                     warn!(
                         signature = %sig,
-                        x_request_id = %maybe_request_id.unwrap_or(Cow::Borrowed("unknown")),
-                        error = %err,
+                        x_request_id = %maybe_request_id.map(|x| x.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                        error = %e,
                         "send_transaction failed"
                     )
                 })
+                .map_err(Into::into)
         }
     }
 

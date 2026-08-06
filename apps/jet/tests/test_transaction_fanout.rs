@@ -1,6 +1,7 @@
 mod testkit;
 
 use {
+    futures::{StreamExt, channel::mpsc},
     solana_hash::Hash,
     solana_keypair::Keypair,
     solana_message::{VersionedMessage, v0},
@@ -12,9 +13,8 @@ use {
         sync::{Arc, RwLock as StdRwLock},
         vec,
     },
-    tokio::sync::mpsc,
     yellowstone_jet::transactions::{
-        AlwaysAllowTransactionPolicyStore, FanoutConfig, QuicGatewayBidi, SendTransactionRequest,
+        AlwaysAllowTransactionPolicyStore, FanoutConfig, JetTxnInfo, SendTransactionRequest,
         TransactionFanout, TransactionPolicyStore, UpcomingLeaderSchedule,
     },
     yellowstone_shield_store::CheckError,
@@ -38,7 +38,7 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
     )
     .expect("try new");
 
-    let wire_transaction = bincode::serialize(&tx).expect("Error getting wire_transaction");
+    let wire_transaction = wincode::serialize(&tx).expect("Error getting wire_transaction");
 
     SendTransactionRequest {
         max_retries: Some(max_resent),
@@ -46,6 +46,7 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
         wire_transaction: wire_transaction.into(),
         transaction: tx,
         policies: vec![],
+        x_request_id: None,
     }
 }
 
@@ -76,13 +77,8 @@ impl UpcomingLeaderSchedule for FakeLeaderSchedule {
 #[tokio::test]
 async fn it_should_fanout_three_times() {
     const FANOUT_FACTOR: usize = 3;
-    let (sink, source) = mpsc::unbounded_channel();
+    let (sink, source) = mpsc::unbounded();
     let (gateway_tx, mut gateway_rx) = mpsc::channel(100);
-    let (_gateway_response_tx, gateway_response_rx) = mpsc::unbounded_channel();
-    let gateway_bidi = QuicGatewayBidi {
-        sink: gateway_tx,
-        source: gateway_response_rx,
-    };
     let fake_schedule = FakeLeaderSchedule::default();
 
     let my_schedule = vec![
@@ -98,28 +94,26 @@ async fn it_should_fanout_three_times() {
         Arc::new(fake_schedule),
         Arc::new(AlwaysAllowTransactionPolicyStore),
         source,
-        gateway_bidi,
+        gateway_tx,
         FanoutConfig::Custom(FANOUT_FACTOR),
         Vec::new(),
-        None,
     );
     let _fanout_jh = tokio::spawn(async move {
         fanout.run().await;
     });
 
     let tx = create_send_transaction_request(Hash::new_unique(), 0);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
+    sink.unbounded_send(tx.clone()).unwrap();
 
     let mut actual_tx_sent = vec![];
     for pubkey in my_schedule.iter().take(FANOUT_FACTOR) {
-        let actual_tx = gateway_rx.recv().await.unwrap();
+        let actual_tx = gateway_rx.next().await.unwrap();
         assert_eq!(
             actual_tx
                 .info
                 .as_ref()
-                .and_then(|info| info.downcast_ref::<solana_signature::Signature>())
-                .copied(),
+                .and_then(|info| info.downcast_ref::<JetTxnInfo>())
+                .map(|info| info.signature),
             Some(tx.signature)
         );
         assert_eq!(actual_tx.remote_peer, *pubkey);
@@ -131,13 +125,8 @@ async fn it_should_fanout_three_times() {
 #[tokio::test]
 async fn it_should_apply_shield_policies() {
     const FANOUT_FACTOR: usize = 3;
-    let (sink, source) = mpsc::unbounded_channel();
+    let (sink, source) = mpsc::unbounded();
     let (gateway_tx, mut gateway_rx) = mpsc::channel(100);
-    let (_gateway_response_tx, gateway_response_rx) = mpsc::unbounded_channel();
-    let gateway_bidi = QuicGatewayBidi {
-        sink: gateway_tx,
-        source: gateway_response_rx,
-    };
     let fake_schedule = FakeLeaderSchedule::default();
 
     let my_schedule = vec![
@@ -166,26 +155,24 @@ async fn it_should_apply_shield_policies() {
         Arc::new(fake_schedule),
         Arc::new(policy),
         source,
-        gateway_bidi,
+        gateway_tx,
         FanoutConfig::Custom(FANOUT_FACTOR),
         Vec::new(),
-        None,
     );
     let _fanout_jh = tokio::spawn(async move {
         fanout.run().await;
     });
 
     let tx = create_send_transaction_request(Hash::new_unique(), 0);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
-    let actual_tx = gateway_rx.recv().await.unwrap();
+    sink.unbounded_send(tx.clone()).unwrap();
+    let actual_tx = gateway_rx.next().await.unwrap();
     assert!(gateway_rx.try_recv().is_err());
     assert_eq!(
         actual_tx
             .info
             .as_ref()
-            .and_then(|info| info.downcast_ref::<solana_signature::Signature>())
-            .copied(),
+            .and_then(|info| info.downcast_ref::<JetTxnInfo>())
+            .map(|info| info.signature),
         Some(tx.signature)
     );
     assert_eq!(actual_tx.remote_peer, my_schedule[2]);
@@ -194,13 +181,8 @@ async fn it_should_apply_shield_policies() {
 #[tokio::test]
 async fn it_should_support_extra_fanout() {
     const FANOUT_FACTOR: usize = 3;
-    let (sink, source) = mpsc::unbounded_channel();
+    let (sink, source) = mpsc::unbounded();
     let (gateway_tx, mut gateway_rx) = mpsc::channel(100);
-    let (_gateway_response_tx, gateway_response_rx) = mpsc::unbounded_channel();
-    let gateway_bidi = QuicGatewayBidi {
-        sink: gateway_tx,
-        source: gateway_response_rx,
-    };
     let fake_schedule = FakeLeaderSchedule::default();
 
     let extra_fanout_pubkeys = vec![Pubkey::new_unique(), Pubkey::new_unique()];
@@ -218,22 +200,20 @@ async fn it_should_support_extra_fanout() {
         Arc::new(fake_schedule),
         Arc::new(AlwaysAllowTransactionPolicyStore),
         source,
-        gateway_bidi,
+        gateway_tx,
         FanoutConfig::Custom(FANOUT_FACTOR),
         extra_fanout_pubkeys.clone(),
-        None,
     );
     let _fanout_jh = tokio::spawn(async move {
         fanout.run().await;
     });
 
     let tx = create_send_transaction_request(Hash::new_unique(), 0);
-    let tx = Arc::new(tx);
-    sink.send(Arc::clone(&tx)).unwrap();
+    sink.unbounded_send(tx.clone()).unwrap();
 
     let mut actual_tx_sent = vec![];
     for _i in 0..FANOUT_FACTOR + extra_fanout_pubkeys.len() {
-        let actual_tx = gateway_rx.recv().await.unwrap();
+        let actual_tx = gateway_rx.next().await.unwrap();
         actual_tx_sent.push(actual_tx);
     }
 

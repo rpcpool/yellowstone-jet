@@ -2,8 +2,8 @@ use {
     crate::{
         config::{TpuPortKind, TpuSenderConfig},
         core::{
-            Nothing, StakeBasedEvictionStrategy, TpuSenderResponse, TpuSenderResponseCallback,
-            TpuSenderTxn, TpuSenderTxnInfo, UpdateIdentity,
+            Nothing, StakeBasedEvictionStrategy, TpuSenderResponseCallback, TpuSenderTxn,
+            TpuSenderTxnInfo, UpdateIdentity,
         },
         rpc::{
             schedule::{
@@ -38,7 +38,6 @@ use {
         sync::Arc,
         task::{Context, Poll},
     },
-    tokio::sync::mpsc::UnboundedSender,
     tokio_util::sync::CancellationToken,
     url::Url,
     yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcBuilder, GeyserGrpcClient},
@@ -1681,11 +1680,5 @@ async fn yellowstone_tpu_deps_overseer(
             // Abort the rest
             rest.into_iter().for_each(|jh| jh.abort());
         }
-    }
-}
-
-impl TpuSenderResponseCallback for UnboundedSender<TpuSenderResponse> {
-    fn call(&self, response: TpuSenderResponse) {
-        let _ = self.send(response);
     }
 }
