@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS txn_trace
     remote_peer_addr Nullable(String),
     drop_reason Nullable(String),
     send_at_slot Nullable(UInt64),
+    drain_id Nullable(String),
     ts DateTime64(3) DEFAULT now64(3),
     INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64,
     INDEX bf_x_request_id x_request_id TYPE bloom_filter(0.01) GRANULARITY 64,
