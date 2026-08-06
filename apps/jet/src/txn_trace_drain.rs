@@ -5,7 +5,7 @@ use {
     hyper::{Method, header::CONTENT_TYPE},
     serde::{Deserialize, Serialize},
     solana_pubkey::Pubkey,
-    std::{borrow::Cow, collections::VecDeque, net::SocketAddr},
+    std::{borrow::Cow, collections::VecDeque, net::SocketAddr, sync::Arc},
     tokio::task::JoinSet,
     url::Url,
     uuid::Uuid,
@@ -90,6 +90,7 @@ pub struct HttpTxnTraceDrain<St, SolanaClientResolverT> {
     pending_ndjson_payloads: VecDeque<NdjsonPayload>,
     send_joinset: JoinSet<Result<usize, reqwest::Error>>,
     max_inflight_sends: usize,
+    drain_id: Option<Arc<str>>,
     stop: bool,
 }
 
@@ -120,6 +121,7 @@ pub struct TxnTraceEntry<'a> {
     pub remote_peer_identity: Option<Cow<'a, str>>,
     pub remote_peer_addr: Option<SocketAddr>,
     pub drop_reason: Option<&'a str>,
+    pub drain_id: Option<Cow<'a, str>>,
 }
 
 enum OneOrMany<T> {
@@ -239,13 +241,15 @@ fn get_txn_info(txn_response: &TpuSenderResponse) -> Option<OneOrMany<&JetTxnInf
     }
 }
 
-fn into_txn_trace_entry<'resp, 'info>(
+fn into_txn_trace_entry<'callsite, 'resp, 'info>(
     txn_response: &'resp TpuSenderResponse,
     one_or_many: OneOrMany<&'info JetTxnInfo>,
     solana_client_resolver: &dyn SolanaClientResolver,
+    drain_id: Option<&'callsite str>,
 ) -> OneOrMany<TxnTraceEntry<'info>>
 where
     'resp: 'info,
+    'callsite: 'info,
 {
     match txn_response {
         TpuSenderResponse::TxSent(tx_sent) => one_or_many.map(|info| TxnTraceEntry {
@@ -260,6 +264,7 @@ where
             remote_peer_identity: Some(Cow::Owned(tx_sent.remote_peer_identity.to_string())),
             remote_peer_addr: Some(tx_sent.remote_peer_addr),
             drop_reason: None,
+            drain_id: drain_id.map(Cow::Borrowed),
         }),
         TpuSenderResponse::TxFailed(tx_failed) => one_or_many.map(|info| TxnTraceEntry {
             signature: Cow::Owned(info.signature.to_string()),
@@ -273,6 +278,7 @@ where
             remote_peer_identity: Some(Cow::Owned(tx_failed.remote_peer_identity.to_string())),
             remote_peer_addr: Some(tx_failed.remote_peer_addr),
             drop_reason: None,
+            drain_id: drain_id.map(Cow::Borrowed),
         }),
         TpuSenderResponse::TxDrop(tx_drop) => {
             let many = tx_drop
@@ -293,6 +299,7 @@ where
                     )),
                     remote_peer_addr: None,
                     drop_reason: Some(tx_drop.drop_reason.as_str()),
+                    drain_id: drain_id.map(Cow::Borrowed),
                 })
                 .collect::<Vec<_>>();
             OneOrMany::Many(many)
@@ -329,31 +336,48 @@ enum PollDrain {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HttpTxnTraceDrainConfig {
+    ///
+    /// The URL of the HTTP endpoint to which transaction trace data will be sent. This should be a an HTTP endpoint that accepts POST request with NDJSON body payload.
     pub url: Url,
     pub credentials: Option<Credentials>,
+    ///
+    /// Identifier of the current Jet instance to use for events. This is used to identify the source of the events in the downstream system.
+    #[serde(default)]
+    pub drain_id: Option<String>,
+    ///
+    /// The maximum number of NDJSON lines to buffer before sending a request.
+    /// Once this limit is reached, the buffered data will be sent to the configured HTTP endpoint.
+    ///
+    /// # Note
+    ///
+    /// This is a soft limit. If the buffer is not full but the source stream is pending, the buffered data will be sent to avoid excessive latency.
     #[serde(default = "default_max_ndjson_len")]
     pub max_ndjson_len: usize,
+    ///
+    /// The maximum number of concurrent POST requests that can be in-flight at any given time. default to 10
     #[serde(default = "default_max_inflight_sends")]
     pub max_inflight_sends: usize,
 }
 
 pub const DEFAULT_MAX_NDJSON_LEN: usize = 1000;
+pub const DEFAULT_MAX_INFLIGHT_SENDS: usize = 10;
 
 const fn default_max_ndjson_len() -> usize {
     DEFAULT_MAX_NDJSON_LEN
 }
 
 const fn default_max_inflight_sends() -> usize {
-    10
+    DEFAULT_MAX_INFLIGHT_SENDS
 }
 
 impl Default for HttpTxnTraceDrainConfig {
     fn default() -> Self {
         Self {
             url: Url::parse("http://127.0.0.1:8123").unwrap(),
+            drain_id: None,
             credentials: None,
             max_ndjson_len: DEFAULT_MAX_NDJSON_LEN,
-            max_inflight_sends: 10,
+            max_inflight_sends: DEFAULT_MAX_INFLIGHT_SENDS,
         }
     }
 }
@@ -379,6 +403,7 @@ where
             pending_ndjson_payloads: VecDeque::new(),
             send_joinset: JoinSet::new(),
             max_inflight_sends: config.max_inflight_sends,
+            drain_id: config.drain_id.map(|id| Arc::from(id.into_boxed_str())),
             stop: false,
         }
     }
@@ -387,8 +412,13 @@ where
         let Some(infos) = get_txn_info(&txn_response) else {
             return;
         };
-        let txn_trace_entries =
-            into_txn_trace_entry(&txn_response, infos, &self.solana_client_resolver);
+        let drain_id = self.drain_id.clone();
+        let txn_trace_entries = into_txn_trace_entry(
+            &txn_response,
+            infos,
+            &self.solana_client_resolver,
+            drain_id.as_deref(),
+        );
 
         for entry in txn_trace_entries {
             // Serialize the entry to JSON
@@ -734,7 +764,7 @@ mod tests {
         let (response, sig) = tx_sent(true);
         let infos = get_txn_info(&response).unwrap();
         let resolver = MockSolanaClientResolver::default();
-        let result = into_txn_trace_entry(&response, infos, &resolver);
+        let result = into_txn_trace_entry(&response, infos, &resolver, None);
         let entries: Vec<_> = result.iter().collect();
 
         assert_eq!(entries.len(), 1);
@@ -752,7 +782,7 @@ mod tests {
         let (response, sig) = tx_failed(true);
         let infos = get_txn_info(&response).unwrap();
         let resolver = MockSolanaClientResolver::default();
-        let result = into_txn_trace_entry(&response, infos, &resolver);
+        let result = into_txn_trace_entry(&response, infos, &resolver, None);
         let entries: Vec<_> = result.iter().collect();
 
         assert_eq!(entries.len(), 1);
@@ -782,6 +812,7 @@ mod tests {
             pending_ndjson_payloads: VecDeque::new(),
             send_joinset: JoinSet::new(),
             max_inflight_sends: 1,
+            drain_id: None,
             stop: false,
         }
     }
