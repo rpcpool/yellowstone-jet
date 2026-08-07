@@ -5,10 +5,11 @@ use {
     serde::{Deserialize, Serialize},
     std::{
         collections::{HashMap, VecDeque},
-        num::NonZeroUsize,
+        num::{NonZeroU8, NonZeroUsize},
         path::PathBuf,
         pin::Pin,
         task::{Context, Poll},
+        time::{Duration, Instant},
     },
     yellowstone_fumarole_client::{
         FumaroleClient, FumaroleSubscribeConfig,
@@ -101,14 +102,18 @@ impl Iterator for LandedTransactionBlockIterator {
 ///
 struct LandedTransactionStream {
     inner: BlockStream,
+    block_recv_since_last_tick: usize,
     pending: VecDeque<LandedTransactionBlockIterator>,
+    last_block_received_at: Instant,
 }
 
 impl LandedTransactionStream {
-    const fn new(inner: BlockStream) -> Self {
+    fn new(inner: BlockStream) -> Self {
         Self {
             inner,
             pending: VecDeque::new(),
+            block_recv_since_last_tick: 0,
+            last_block_received_at: Instant::now(),
         }
     }
 }
@@ -124,6 +129,20 @@ impl Stream for LandedTransactionStream {
             }
             match this.inner.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(FumaroleBlockStreamEvent::Block(block)))) => {
+                    tracing::info!(
+                        slot = block.slot,
+                        "received fumarole block landed transactions"
+                    );
+                    this.block_recv_since_last_tick += 1;
+                    let now = Instant::now();
+                    if now.duration_since(this.last_block_received_at) > Duration::from_secs(5) {
+                        let block_per_second = this.block_recv_since_last_tick.div_euclid(5);
+                        tracing::info!(
+                            "block reception rate over last 5 seconds: {block_per_second}/s"
+                        );
+                        this.block_recv_since_last_tick = 0;
+                        this.last_block_received_at = now;
+                    }
                     this.pending.push_back(LandedTransactionBlockIterator {
                         slot: block.slot,
                         block: block.into_iter(),
@@ -162,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let subscribe_config = FumaroleSubscribeConfig {
-        data_channel_capacity: NonZeroUsize::new(10000).unwrap(),
+        data_channel_capacity: NonZeroUsize::new(100_000).unwrap(),
         ..Default::default()
     };
     let subscription = client

@@ -1,14 +1,44 @@
 --
--- Drains `chain_transaction_staging` of rows already covered by the enrichment refresh in
--- schema.sql (mv_landed_transactions): once a slot has been scanned for matching txn_trace
--- rows, chain_transaction_staging rows at or below that slot are safe to remove.
+-- Drains `chain_transaction_staging` of rows that can never gain a future match, using a
+-- completeness argument on the *send* side rather than trying to infer how far
+-- `chain_transaction_staging`'s own ingestion has progressed (which can't be trusted --
+-- Fumarole doesn't guarantee slot-ordered delivery, and the sink's concurrent HTTP sends can
+-- complete out of order; see mv_landed_transactions in schema.sql).
+--
+-- `send_at_slot` values arrive into jet.txn_trace (and from there, sent_transaction_pending)
+-- in roughly increasing order, with a bounded local jitter of about 64 slots (operational
+-- observation, not a hard guarantee -- revisit this constant if that assumption changes).
+-- So once max(send_at_slot) = M has been observed, every transaction jet could ever claim to
+-- have sent at slot <= M - 64 has already been captured into sent_transaction_pending -- and
+-- since a transaction can only land at or after the slot it was sent, a
+-- chain_transaction_staging row this old can never match anything new. Safe to delete,
+-- regardless of chain_transaction_staging's own arrival order.
+--
+-- IMPORTANT: must run strictly AFTER that cycle's mv_landed_transactions refresh has
+-- completed, never concurrently or before -- otherwise a just-inserted backlog row (e.g. from
+-- the sink catching up after a long outage) could be deleted before the join ever saw it.
+-- Don't just schedule this on "the same cadence" and hope the timing lines up -- run it via
+-- `clickhouse-purge-runner` (src/bin/clickhouse-purge-runner.rs), which calls
+-- `SYSTEM WAIT VIEW mv_landed_transactions` before every round of purges, so ClickHouse itself
+-- enforces the ordering rather than an external clock guessing at it.
 --
 -- This is a mutation, not a lightweight delete -- it rewrites whole parts containing matching
--- rows. Run it on the same cadence as the refresh (e.g. once a minute), not more often.
+-- rows.
 --
--- Not run by ClickHouse itself: schedule this externally (systemd timer / k8s CronJob /
--- crontab) invoking, e.g.:
+-- Note: `SELECT max(send_at_slot) FROM sent_transaction_pending` is NULL whenever pending is
+-- completely empty (e.g. a fully caught-up idle period) -- the DELETE then matches nothing
+-- that cycle rather than erroring, and resumes as soon as a new row lands in
+-- sent_transaction_pending. Benign and self-healing, not a correctness issue.
+--
+-- Written as `slot + 64 < max_send_slot` rather than `slot < max_send_slot - 64`: the two are
+-- algebraically identical, but `max_send_slot` is UInt64, and subtracting 64 from it underflows
+-- (wraps to a huge value instead of going negative) whenever that max is below 64 -- e.g. right
+-- after sent_transaction_pending starts getting its first few rows. That would make this DELETE
+-- match nearly the entire table instead of nothing. Adding to `slot` instead can't underflow.
+--
+-- Not run by ClickHouse itself: see clickhouse-purge-runner's config (`purge_scripts`), or
+-- invoke it directly for a one-off run, e.g.:
 --   clickhouse-client --connection <name> --multiquery < purge_chain_transaction_staging.sql
 --
 ALTER TABLE chain_transaction_staging
-DELETE WHERE slot < (SELECT max_slot FROM landed_transaction_max_slot);
+DELETE WHERE slot + 64 < (SELECT max(send_at_slot) FROM sent_transaction_pending);
