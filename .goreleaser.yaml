@@ -15,7 +15,7 @@ builds:
       command: build
       binary: jet
       targets:
-          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
       flags:
           - --release
           - --package=yellowstone-jet
