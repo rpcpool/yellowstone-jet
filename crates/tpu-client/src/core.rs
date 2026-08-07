@@ -62,7 +62,7 @@ use {
         any::TypeId,
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
         future,
-        net::{IpAddr, Ipv4Addr, SocketAddr},
+        net::SocketAddr,
         num::NonZeroUsize,
         pin::Pin,
         sync::{Arc, Mutex as StdMutex, atomic::AtomicU8},
@@ -3422,15 +3422,14 @@ impl TpuSenderDriverSpawner {
             key: private_key,
         });
 
+        let bind_addr = config.endpoint_bind_addr;
         let mut endpoints = vec![];
         for _ in 0..config.num_endpoints.get() {
             let endpoint = (0..config.max_local_port_binding_attempts)
                 .find_map(|_| {
-                    let (_, client_socket) = solana_net_utils::bind_in_range(
-                        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                        config.endpoint_port_range,
-                    )
-                    .ok()?;
+                    let (_, client_socket) =
+                        solana_net_utils::bind_in_range(bind_addr, config.endpoint_port_range)
+                            .ok()?;
                     Endpoint::new(
                         quinn::EndpointConfig::default(),
                         None,
@@ -3439,7 +3438,15 @@ impl TpuSenderDriverSpawner {
                     )
                     .ok()
                 })
-                .expect("Failed to create QUIC endpoint");
+                .unwrap_or_else(|| {
+                    // A non-wildcard bind address that is not configured on the host fails here
+                    // with EADDRNOTAVAIL. Abort rather than fall back to the wildcard, which
+                    // would silently source traffic from the host's primary address.
+                    panic!(
+                        "Failed to create QUIC endpoint bound to {bind_addr} in port range {:?} after {} attempts",
+                        config.endpoint_port_range, config.max_local_port_binding_attempts,
+                    )
+                });
 
             endpoints.push(endpoint);
         }

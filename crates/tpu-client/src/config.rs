@@ -3,7 +3,12 @@ use {
     serde::{Deserialize, Deserializer, de},
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_pubkey::Pubkey,
-    std::{net::SocketAddr, num::NonZeroUsize, ops::Range, time::Duration},
+    std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        num::NonZeroUsize,
+        ops::Range,
+        time::Duration,
+    },
 };
 
 ///
@@ -80,6 +85,23 @@ pub struct TpuSenderConfig {
         default = "TpuSenderConfig::default_port_range"
     )]
     pub endpoint_port_range: PortRange,
+
+    ///
+    /// Local IP address to bind the QUIC endpoints to.
+    ///
+    /// Defaults to the wildcard address, which lets the kernel pick the source address
+    /// per destination -- the historical behavior.
+    ///
+    /// Set this to a specific address when running several instances on the same host and
+    /// each one must source its traffic from its own public address. Unstaked peers are
+    /// rate-limited by source IP by the agave validator, so a distinct source address per
+    /// instance buys a distinct connection and stream budget.
+    ///
+    /// The address must already be configured on the host; the endpoints fail to bind
+    /// otherwise and startup aborts.
+    ///
+    #[serde(default = "TpuSenderConfig::default_endpoint_bind_addr")]
+    pub endpoint_bind_addr: IpAddr,
 
     ///
     /// Maximum idle timeout for QUIC connections.
@@ -296,6 +318,10 @@ impl TpuSenderConfig {
     pub const fn default_port_range() -> PortRange {
         VALIDATOR_PORT_RANGE
     }
+
+    pub const fn default_endpoint_bind_addr() -> IpAddr {
+        DEFAULT_ENDPOINT_BIND_ADDR
+    }
 }
 
 ///
@@ -318,11 +344,13 @@ pub const DEFAULT_MAX_SEND_ATTEMPT: NonZeroUsize = NonZeroUsize::new(3).unwrap()
 pub const DEFAULT_REMOTE_PEER_ADDR_WATCH_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TX_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DEFAULT_LEADER_PREDICTION_LOOKAHEAD: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+pub const DEFAULT_ENDPOINT_BIND_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 impl Default for TpuSenderConfig {
     fn default() -> Self {
         Self {
             endpoint_port_range: VALIDATOR_PORT_RANGE,
+            endpoint_bind_addr: DEFAULT_ENDPOINT_BIND_ADDR,
             max_idle_timeout: QUIC_MAX_TIMEOUT,
             max_connection_attempts: DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT,
             transaction_sender_worker_channel_capacity: DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE,
@@ -346,7 +374,10 @@ impl Default for TpuSenderConfig {
 pub mod test {
     use {
         crate::config::{TpuPortKind, TpuSenderConfig},
-        std::num::NonZeroUsize,
+        std::{
+            net::{IpAddr, Ipv4Addr},
+            num::NonZeroUsize,
+        },
     };
 
     #[test]
@@ -383,5 +414,23 @@ pub mod test {
 
         let config: super::TpuSenderConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config, expected);
+    }
+
+    #[test]
+    fn it_should_default_endpoint_bind_addr_to_wildcard() {
+        let config: TpuSenderConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config.endpoint_bind_addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn it_should_deser_endpoint_bind_addr() {
+        let yaml = r#"
+        endpoint_bind_addr: 63.254.172.225
+        "#;
+        let config: TpuSenderConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.endpoint_bind_addr,
+            IpAddr::V4(Ipv4Addr::new(63, 254, 172, 225))
+        );
     }
 }
