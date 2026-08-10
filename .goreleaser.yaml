@@ -21,12 +21,29 @@ builds:
           - --package=yellowstone-jet
           - --bin=jet
 
+    - id: clickhouse-sink
+      builder: rust
+      command: build
+      binary: clickhouse-sink
+      targets:
+          - x86_64-unknown-linux-gnu
+      flags:
+          - --release
+          - --package=jet-transaction-landing
+          - --bin=clickhouse-sink
+
 archives:
     - id: jet
       name_template: jet-linux-amd64
       formats: [binary]
       ids:
           - jet
+
+    - id: clickhouse-sink
+      name_template: clickhouse-sink-linux-amd64
+      formats: [binary]
+      ids:
+          - clickhouse-sink
 
 release:
     github:
