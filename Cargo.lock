@@ -7146,9 +7146,9 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-fumarole-client"
-version = "0.6.1-rc1+solana.3"
+version = "0.6.1-rc2+solana.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "638c182db42c34eb6b3f6dd5d5d3a9827afa772ab76e1171bcbf2211af3dbcb8"
+checksum = "9327bdd6c14b3a94deaa0362e4195b1cb819b19b33806a8858d9b2baa6b18db0"
 dependencies = [
  "async-trait",
  "bytesize",

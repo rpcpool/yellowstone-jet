@@ -110,7 +110,7 @@ solana-transaction-error = "3.0.0"
 wincode = "0.5.5"
 
 # Yellowstone
-yellowstone-fumarole-client = "0.6.1-rc1"
+yellowstone-fumarole-client = "0.6.1-rc2"
 yellowstone-grpc-client = "13.1.0"
 yellowstone-grpc-proto = "12.5.0"
 yellowstone-jet-tpu-client = { path = "crates/tpu-client", version = "0.6.0", default-features = false }

@@ -5,7 +5,7 @@ use {
     serde::{Deserialize, Serialize},
     std::{
         collections::{HashMap, VecDeque},
-        num::{NonZeroU8, NonZeroUsize},
+        num::NonZeroUsize,
         path::PathBuf,
         pin::Pin,
         task::{Context, Poll},
@@ -14,13 +14,15 @@ use {
     yellowstone_fumarole_client::{
         FumaroleClient, FumaroleSubscribeConfig,
         config::FumaroleConfig,
-        stream::{
-            BlockStream, FumaroleBlockEvent, FumaroleBlockIterator, FumaroleBlockStreamEvent,
-        },
+        proto::{CreateConsumerGroupRequest, InitialOffsetPolicy},
+        stream::{BlockStream, FumaroleBlockIterator, FumaroleBlockStreamEvent},
     },
-    yellowstone_grpc_proto::geyser::{
-        SubscribeRequest, SubscribeRequestFilterTransactions, SubscribeUpdateTransaction,
-        subscribe_update::UpdateOneof,
+    yellowstone_grpc_proto::{
+        geyser::{
+            SubscribeRequest, SubscribeRequestFilterTransactions, SubscribeUpdateTransactionStatus,
+            subscribe_update::UpdateOneof,
+        },
+        tonic::{self, Code::AlreadyExists},
     },
 };
 
@@ -65,28 +67,37 @@ struct Config {
 pub struct LandedTransactionBlockIterator {
     slot: u64,
     block: FumaroleBlockIterator,
+    txn_count: usize,
 }
 
 impl Iterator for LandedTransactionBlockIterator {
     type Item = LandedTransaction;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
+        while let Some(update) = self.block.next() {
             let slot = self.slot;
-            let update = self.block.next()?;
-            let UpdateOneof::Transaction(SubscribeUpdateTransaction { transaction, .. }) =
-                update.update_oneof?
+            let UpdateOneof::TransactionStatus(SubscribeUpdateTransactionStatus {
+                signature,
+                err,
+                ..
+            }) = update.update_oneof?
             else {
                 continue;
             };
-            let tx_info = transaction?;
-            let failed = tx_info.meta?.err.is_some();
+            self.txn_count += 1;
+            let failed = err.is_some();
             return Some(LandedTransaction {
-                signature: bs58::encode(&tx_info.signature).into_string(),
+                signature: bs58::encode(&signature).into_string(),
                 slot,
                 failed,
             });
         }
+        tracing::info!(
+            slot = self.slot,
+            txn_count = self.txn_count,
+            "finished fumarole block landed transactions"
+        );
+        None
     }
 }
 
@@ -129,10 +140,6 @@ impl Stream for LandedTransactionStream {
             }
             match this.inner.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(FumaroleBlockStreamEvent::Block(block)))) => {
-                    tracing::info!(
-                        slot = block.slot,
-                        "received fumarole block landed transactions"
-                    );
                     this.block_recv_since_last_tick += 1;
                     let now = Instant::now();
                     if now.duration_since(this.last_block_received_at) > Duration::from_secs(5) {
@@ -146,6 +153,7 @@ impl Stream for LandedTransactionStream {
                     this.pending.push_back(LandedTransactionBlockIterator {
                         slot: block.slot,
                         block: block.into_iter(),
+                        txn_count: 0,
                     });
                 }
                 Poll::Ready(Some(Ok(FumaroleBlockStreamEvent::SlotStatus(_)))) => {}
@@ -172,9 +180,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(endpoint, "connected to fumarole endpoint");
 
     let request = SubscribeRequest {
-        transactions: HashMap::from([(
-            "transactions".to_owned(),
-            SubscribeRequestFilterTransactions::default(),
+        transactions_status: HashMap::from([(
+            "jet".to_owned(),
+            SubscribeRequestFilterTransactions {
+                vote: Some(false),
+                ..Default::default()
+            },
         )]),
         commitment: Some(1), // Confirmed
         ..Default::default()
@@ -184,6 +195,23 @@ async fn main() -> anyhow::Result<()> {
         data_channel_capacity: NonZeroUsize::new(100_000).unwrap(),
         ..Default::default()
     };
+
+    let result = client
+        .create_consumer_group(CreateConsumerGroupRequest {
+            consumer_group_name: config.fumarole.subscriber_name.clone(),
+            initial_offset_policy: InitialOffsetPolicy::Latest as i32,
+            ..Default::default()
+        })
+        .await;
+
+    if let Err(e) = result {
+        if e.code() == AlreadyExists {
+            tracing::info!("consumer group already exists, continuing");
+        } else {
+            return Err(e.into());
+        }
+    };
+
     let subscription = client
         .subscribe_with_config(
             config.fumarole.subscriber_name.clone(),
@@ -193,13 +221,6 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     let (_sink, fumarole_stream) = subscription.split();
     let block_stream = fumarole_stream.block_stream();
-
-    // while let Some(Ok(block)) = block_stream.next().await {
-    //     let FumaroleBlockStreamEvent::Block(block) = block else {
-    //         continue;
-    //     };
-    //     tracing::info!(slot = block.slot, "received fumarole block landed transactions");
-    // }
 
     let source = LandedTransactionStream::new(block_stream);
 

@@ -28,8 +28,9 @@ CREATE TABLE IF NOT EXISTS landed_transactions
     INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64
 )
 -- Dedups by (landed_slot, signature) during background merges, keeping the row with the
--- latest `ts`. This is what makes it safe for mv_landed_transactions to rejoin the same
--- candidates across refreshes without accumulating duplicate rows -- see the note there.
+-- latest `ts`. Not load-bearing for mv_landed_transactions' correctness (each chain row is
+-- only ever considered once, on insert), but harmless insurance against ever recapturing the
+-- same signature twice (e.g. a future symmetric MV -- see the note on mv_landed_transactions).
 ENGINE = ReplacingMergeTree(ts)
 PARTITION BY toDate(ts)
 ORDER BY (landed_slot, signature)
@@ -99,11 +100,14 @@ CREATE TABLE IF NOT EXISTS sent_transaction_pending
     remote_peer_identity Nullable(String),
     remote_peer_addr Nullable(String),
     trace_inserted_at DateTime64(3),
-    INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64
+    INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64,
+    -- Needed for mv_landed_transactions' `send_at_slot BETWEEN ...` filter below to actually
+    -- prune granules instead of scanning the whole table on every chain insert.
+    INDEX mm_send_at_slot send_at_slot TYPE minmax GRANULARITY 4
 )
 -- Dedups by signature during background merges, keeping the row with the latest
--- trace_inserted_at. Mirrors landed_transactions' own rationale: safe to rescan jet.txn_trace
--- with a small overlap window every refresh without unbounded duplication.
+-- trace_inserted_at. Mirrors landed_transactions' own rationale: safe to recapture the same
+-- row more than once without unbounded duplication.
 ENGINE = ReplacingMergeTree(trace_inserted_at)
 PARTITION BY toDate(trace_inserted_at)
 ORDER BY signature
@@ -113,30 +117,21 @@ ORDER BY signature
 -- expiry -- see mv_landed_transactions below for why.
 TTL trace_inserted_at + INTERVAL 1 DAY;
 
--- Watermark for populating sent_transaction_pending from jet.txn_trace -- tracks "have I
--- captured this row into pending at all", independent of match status, so a slow-to-match row
--- doesn't cause every later row to be re-pulled forever. Deliberately NOT a watermark over
--- landed_transactions: that would only advance on actual matches, which is a different thing.
 --
--- Uses maxOrNull, not max: max() over an empty sent_transaction_pending doesn't reliably
--- coalesce to the epoch fallback below (observed in practice: mv_populate_sent_pending read 0
--- rows from jet.txn_trace because of this), even though trace_inserted_at is non-Nullable.
--- maxOrNull forces an explicit NULL when the table is empty, so coalesce's fallback actually
--- applies.
-CREATE OR REPLACE VIEW sent_transaction_pending_max_trace_ts AS
-SELECT maxOrNull(trace_inserted_at) AS max_ts FROM sent_transaction_pending;
-
+-- Fires the instant jet.txn_trace gets a new row (event-driven, not on a schedule) and copies
+-- "sent" rows into sent_transaction_pending. Plain (non-refreshable) MATERIALIZED VIEW: no
+-- REFRESH EVERY, no APPEND (that modifier only exists for refreshable views -- a plain MV
+-- always inserts into its target, there's no "replace" mode to opt out of), and critically no
+-- watermark at all -- it only ever sees the just-inserted block, substituted in place of
+-- jet.txn_trace, so there's no scan window to compute and no cold-start/epoch edge case to
+-- worry about (the whole class of bug the REFRESH EVERY version of this hit).
 --
--- Every minute, incrementally captures new "sent" rows from `jet.txn_trace` (which has no TTL,
--- so this capture step must stay bounded/incremental -- never a full scan) into
--- sent_transaction_pending. Only "sent" state is of interest here, so
--- `state`/`error_msg`/`drop_reason` (only populated for "failed"/"drop" trace rows) are dropped
--- rather than carried forward. Rows with a null `send_at_slot` are excluded from the whole
--- pipeline -- a "sent" trace row should always have one.
+-- Only "sent" state is of interest here, so `state`/`error_msg`/`drop_reason` (only populated
+-- for "failed"/"drop" trace rows) are dropped rather than carried forward. Rows with a null
+-- `send_at_slot` are excluded from the whole pipeline -- a "sent" trace row should always have
+-- one.
 --
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_populate_sent_pending
-REFRESH EVERY 1 MINUTE
-APPEND
 TO sent_transaction_pending
 AS
 SELECT
@@ -148,51 +143,50 @@ SELECT
 FROM txn_trace AS tt
 WHERE
     tt.state = 'sent'
-    AND tt.send_at_slot IS NOT NULL
-    -- Deliberately overlaps with rows already captured in a previous refresh (>=, not >, plus
-    -- a 30s grace margin): safe because sent_transaction_pending is a ReplacingMergeTree keyed
-    -- on signature, so re-captured rows just collapse into duplicates that merge away. A
-    -- precise, non-overlapping boundary would instead risk permanently dropping any row sharing
-    -- the exact watermark value with an already-captured row.
-    --
-    -- Written as `tt.ts + 30s >= watermark` rather than `tt.ts >= watermark - 30s`: the two are
-    -- algebraically identical, but the latter constructs a pre-1970 boundary on the cold-start
-    -- path (watermark at epoch, before anything's ever been captured). The raw DateTime64
-    -- arithmetic for that is fine (`toDateTime64(0,3) - INTERVAL 30 SECOND` is a perfectly valid
-    -- `1969-12-31 23:59:30`) -- but jet.txn_trace is PARTITION BY toDate(ts), and partition
-    -- pruning against a pre-1970 boundary has to derive a `Date` (unsigned, 1970-onward only)
-    -- from it, which can't represent that value. Observed in practice: every partition got
-    -- pruned as a result, so the very first refresh always read zero rows, the watermark never
-    -- advanced past epoch, and it stayed permanently stuck. Adding the margin to `tt.ts` instead
-    -- never constructs a pre-1970 boundary at all, regardless of how "cold" the watermark is.
-    AND tt.ts + INTERVAL 30 SECOND >= coalesce(
-        (SELECT max_ts FROM sent_transaction_pending_max_trace_ts),
-        toDateTime64(0, 3)
-    );
+    AND tt.send_at_slot IS NOT NULL;
 
 --
--- Every minute, joins every currently-pending "sent" transaction against
--- `chain_transaction_staging` (raw on-chain transactions observed via the Fumarole block
--- stream, with no claim yet about whether jet sent them) and appends matches. No upper bound on
--- `lt.slot`: every block reaching `chain_transaction_staging` is already complete (the ingester
--- only flushes a slot once Fumarole signals it ended) and a single INSERT is atomic, so there's
--- no still-filling-block risk to guard against here.
+-- Fires the instant chain_transaction_staging gets a new row (i.e. whenever clickhouse-sink.rs
+-- posts a batch) and tries to match just that batch against sent_transaction_pending. Plain
+-- MATERIALIZED VIEW, same reasoning as mv_populate_sent_pending above: no schedule, no
+-- watermark table, no purge-ordering dance -- the join happens synchronously as part of the
+-- insert itself, so by the time any purge could possibly run, this has already had its one
+-- shot at matching.
 --
--- Deliberately NO lower bound / time-window exclusion on either side of this join: both
--- `sent_transaction_pending` and `chain_transaction_staging` are kept small by their own
--- purges (see purge_sent_transaction_pending.sql and purge_chain_transaction_staging.sql), not
--- by rescanning only "recent" rows here. `chain_transaction_staging`'s own arrival order can't
--- be trusted for windowing anyway -- Fumarole doesn't guarantee slot-ordered delivery, and the
--- sink's concurrent HTTP sends (see http_ndjson_drain.rs) can complete out of order -- so any
--- boundary keyed off its own `slot`/insertion order can silently and permanently drop a late,
--- out-of-order row. Instead, completeness is derived entirely from the send side: see the
--- purge scripts for why that's safe.
+-- The `send_at_slot BETWEEN ...` filter is a performance bound, not a correctness one -- the
+-- join is by exact signature, which is correct on its own regardless of slot distance. It
+-- exists purely so this doesn't need to hash the entire sent_transaction_pending table on every
+-- single insert:
+--   - Lower bound: batch_min_slot - 64. `send_at_slot` values arrive with a bounded local
+--     jitter of about 64 slots (same operational constant as purge_chain_transaction_staging.sql
+--     -- keep the two in sync). Nothing with send_at_slot below this could plausibly correspond
+--     to anything landing in this batch.
+--   - Upper bound: batch_max_slot, with NO margin subtracted. A transaction can never be sent
+--     after it lands (send_at_slot <= landed_slot, always), so this is a hard, exact bound, not
+--     an approximation -- subtracting a margin here would wrongly exclude fast-landing
+--     transactions sent just a few slots before the batch's highest slot.
+--
+-- Both bounds are derived from THIS batch's own slot range, not a global "how far has real
+-- time progressed" watermark -- which is what makes this naturally robust to
+-- clickhouse-sink.rs being down for hours: backlog data arriving late carries its own old,
+-- small slot values, so the bound it computes stays anchored to that same old era, matching
+-- wherever the corresponding sent_transaction_pending rows still are (they're never purged for
+-- being merely "old" -- see purge_sent_transaction_pending.sql).
+--
+-- Known gap: this only fires on chain_transaction_staging inserts, not on
+-- sent_transaction_pending inserts. A transaction that lands fast enough to beat its own
+-- sent-side capture (now near-instant, since mv_populate_sent_pending is event-driven too, but
+-- not provably zero-latency) would arrive here before sent_transaction_pending has the
+-- matching row yet, and there's no retry -- this MV only ever gets one shot per chain row. The
+-- symmetric MV (trigger on sent_transaction_pending, look up chain_transaction_staging) would
+-- close that gap; add it if this race turns out to matter in practice.
 --
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_landed_transactions
-REFRESH EVERY 1 MINUTE
-APPEND
 TO landed_transactions
 AS
+WITH
+    (SELECT min(slot) FROM chain_transaction_staging) AS batch_min_slot,
+    (SELECT max(slot) FROM chain_transaction_staging) AS batch_max_slot
 SELECT
     lt.signature AS signature,
     lt.failed AS failed,
@@ -201,6 +195,7 @@ SELECT
     tt.send_at_slot AS send_at_slot,
     lt.slot AS landed_slot,
     tt.trace_inserted_at AS trace_inserted_at
-FROM sent_transaction_pending AS tt
-ANY INNER JOIN chain_transaction_staging AS lt ON lt.signature = tt.signature
+FROM chain_transaction_staging AS lt
+ANY INNER JOIN sent_transaction_pending AS tt ON tt.signature = lt.signature
+WHERE tt.send_at_slot BETWEEN batch_min_slot - 64 AND batch_max_slot
 SETTINGS join_use_nulls = 1;
