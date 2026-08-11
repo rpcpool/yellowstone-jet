@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "16.0.1"
+version = "16.1.0"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
