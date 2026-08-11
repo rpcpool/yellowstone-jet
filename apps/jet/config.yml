@@ -106,6 +106,13 @@ quic:
   endpoint_port_range:
     start: 35000
     end: 45000
+  # Local address the outbound QUIC endpoints bind to.
+  # Default is 0.0.0.0, which lets the kernel pick the source address.
+  # Set this when several jet instances share a host and each must source its traffic from
+  # its own public address -- unstaked peers are rate-limited by source IP by the validator,
+  # so one address per instance buys one connection/stream budget per instance.
+  # The address must already be configured on the host or startup fails.
+  # endpoint_bind_addr: 0.0.0.0
 
   # You can override the default TPU information for specific remote peers.
   # This will override any gossip information regarding tpu information of remote peers.
