@@ -140,7 +140,7 @@ pub struct HttpTxnTraceDrainConfig {
     pub max_inflight_sends: usize,
 }
 
-pub const DEFAULT_MAX_NDJSON_LEN: usize = 1000;
+pub const DEFAULT_MAX_NDJSON_LEN: usize = 2000;
 pub const DEFAULT_MAX_INFLIGHT_SENDS: usize = 10;
 
 const fn default_max_ndjson_len() -> usize {
@@ -440,7 +440,7 @@ mod tests {
     async fn buffer_entry_flushes_once_buffer_reaches_max_size() {
         let mut drain = test_drain(stream::empty::<LandedTransaction>(), 1);
 
-        drain.buffer_entry(&entry("sig1", 1, false));
+        drain.buffer_entry(entry("sig1", 1, false));
 
         assert_eq!(
             drain.ndjson_len, 0,

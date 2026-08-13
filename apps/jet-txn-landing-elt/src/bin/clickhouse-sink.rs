@@ -22,7 +22,7 @@ use {
             SubscribeRequest, SubscribeRequestFilterTransactions, SubscribeUpdateTransactionStatus,
             subscribe_update::UpdateOneof,
         },
-        tonic::{self, Code::AlreadyExists},
+        tonic::Code::AlreadyExists,
     },
 };
 
@@ -56,12 +56,21 @@ struct MyFumaroleConfig {
     subscriber_name: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigTracing {
+    #[serde(default)]
+    json: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
     fumarole: MyFumaroleConfig,
     /// Name of the persistent Fumarole subscriber to use.
     drain: HttpTxnTraceDrainConfig,
+    #[serde(default)]
+    tracing: ConfigTracing,
 }
 
 pub struct LandedTransactionBlockIterator {
@@ -169,11 +178,10 @@ impl Stream for LandedTransactionStream {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
     let args = Args::parse();
     let config_str = std::fs::read_to_string(&args.config)?;
     let config: Config = serde_yaml::from_str(&config_str)?;
+    jet_transaction_landing::setup_tracing(config.tracing.json)?;
 
     let endpoint = config.fumarole.fumarole.endpoint.clone();
     let mut client = FumaroleClient::connect(config.fumarole.fumarole.clone()).await?;

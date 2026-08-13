@@ -1,6 +1,6 @@
 [package]
 name = "jet-transaction-landing"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 description = "ELT Tools to monitor and track transaction landed by jet."
 edition.workspace = true
 authors.workspace = true
@@ -24,7 +24,7 @@ serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["ansi", "env-filter"] }
+tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"] }
 url = { workspace = true, features = ["serde"] }
 yellowstone-fumarole-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
