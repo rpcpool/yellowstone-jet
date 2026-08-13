@@ -1,6 +1,6 @@
 [package]
 name = "jet-transaction-landing"
-version = "0.1.0-rc2"
+version = "0.1.0"
 description = "ELT Tools to monitor and track transaction landed by jet."
 edition.workspace = true
 authors.workspace = true
