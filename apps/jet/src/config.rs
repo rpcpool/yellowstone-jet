@@ -95,6 +95,10 @@ pub struct ConfigJet {
 
     #[serde(default)]
     pub http_txn_trace_drain: Option<HttpTxnTraceDrainConfig>,
+
+    /// Raw QUIC transaction ingress (mTLS-authenticated). Disabled unless configured.
+    #[serde(default)]
+    pub raw_quic_server: Option<ConfigRawQuicServer>,
 }
 
 const fn default_true() -> bool {
@@ -327,6 +331,77 @@ pub struct ConfigQuic {
 impl ConfigQuic {
     const fn default_connection_eviction_grace() -> Duration {
         DEFAULT_LEADER_DURATION
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigRawQuicServer {
+    /// Raw QUIC listen address
+    #[serde(deserialize_with = "deserialize_listen")]
+    pub bind: Vec<SocketAddr>,
+
+    /// Haproxy-style directory of PEM cert+key bundles for jet's own server identity.
+    /// One bundle per file (cert chain then key, concatenated), or matching `.crt`/`.key`
+    /// pairs. A file named `default.pem` (or, absent that, the lexicographically-first
+    /// bundle) is used when a connection has no/unmatched SNI.
+    pub server_cert_dir: PathBuf,
+
+    /// Where the pinned customer allow-list comes from.
+    pub client_allowlist: ConfigClientAllowlistSource,
+
+    /// Poll cadence for both the server cert directory and the client allow-list source.
+    #[serde(
+        default = "ConfigRawQuicServer::default_reload_interval",
+        with = "humantime_serde"
+    )]
+    pub reload_interval: Duration,
+
+    /// Dev/debug only: accept any presented client certificate, bypassing the allow-list
+    /// entirely. Defaults to `false`; leaving this on in production defeats the point of
+    /// the allow-list.
+    #[serde(default)]
+    pub debug_accept_any_client: bool,
+
+    /// Number of independent QUIC endpoints (each with its own socket, endpoint state,
+    /// and accept loop) to bind on `bind`, sharing it via `SO_REUSEPORT`. Every
+    /// `Connection`/stream/`Incoming` derived from a single `quinn::Endpoint` shares
+    /// that endpoint's internal state behind synchronization, which becomes a
+    /// contention point under high connection/stream churn; sharding removes it.
+    /// Defaults to 1 (no sharding, no `SO_REUSEPORT`). Unix-only above 1.
+    #[serde(default = "ConfigRawQuicServer::default_workers")]
+    pub workers: NonZeroUsize,
+}
+
+impl ConfigRawQuicServer {
+    const fn default_reload_interval() -> Duration {
+        Duration::from_secs(5)
+    }
+
+    const fn default_workers() -> NonZeroUsize {
+        unsafe { NonZeroUsize::new_unchecked(1) }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ConfigClientAllowlistSource {
+    /// One cert per file; the accepted label defaults to the filename stem.
+    Dir { path: PathBuf },
+    /// GETs `url`, expecting a JSON array of `{ "label": ..., "cert_pem": ... }` objects.
+    Http {
+        url: Url,
+        #[serde(
+            default = "ConfigClientAllowlistSource::default_http_timeout",
+            with = "humantime_serde"
+        )]
+        timeout: Duration,
+    },
+}
+
+impl ConfigClientAllowlistSource {
+    const fn default_http_timeout() -> Duration {
+        Duration::from_secs(10)
     }
 }
 

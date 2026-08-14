@@ -1,0 +1,34 @@
+[package]
+name = "jet-quic-client"
+version = "0.1.0"
+description = "Reference client for jet's raw QUIC transaction ingress"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+futures = { workspace = true }
+prost = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true, features = ["aws-lc-rs"] }
+rustls-pki-types = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+
+[build-dependencies]
+protobuf-src = { workspace = true }
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

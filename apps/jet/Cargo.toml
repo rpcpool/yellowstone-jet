@@ -27,6 +27,7 @@ http-body-util = { workspace = true }
 humantime-serde = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true, features = ["full"] }
+jet-quic-client = { workspace = true }
 jsonrpsee = { workspace = true, features = ["http-client", "macros", "server"] }
 lazy_static = { workspace = true }
 libc = { workspace = true }
@@ -41,10 +42,13 @@ rand = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 retry = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
+rustls-pki-types = { workspace = true, features = ["std"] }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+socket2 = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
@@ -106,6 +110,11 @@ protobuf-src = { workspace = true }
 tonic-build = { workspace = true }
 tonic-prost-build = { workspace = true }
 vergen = { workspace = true, features = ["build", "rustc"] }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package jet_topology;
+
+service JetQuicServiceDiscovery {
+    rpc SubscribeTopology(stream TopologyRequest) returns (stream TopologyUpdate);
+}
+
+message JetEndpoint {
+    string ip_address = 1;
+    uint32 port = 2;
+    string name = 3;
+    uint64 stake = 4;
+}
+
+message Ping {
+    uint64 id = 1;
+}
+
+message Pong {
+    uint64 id = 1;
+}
+
+message TopologyRequest {
+    oneof request {
+        // Request the current topology snapshot.
+        Ping ping = 1;
+    }
+}
+
+message TopologySnapshot {
+    repeated JetEndpoint jet_endpoints = 1;
+    uint64 created_at_unix_timestamp = 2;
+}
+
+// Snapshot of the topology at a given point in time.
+message TopologyUpdate {
+    oneof update {
+        TopologySnapshot topology_snapshot = 1;
+        Pong pong = 2;
+    }
+}

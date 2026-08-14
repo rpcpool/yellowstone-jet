@@ -432,6 +432,41 @@ async fn run_jet(
     )
     .await;
 
+    let raw_quic_reload_handle = if let Some(raw_quic_config) = config.raw_quic_server {
+        let reload_interval = raw_quic_config.reload_interval;
+        let (raw_quic_servers, reload_handle) =
+            yellowstone_jet::raw_quic::from_config(&raw_quic_config, tx_handler.clone())
+                .await
+                .expect("failed to start raw quic server");
+        let reload_handle = Arc::new(reload_handle);
+
+        for (worker_id, raw_quic_server) in raw_quic_servers.into_iter().enumerate() {
+            let raw_quic_shutdown = jet_cancellation_token.child_token();
+            let ah = tg.spawn(async move {
+                raw_quic_server
+                    .with_shutdown(raw_quic_shutdown.cancelled_owned())
+                    .await;
+            });
+            tg_name_map.insert(ah.id(), format!("raw_quic_server_{worker_id}"));
+        }
+
+        let poll_handle = Arc::clone(&reload_handle);
+        let poll_shutdown = jet_cancellation_token.child_token();
+        let ah = tg.spawn(async move {
+            yellowstone_jet::raw_quic::poll_reload_loop(
+                poll_handle,
+                reload_interval,
+                poll_shutdown.cancelled_owned(),
+            )
+            .await;
+        });
+        tg_name_map.insert(ah.id(), "raw_quic_reload_poll".to_string());
+
+        Some(reload_handle)
+    } else {
+        None
+    };
+
     let mut sigint = signal(SignalKind::interrupt())?;
 
     let jet_identity_group_syncer =
@@ -443,6 +478,7 @@ async fn run_jet(
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group_syncer))),
             allowed_identity: config.identity.expected,
             cluster_tpu_info: Arc::new(cluster_tpu_info),
+            raw_quic_reload: raw_quic_reload_handle,
         },
     )
     .await;

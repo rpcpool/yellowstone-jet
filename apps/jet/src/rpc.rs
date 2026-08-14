@@ -2,6 +2,7 @@ use {
     crate::{
         cluster_tpu_info::ClusterTpuInfoProvider,
         http_tx_handler::{HttpTransactionHandler, HttpTxMiddleware},
+        raw_quic::RawQuicReloadHandle,
         transaction_handler::TransactionHandler,
     },
     anyhow::Context as _,
@@ -36,6 +37,8 @@ pub enum RpcServerType {
         jet_identity_updater: Arc<Mutex<Box<dyn JetIdentityUpdater + Send + 'static>>>,
         allowed_identity: Option<Pubkey>,
         cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
+        /// `None` when the raw QUIC server is not configured for this jet instance.
+        raw_quic_reload: Option<Arc<RawQuicReloadHandle>>,
     },
 
     SolanaLike {
@@ -66,6 +69,7 @@ impl RpcServer {
                 jet_identity_updater,
                 allowed_identity,
                 cluster_tpu_info,
+                raw_quic_reload,
             } => {
                 use rpc_admin::{RpcServer, RpcServerImpl};
                 let health_jet_identity_updater = Arc::clone(&jet_identity_updater);
@@ -113,6 +117,7 @@ impl RpcServer {
                                 allowed_identity,
                                 jet_identity_updater,
                                 cluster_tpu_info,
+                                raw_quic_reload,
                             }
                             .into_rpc(),
                         )
@@ -173,11 +178,12 @@ impl RpcServer {
 pub mod rpc_admin {
     use {
         super::invalid_params,
-        crate::cluster_tpu_info::ClusterTpuInfoProvider,
+        crate::{cluster_tpu_info::ClusterTpuInfoProvider, raw_quic::RawQuicReloadHandle},
         jsonrpsee::{
             core::{RpcResult, async_trait},
             proc_macros::rpc,
         },
+        serde::{Deserialize, Serialize},
         solana_keypair::{Keypair, read_keypair_file},
         solana_pubkey::Pubkey,
         solana_signer::Signer,
@@ -206,6 +212,21 @@ pub mod rpc_admin {
 
         #[method(name = "resetIdentity")]
         async fn reset_identity(&self) -> RpcResult<()>;
+
+        /// Forces an immediate rescan of the raw QUIC server's certificate directory and
+        /// client allow-list, out-of-band from their normal poll cadence. Errors if the
+        /// raw QUIC server is not configured on this jet instance.
+        #[method(name = "reloadRawQuicCerts")]
+        async fn reload_raw_quic_certs(&self) -> RpcResult<RawQuicReloadResult>;
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RawQuicReloadResult {
+        pub cert_ok: bool,
+        pub cert_error: Option<String>,
+        /// `None` when running in `debug_accept_any_client` mode (no allow-list to reload).
+        pub allowlist_entries: Option<usize>,
+        pub allowlist_error: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -220,6 +241,7 @@ pub mod rpc_admin {
         pub allowed_identity: Option<Pubkey>,
         pub jet_identity_updater: Arc<Mutex<Box<dyn JetIdentityUpdater + Send + 'static>>>,
         pub cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
+        pub raw_quic_reload: Option<Arc<RawQuicReloadHandle>>,
     }
 
     #[async_trait]
@@ -273,6 +295,25 @@ pub mod rpc_admin {
                 .update_identity(random_identity)
                 .await;
             Ok(())
+        }
+
+        async fn reload_raw_quic_certs(&self) -> RpcResult<RawQuicReloadResult> {
+            let Some(handle) = &self.raw_quic_reload else {
+                return Err(invalid_params("raw quic server is not configured"));
+            };
+            let report = handle.reload().await;
+            Ok(RawQuicReloadResult {
+                cert_ok: report.cert_reloaded.is_ok(),
+                cert_error: report.cert_reloaded.err().map(|e| e.to_string()),
+                allowlist_entries: report
+                    .allowlist_result
+                    .as_ref()
+                    .and_then(|r| r.as_ref().ok().copied()),
+                allowlist_error: report
+                    .allowlist_result
+                    .and_then(|r| r.err())
+                    .map(|e| e.to_string()),
+            })
         }
     }
 

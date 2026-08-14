@@ -231,6 +231,33 @@ pub mod jet {
             HistogramOpts::new("http_tx_request_duration_seconds", "HTTP transaction endpoint request duration in seconds")
                 .buckets(vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0])
         ).unwrap();
+
+        static ref RAW_QUIC_CONNECTIONS: IntCounterVec = IntCounterVec::new(
+            Opts::new("raw_quic_connections_total", "Total raw QUIC connection attempts"),
+            &["result"]
+        ).unwrap();
+
+        static ref RAW_QUIC_TLS_REJECT: IntCounter = IntCounter::new(
+            "raw_quic_tls_reject_total", "Total raw QUIC handshakes rejected at the TLS layer"
+        ).unwrap();
+
+        static ref RAW_QUIC_TX_RECEIVED: IntCounterVec = IntCounterVec::new(
+            Opts::new("raw_quic_tx_received_total", "Total transactions received over the raw QUIC ingress"),
+            &["status"]
+        ).unwrap();
+
+        static ref RAW_QUIC_ALLOWLIST_SIZE: IntGauge = IntGauge::new(
+            "raw_quic_allowlist_size", "Current number of entries in the raw QUIC client allow-list"
+        ).unwrap();
+
+        static ref RAW_QUIC_ALLOWLIST_RELOAD: IntCounterVec = IntCounterVec::new(
+            Opts::new("raw_quic_allowlist_reload_total", "Total raw QUIC allow-list/cert reload attempts"),
+            &["result"]
+        ).unwrap();
+
+        static ref RAW_QUIC_ALLOWLIST_FETCH_ERRORS: IntCounter = IntCounter::new(
+            "raw_quic_allowlist_fetch_errors_total", "Total failed fetches of the raw QUIC client allow-list source"
+        ).unwrap();
     }
 
     pub fn init() {
@@ -278,6 +305,12 @@ pub mod jet {
             register!(VERSIONED_TXN_HANDLE_ERROR);
             register!(HTTP_TX_REQUESTS);
             register!(HTTP_TX_REQUEST_DURATION);
+            register!(RAW_QUIC_CONNECTIONS);
+            register!(RAW_QUIC_TLS_REJECT);
+            register!(RAW_QUIC_TX_RECEIVED);
+            register!(RAW_QUIC_ALLOWLIST_SIZE);
+            register!(RAW_QUIC_ALLOWLIST_RELOAD);
+            register!(RAW_QUIC_ALLOWLIST_FETCH_ERRORS);
 
             yellowstone_jet_tpu_client::prom::register_metrics(&REGISTRY);
             grpc_lewis::prom::register_metrics(&REGISTRY);
@@ -320,6 +353,30 @@ pub mod jet {
         TRANSACTION_DESERIALIZE_ERRORS
             .with_label_values(&[error_type])
             .inc();
+    }
+
+    pub fn raw_quic_connections_inc(result: &str) {
+        RAW_QUIC_CONNECTIONS.with_label_values(&[result]).inc();
+    }
+
+    pub fn raw_quic_tls_reject_inc() {
+        RAW_QUIC_TLS_REJECT.inc();
+    }
+
+    pub fn raw_quic_tx_received_inc(status: &str) {
+        RAW_QUIC_TX_RECEIVED.with_label_values(&[status]).inc();
+    }
+
+    pub fn raw_quic_allowlist_size_set(size: usize) {
+        RAW_QUIC_ALLOWLIST_SIZE.set(size as i64);
+    }
+
+    pub fn raw_quic_allowlist_reload_inc(result: &str) {
+        RAW_QUIC_ALLOWLIST_RELOAD.with_label_values(&[result]).inc();
+    }
+
+    pub fn raw_quic_allowlist_fetch_error_inc() {
+        RAW_QUIC_ALLOWLIST_FETCH_ERRORS.inc();
     }
 
     pub fn quic_set_identity_expected(identity: Pubkey) {

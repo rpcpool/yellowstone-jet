@@ -20,6 +20,7 @@ pub mod metrics;
 pub mod payload;
 pub mod proto;
 pub mod quic_client;
+pub mod raw_quic;
 pub mod recent_leader_slot;
 pub mod rpc;
 pub mod solana;

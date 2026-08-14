@@ -83,6 +83,7 @@ pub async fn set_identity_if_expected() {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: Some(expected_identity.pubkey()),
             cluster_tpu_info: mock_cluster_info,
+            raw_quic_reload: None,
         },
     )
     .await;
@@ -131,6 +132,7 @@ pub async fn set_identity_wrong_keypair() {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: Some(expected_identity.pubkey()),
             cluster_tpu_info: mock_cluster_info,
+            raw_quic_reload: None,
         },
     )
     .await;
@@ -174,6 +176,7 @@ pub async fn set_identity_from_file() {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: Some(expected_identity.pubkey()),
             cluster_tpu_info: mock_cluster_info,
+            raw_quic_reload: None,
         },
     )
     .await;
@@ -222,6 +225,7 @@ pub async fn reset_identity_to_random() {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: Some(expected_identity.pubkey()),
             cluster_tpu_info: mock_cluster_info,
+            raw_quic_reload: None,
         },
     )
     .await;
@@ -278,6 +282,7 @@ pub async fn test_get_latest_slot() {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: None,
             cluster_tpu_info: Arc::new(mock_cluster_info),
+            raw_quic_reload: None,
         },
     )
     .await;
@@ -335,6 +340,7 @@ pub async fn test_get_latest_slot_updates() {
             jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
             allowed_identity: None,
             cluster_tpu_info: updatable_mock,
+            raw_quic_reload: None,
         },
     )
     .await;
