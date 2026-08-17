@@ -29,17 +29,23 @@
 //! yourself, rather than fanning many tasks out over one shared connection/endpoint and
 //! paying quinn's internal lock contention for it.
 
+pub mod discovery;
 mod dns;
 mod tls;
-pub mod topology;
 
 pub use {
     dns::{DnsResolver, ResolveError, StdDnsResolver, set_resolver},
     tls::{RootCertStore, ServerVerification, default_client_config, load_cert_pem, load_key_pem},
 };
 use {
+    futures::{FutureExt, Sink, Stream, StreamExt, future::BoxFuture},
+    quinn::SendStream,
     rustls::Error as RustlsError,
-    std::net::{IpAddr, Ipv4Addr, SocketAddr},
+    std::{
+        future::Future,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        task::{Context, Poll},
+    },
 };
 
 /// ALPN protocol id negotiated with jet's raw QUIC ingress. Must match the server side.
@@ -166,8 +172,100 @@ impl RawJetTransactionSender {
         wire_transaction: &[u8],
     ) -> Result<(), SendTransactionError> {
         let mut send = self.connection.quinn_conn.open_uni().await?;
-        send.write_all(wire_transaction).await?;
-        Ok(())
+        let mut remaining_attempt = 3u8;
+        loop {
+            let result = send.write_all(wire_transaction).await;
+            remaining_attempt = remaining_attempt.saturating_sub(1);
+            match result {
+                Ok(_) => return Ok(()),
+                Err(we) => {
+                    if remaining_attempt == 0 {
+                        return Err(we.into());
+                    }
+                    match we {
+                        quinn::WriteError::Stopped(_) => continue,
+                        quinn::WriteError::ConnectionLost(connection_error) => {
+                            return Err(connection_error.into());
+                        }
+                        quinn::WriteError::ClosedStream => {
+                            continue;
+                        }
+                        quinn::WriteError::ZeroRttRejected => {
+                            panic!("jet does not supports zero rtt")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn into_drain<St>(self, source: St) -> JetTransactionDrain<St, St::Item>
+    where
+        St: Stream + Unpin + Send + 'static,
+        St::Item: AsRef<[u8]> + Send,
+    {
+        JetTransactionDrain::new(source, self)
+    }
+}
+
+pub struct JetTransactionDrain<St, T> {
+    inner: BoxFuture<'static, Result<(), DrainLoopError<St, T>>>,
+}
+
+impl<St, T> JetTransactionDrain<St, T>
+where
+    St: Stream<Item = T> + Unpin + Send + 'static,
+    T: AsRef<[u8]> + Send,
+{
+    pub fn new(source: St, raw_sender: RawJetTransactionSender) -> Self {
+        let drain_loop_fut = jet_transaction_drain_loop(source, raw_sender);
+        JetTransactionDrain {
+            inner: drain_loop_fut.boxed(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("error in transaction drain loop")]
+pub struct DrainLoopError<St, T> {
+    pub stream_to_rescue: St,
+    pub failed_on_txn: T,
+    #[source]
+    pub send_error: SendTransactionError,
+}
+
+async fn jet_transaction_drain_loop<St>(
+    mut stream: St,
+    mut raw_sender: RawJetTransactionSender,
+) -> Result<(), DrainLoopError<St, St::Item>>
+where
+    St: Stream + Unpin,
+    St::Item: AsRef<[u8]>,
+{
+    while let Some(item) = stream.next().await {
+        if let Err(e) = raw_sender.send_transaction(item.as_ref()).await {
+            return Err(DrainLoopError {
+                stream_to_rescue: stream,
+                failed_on_txn: item,
+                send_error: e,
+            });
+        }
+    }
+    Ok(())
+}
+
+impl<St, T> Future for JetTransactionDrain<St, T>
+where
+    St: Stream<Item = T> + Unpin,
+{
+    type Output = Result<(), DrainLoopError<St, T>>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        this.inner.poll_unpin(cx)
     }
 }
 
@@ -222,3 +320,7 @@ impl From<String> for ServerAddr {
 /// The port [`ServerAddr::Named`] resolves to when none is given — the standard TLS
 /// port.
 pub const DEFAULT_SERVER_PORT: u16 = 443;
+
+pub trait ServiceDiscovery {}
+
+pub struct JetQuicSink {}

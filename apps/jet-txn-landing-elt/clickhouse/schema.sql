@@ -92,6 +92,86 @@ WHERE
     ts >= toStartOfMinute(now()) - INTERVAL 1 MINUTE
     AND ts < toStartOfMinute(now());
 
+CREATE TABLE IF NOT EXISTS txn_trace_success_rate_1m
+(
+    window_start DateTime64(3),
+    n UInt64,
+    n_sent UInt64,
+    n_failed UInt64,
+    n_drop UInt64,
+    success_rate Float64
+)
+ENGINE = MergeTree
+PARTITION BY toDate(window_start)
+ORDER BY window_start
+-- Same rollup-table rationale as landed_transaction_slot_latency_1m: one row per
+-- 1-minute window instead of per trace row, so this stays small regardless of traffic.
+TTL window_start + INTERVAL 180 DAY;
+
+--
+-- One-time backfill for txn_trace_success_rate_1m -- same rationale as
+-- landed_transaction_slot_latency_1m's REFRESH EVERY caveat: a materialized view like
+-- this only ever computes windows from its creation forward, so this fills in every
+-- 1-minute window that already has data in txn_trace as of whenever this migration is
+-- applied.
+--
+-- Run this once, and BEFORE creating the materialized view below: it excludes the
+-- still-in-progress current minute (`ts < toStartOfMinute(now())`), leaving that
+-- boundary window for the view's own first scheduled tick to capture. Creating the
+-- view first would instead race this backfill's `now()` against the view's first
+-- refresh over that same boundary minute, risking a duplicated row -- this table is a
+-- plain MergeTree, not deduplicating, so a duplicate here doesn't get merged away on
+-- its own.
+--
+INSERT INTO txn_trace_success_rate_1m
+SELECT
+    toStartOfMinute(ts) AS window_start,
+    count() AS n,
+    countIf(state = 'sent') AS n_sent,
+    countIf(state = 'failed') AS n_failed,
+    countIf(state = 'drop') AS n_drop,
+    countIf(state = 'sent') / count() AS success_rate
+FROM txn_trace
+WHERE ts < toStartOfMinute(now())
+GROUP BY window_start
+ORDER BY window_start;
+
+--
+-- Every minute, summarizes the *previous* (just-completed) 1-minute window of
+-- txn_trace into one row -- same window logic as mv_landed_transaction_slot_latency_1m
+-- above. No FINAL needed here (unlike the landed_transactions-based views above):
+-- txn_trace is a plain (non-Replacing) MergeTree -- each row is one jet-side send
+-- decision/attempt, never revised in place, so there's nothing to deduplicate.
+--
+-- "Success" here is jet's own send outcome (state = 'sent': jet forwarded the
+-- transaction onward) -- a different question from on-chain execution success, which
+-- is what landed_transaction_success_rate_1m-style aggregates would cover instead (see
+-- mv_landed_transaction_slot_latency_1m's FROM clause for that data source). `failed`
+-- (jet tried to send and the send itself failed) and `drop` (jet decided not to send
+-- it at all -- see mv_populate_sent_pending's notes on drop_reason) are kept as
+-- separate counts rather than collapsed into one "not ok" bucket, since they're
+-- different failure modes worth telling apart on a dashboard.
+--
+-- success_rate is `nan` for any window with zero trace rows (n = 0) -- ClickHouse's
+-- `/` is float division, so 0/0 is `nan` rather than throwing.
+--
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_txn_trace_success_rate_1m
+REFRESH EVERY 1 MINUTE
+APPEND
+TO txn_trace_success_rate_1m
+AS
+SELECT
+    toStartOfMinute(now()) - INTERVAL 1 MINUTE AS window_start,
+    count() AS n,
+    countIf(state = 'sent') AS n_sent,
+    countIf(state = 'failed') AS n_failed,
+    countIf(state = 'drop') AS n_drop,
+    countIf(state = 'sent') / count() AS success_rate
+FROM txn_trace
+WHERE
+    ts >= toStartOfMinute(now()) - INTERVAL 1 MINUTE
+    AND ts < toStartOfMinute(now());
+
 
 CREATE TABLE IF NOT EXISTS sent_transaction_pending
 (

@@ -3,8 +3,10 @@ syntax = "proto3";
 package jet_topology;
 
 service JetQuicServiceDiscovery {
+    //rpc GetTopology() returns (TopologySnapshot) {};
     rpc SubscribeTopology(stream TopologyRequest) returns (stream TopologyUpdate);
 }
+
 
 message JetEndpoint {
     string ip_address = 1;

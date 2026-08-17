@@ -1,5 +1,5 @@
 use {
-    jet_quic_client::{JetQuicClient, JetQuicClientConfig, ServerVerification},
+    jet_quic_client::{JetQuicClientConfig, JetQuicSink, ServerVerification},
     rcgen::{CertifiedKey, generate_simple_self_signed},
     rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     solana_hash::Hash,
@@ -145,7 +145,7 @@ fn client_config(addr: SocketAddr, customer: &Customer) -> JetQuicClientConfig {
 /// surface either as `connect()` itself failing, or as the connection failing shortly
 /// after on first use — both are checked here.
 async fn assert_rejected(addr: SocketAddr, customer: &Customer) {
-    match JetQuicClient::connect(client_config(addr, customer)).await {
+    match JetQuicSink::connect(client_config(addr, customer)).await {
         Err(_) => {}
         Ok(client) => {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -166,7 +166,7 @@ async fn allow_listed_client_connects_and_sends_transaction() {
     let addr = server.local_addr().expect("local addr");
     let handle = tokio::spawn(server.serve());
 
-    let client = JetQuicClient::connect(client_config(addr, &customer))
+    let client = JetQuicSink::connect(client_config(addr, &customer))
         .await
         .expect("allow-listed client should connect");
 
@@ -208,7 +208,7 @@ async fn reload_picks_up_allowlist_changes() {
     let addr = server.local_addr().expect("local addr");
     let handle = tokio::spawn(server.serve());
 
-    JetQuicClient::connect(client_config(addr, &customer))
+    JetQuicSink::connect(client_config(addr, &customer))
         .await
         .expect("customer-a should be accepted from the initial load");
 
@@ -230,7 +230,7 @@ async fn debug_accept_any_client_bypasses_allowlist() {
     let addr = server.local_addr().expect("local addr");
     let handle = tokio::spawn(server.serve());
 
-    JetQuicClient::connect(client_config(addr, &customer))
+    JetQuicSink::connect(client_config(addr, &customer))
         .await
         .expect("debug_accept_any_client should accept any cert");
 
@@ -254,7 +254,7 @@ async fn with_shutdown_stops_accepting_new_connections() {
     });
 
     // Confirm the server accepts connections before shutdown.
-    JetQuicClient::connect(client_config(addr, &customer))
+    JetQuicSink::connect(client_config(addr, &customer))
         .await
         .expect("connect before shutdown");
 
@@ -267,7 +267,7 @@ async fn with_shutdown_stops_accepting_new_connections() {
     // The endpoint is now closed; a new connection attempt must fail.
     let result = timeout(
         Duration::from_secs(2),
-        JetQuicClient::connect(client_config(addr, &customer)),
+        JetQuicSink::connect(client_config(addr, &customer)),
     )
     .await;
     assert!(
@@ -331,7 +331,7 @@ async fn multiple_workers_share_the_same_address_via_reuse_port() {
     // A handful of independent connections should all succeed, regardless of which
     // shard's socket the kernel happens to route each one to.
     for _ in 0..4 {
-        JetQuicClient::connect(client_config(addr, &customer))
+        JetQuicSink::connect(client_config(addr, &customer))
             .await
             .expect("connect to a sharded raw quic server");
     }

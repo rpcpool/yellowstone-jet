@@ -17,6 +17,12 @@ DROP TABLE IF EXISTS sent_transaction_pending;
 DROP VIEW IF EXISTS mv_landed_transaction_slot_latency_1m;
 DROP TABLE IF EXISTS landed_transaction_slot_latency_1m;
 
+-- Reads from txn_trace, but doesn't write to or depend on any table below -- txn_trace
+-- itself isn't created by this file (see docker/clickhouse/init/01-schema.sql), so
+-- there's nothing here to drop it in order relative to.
+DROP VIEW IF EXISTS mv_txn_trace_success_rate_1m;
+DROP TABLE IF EXISTS txn_trace_success_rate_1m;
+
 DROP VIEW IF EXISTS landed_transaction_slot_latency;
 
 DROP TABLE IF EXISTS landed_transactions;
