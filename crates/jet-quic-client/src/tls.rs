@@ -1,6 +1,9 @@
 //! TLS: the client identity we present, how we validate jet's server certificate, and
 //! building the `quinn::ClientConfig` that ties both together.
 
+use std::time::Duration;
+
+use quinn::{IdleTimeout, TransportConfig};
 pub use rustls::RootCertStore;
 use {
     crate::ConnectError,
@@ -41,6 +44,22 @@ pub fn default_client_config(
 ) -> Result<quinn::ClientConfig, ConnectError> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let verifier = build_server_verifier(server_verification, Arc::clone(&provider))?;
+
+
+    let transport_config = {
+        let mut res = TransportConfig::default();
+
+        let max_idle_timeout = IdleTimeout::try_from(Duration::from_secs(20))
+            .expect("Failed to set QUIC max idle timeout");
+        res.max_idle_timeout(Some(max_idle_timeout));
+        res.keep_alive_interval(Some(Duration::from_secs(2)));
+        // We don't want fairness : https://github.com/quinn-rs/quinn/pull/2002
+        // Fairness use round-robin scheduling to write stream data into the next frame.
+        // Disabling fairness makes that once a stream starts to write it won't be interrupted by round-robin.
+        // This reduce the time the receive the (fin) "end" of a transaction, thus reducing latency.
+        res.send_fairness(false);
+        res
+    };
 
     let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_safe_default_protocol_versions()

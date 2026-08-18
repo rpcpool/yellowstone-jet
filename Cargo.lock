@@ -2171,6 +2171,7 @@ dependencies = [
  "prost",
  "protobuf-src",
  "quinn",
+ "rand 0.9.5",
  "rcgen",
  "rustls",
  "rustls-pki-types",

@@ -38,13 +38,11 @@ pub use {
     tls::{RootCertStore, ServerVerification, default_client_config, load_cert_pem, load_key_pem},
 };
 use {
-    futures::{FutureExt, Sink, Stream, StreamExt, future::BoxFuture},
-    quinn::SendStream,
+    futures::{FutureExt, Stream, StreamExt, future::BoxFuture},
     rustls::Error as RustlsError,
     std::{
         future::Future,
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        task::{Context, Poll},
     },
 };
 
@@ -172,7 +170,8 @@ impl RawJetTransactionSender {
         wire_transaction: &[u8],
     ) -> Result<(), SendTransactionError> {
         let mut send = self.connection.quinn_conn.open_uni().await?;
-        let mut remaining_attempt = 3u8;
+        const MAX_SEND_ATTEMPT: u8 = 3;
+        let mut remaining_attempt = MAX_SEND_ATTEMPT;
         loop {
             let result = send.write_all(wire_transaction).await;
             remaining_attempt = remaining_attempt.saturating_sub(1);
@@ -321,6 +320,4 @@ impl From<String> for ServerAddr {
 /// port.
 pub const DEFAULT_SERVER_PORT: u16 = 443;
 
-pub trait ServiceDiscovery {}
 
-pub struct JetQuicSink {}
