@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "16.1.0"
+version = "16.2.0"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
@@ -9,6 +9,16 @@ homepage.workspace = true
 repository.workspace = true
 publish = false
 rust-version.workspace = true
+
+[features]
+###
+### SIMD-0296 raises Solana's max transaction size from 1232 to 4096 bytes -- enable
+### this once the cluster jet is targeting has activated it. Forwards to tpu-client's
+### own `simd-0296` feature, which is what actually resizes `PACKET_DATA_SIZE`; jet's
+### own base58/base64 max-encoded-length checks in `solana.rs` read that same constant,
+### so this one switch keeps both in sync.
+###
+simd-0296 = ["yellowstone-jet-tpu-client/simd-0296"]
 
 [dependencies]
 arc-swap = { workspace = true }
