@@ -43,7 +43,7 @@ use {
     yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcBuilder, GeyserGrpcClient},
 };
 
-pub const DEFAULT_TPU_SENDER_CHANNEL_CAPACITY: usize = 100_000;
+pub const DEFAULT_TPU_SENDER_CHANNEL_CAPACITY: usize = 1000;
 
 ///
 /// Configuration object for [`YellowstoneTpuSender`].

@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet-tpu-client"
-version = "0.6.0"
+version = "0.7.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -64,6 +64,12 @@ yellowstone-grpc = [
 ]
 shield = ["dep:yellowstone-shield-store"]
 intg-testing = []
+###
+### SIMD-0296 raises Solana's max transaction size from 1232 to 4096 bytes -- enable
+### this once the cluster you're targeting has activated it, to size `PACKET_DATA_SIZE`
+### (and the `accept_tx` size check that uses it) accordingly.
+###
+simd-0296 = []
 
 [dependencies]
 async-trait = { workspace = true }

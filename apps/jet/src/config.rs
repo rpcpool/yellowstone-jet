@@ -16,7 +16,7 @@ use {
         str::FromStr,
     },
     tokio::{fs, time::Duration},
-    yellowstone_jet_tpu_client::{config::TpuSenderConfig, core::DEFAULT_LEADER_DURATION},
+    yellowstone_jet_tpu_client::{config::TpuSenderConfig, core::DEFAULT_EVICTION_GRACE_DURATION},
     yellowstone_shield_store::{
         PolicyStoreConfig, PolicyStoreGrpcConfig, PolicyStoreRpcConfig, ShieldStoreCommitmentLevel,
     },
@@ -326,7 +326,7 @@ pub struct ConfigQuic {
 
 impl ConfigQuic {
     const fn default_connection_eviction_grace() -> Duration {
-        DEFAULT_LEADER_DURATION
+        DEFAULT_EVICTION_GRACE_DURATION
     }
 }
 

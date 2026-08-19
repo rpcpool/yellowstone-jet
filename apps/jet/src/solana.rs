@@ -4,17 +4,29 @@ use {
     jsonrpsee::core::RpcResult,
     solana_bincode::limited_deserialize,
     solana_nonce::NONCED_TX_MARKER_IX_INDEX,
-    solana_packet::PACKET_DATA_SIZE,
     solana_pubkey::Pubkey,
     solana_system_interface::instruction::SystemInstruction,
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status_client_types::TransactionBinaryEncoding,
     std::any::type_name,
     wincode::{SchemaRead, config::DefaultConfig},
+    yellowstone_jet_tpu_client::core::PACKET_DATA_SIZE,
 };
 
-const MAX_BASE58_SIZE: usize = 1683; // Golden, bump if PACKET_DATA_SIZE changes
-const MAX_BASE64_SIZE: usize = 1644; // Golden, bump if PACKET_DATA_SIZE changes
+// Golden, bump if PACKET_DATA_SIZE changes (see the `simd-0296` feature: it resizes
+// PACKET_DATA_SIZE from 1232 to 4096, so both max-encoded-length pairs below move
+// together with it). Each is the worst-case encoded length for a `PACKET_DATA_SIZE`-byte
+// payload: base58's worst case is the all-0xFF byte string (maximizes the encoded
+// integer, and thus the digit count); base64 is the fixed `ceil(n / 3) * 4`.
+#[cfg(not(feature = "simd-0296"))]
+const MAX_BASE58_SIZE: usize = 1683;
+#[cfg(not(feature = "simd-0296"))]
+const MAX_BASE64_SIZE: usize = 1644;
+
+#[cfg(feature = "simd-0296")]
+const MAX_BASE58_SIZE: usize = 5594;
+#[cfg(feature = "simd-0296")]
+const MAX_BASE64_SIZE: usize = 5464;
 pub fn decode_and_deserialize<T>(
     encoded: String,
     encoding: TransactionBinaryEncoding,
