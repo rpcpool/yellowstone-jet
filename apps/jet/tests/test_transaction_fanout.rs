@@ -20,7 +20,7 @@ use {
     yellowstone_shield_store::CheckError,
 };
 
-pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTransactionRequest {
+pub fn create_send_transaction_request(hash: Hash) -> SendTransactionRequest {
     let fake_wallet_keypair1 = Keypair::new();
     let fake_wallet_keypair2 = Keypair::new();
     let instructions = vec![transfer(
@@ -41,12 +41,12 @@ pub fn create_send_transaction_request(hash: Hash, max_resent: usize) -> SendTra
     let wire_transaction = wincode::serialize(&tx).expect("Error getting wire_transaction");
 
     SendTransactionRequest {
-        max_retries: Some(max_resent),
         signature: tx.signatures[0],
         wire_transaction: wire_transaction.into(),
-        transaction: tx,
         policies: vec![],
         x_request_id: None,
+        durable_nonce: None,
+        recent_blockhash: hash,
     }
 }
 
@@ -102,7 +102,7 @@ async fn it_should_fanout_three_times() {
         fanout.run().await;
     });
 
-    let tx = create_send_transaction_request(Hash::new_unique(), 0);
+    let tx = create_send_transaction_request(Hash::new_unique());
     sink.unbounded_send(tx.clone()).unwrap();
 
     let mut actual_tx_sent = vec![];
@@ -163,7 +163,7 @@ async fn it_should_apply_shield_policies() {
         fanout.run().await;
     });
 
-    let tx = create_send_transaction_request(Hash::new_unique(), 0);
+    let tx = create_send_transaction_request(Hash::new_unique());
     sink.unbounded_send(tx.clone()).unwrap();
     let actual_tx = gateway_rx.next().await.unwrap();
     assert!(gateway_rx.try_recv().is_err());
@@ -208,7 +208,7 @@ async fn it_should_support_extra_fanout() {
         fanout.run().await;
     });
 
-    let tx = create_send_transaction_request(Hash::new_unique(), 0);
+    let tx = create_send_transaction_request(Hash::new_unique());
     sink.unbounded_send(tx.clone()).unwrap();
 
     let mut actual_tx_sent = vec![];

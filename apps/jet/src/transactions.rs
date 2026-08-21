@@ -6,6 +6,7 @@ use {
     bytes::Bytes,
     futures::{Sink, SinkExt, Stream, StreamExt},
     solana_clock::{MAX_PROCESSING_AGE, Slot},
+    solana_hash::Hash,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_transaction::versioned::VersionedTransaction,
@@ -49,11 +50,11 @@ pub struct JetTxnInfo {
 #[derive(Debug, Clone)]
 pub struct SendTransactionRequest {
     pub signature: Signature,
-    pub transaction: VersionedTransaction,
     pub wire_transaction: Bytes,
-    pub max_retries: Option<usize>,
     pub policies: Vec<Pubkey>,
     pub x_request_id: Option<Uuid>,
+    pub recent_blockhash: Hash,
+    pub durable_nonce: Option<Pubkey>,
 }
 
 pub struct DropExpiredTransactions<St, BH> {
@@ -85,7 +86,7 @@ where
             let maybe_tx = futures::ready!(this.inner.poll_next_unpin(cx));
             if let Some(tx) = maybe_tx {
                 metrics::sts_received_inc();
-                let durable_nonce = get_durable_nonce(&tx.transaction);
+                let durable_nonce = tx.durable_nonce;
                 if durable_nonce.is_some() {
                     tracing::trace!(
                         %tx.signature,
@@ -100,7 +101,7 @@ where
                     .unwrap_or(0);
                 let last_valid_block_height = this
                     .blockheight_service
-                    .get_block_height(tx.transaction.message.recent_blockhash())
+                    .get_block_height(&tx.recent_blockhash)
                     .unwrap_or(0)
                     + MAX_PROCESSING_AGE as u64;
 
