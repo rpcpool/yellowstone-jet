@@ -1,7 +1,7 @@
 use {
     crate::{
         blockhash_queue::BlockHeightService, cluster_tpu_info::ClusterTpuInfo,
-        metrics::jet as metrics, solana::get_durable_nonce, util::CommitmentLevel,
+        metrics::jet as metrics, util::CommitmentLevel,
     },
     bytes::Bytes,
     futures::{Sink, SinkExt, Stream, StreamExt},
@@ -9,7 +9,6 @@ use {
     solana_hash::Hash,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
-    solana_transaction::versioned::VersionedTransaction,
     std::{collections::HashSet, sync::Arc},
     tokio::sync::mpsc::{self},
     uuid::Uuid,
