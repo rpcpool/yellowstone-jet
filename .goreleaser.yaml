@@ -20,6 +20,7 @@ builds:
           - --release
           - --package=yellowstone-jet
           - --bin=jet
+          - --features=simd-0296
 
     - id: clickhouse-sink
       builder: rust
