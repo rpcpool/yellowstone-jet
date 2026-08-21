@@ -1,9 +1,13 @@
 use {
     bytes::{BufMut, Bytes, BytesMut},
-    futures::{Stream, StreamExt},
+    futures::Sink,
     hyper::{Method, header::CONTENT_TYPE},
     serde::{Deserialize, Serialize},
-    std::collections::VecDeque,
+    std::{
+        collections::VecDeque,
+        pin::Pin,
+        task::{Context, Poll},
+    },
     tokio::task::JoinSet,
     url::Url,
 };
@@ -69,18 +73,31 @@ struct SendOk {
     ndjson_lines_sent: usize,
 }
 
-pub struct HttpTxnTraceDrain<St> {
+///
+/// A `Sink` that batches whatever is fed into it as NDJSON lines and POSTs them to a
+/// Clickhouse HTTP endpoint. Items are pushed in from the outside (e.g. via `SinkExt::send`,
+/// `feed`, or `send_all`) rather than pulled from an owned source -- this lets one upstream be
+/// split across several `HttpNdJsonDrain`s (one per destination table) without needing a
+/// `Stream`-level fanout combinator.
+///
+/// `Sink::Item` is generic over any `IntoIterator` whose elements are `Serialize` (see the
+/// `Sink` impl below), not over a single `Serialize` value directly -- one `start_send` call
+/// (e.g. a whole Fumarole block's worth of transactions) unpacks into one ndjson line per
+/// element. Serializing the whole collection as a single item would instead put it on the wire
+/// as one JSON array literal per line; `JSONEachRow` only tolerates exactly one such top-level
+/// array per INSERT, so batching more than one collection into the same request would make
+/// Clickhouse reject the payload outright.
+///
+pub struct HttpNdJsonSink {
     url: Url,
     credentials: Option<Credentials>,
     client: reqwest::Client,
-    source: St,
     ndjson_buffer: BytesMut,
     ndjson_len: usize,
     max_ndjson_len: usize,
     pending_ndjson_payloads: VecDeque<NdjsonPayload>,
     send_joinset: JoinSet<Result<SendOk, reqwest::Error>>,
     max_inflight_sends: usize,
-    stop: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,18 +121,6 @@ impl std::io::Write for BytesMutWriter<'_> {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
-}
-
-enum PollDrain {
-    Pending,
-    NeedFlush,
-    ///
-    /// A payload was already queued from a previous round; the source was not polled this call,
-    /// so no new progress was made (unlike `NeedFlush`, which means the source just produced
-    /// data that filled the buffer).
-    ///
-    AlreadyFlushable,
-    Done,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,20 +167,22 @@ impl Default for HttpTxnTraceDrainConfig {
     }
 }
 
-impl<St> HttpTxnTraceDrain<St> {
-    pub fn with_config(source: St, config: HttpTxnTraceDrainConfig) -> Self {
+impl HttpNdJsonSink {
+    pub fn with_config(config: HttpTxnTraceDrainConfig) -> Self {
         Self {
             url: config.url,
             credentials: config.credentials,
             client: reqwest::Client::new(),
-            source,
             ndjson_buffer: BytesMut::new(),
             ndjson_len: 0,
             max_ndjson_len: config.max_ndjson_len,
             pending_ndjson_payloads: VecDeque::new(),
             send_joinset: JoinSet::new(),
-            max_inflight_sends: config.max_inflight_sends,
-            stop: false,
+            // A limit of 0 would mean `poll_ready` could never observe spare capacity and
+            // `spawn_send_payload` could never spawn anything, i.e. the sink would accept
+            // items forever without ever sending them. Clamp to 1 so that misconfiguration
+            // degrades to "send one at a time" instead of a silent stall.
+            max_inflight_sends: config.max_inflight_sends.max(1),
         }
     }
 
@@ -226,7 +233,8 @@ impl<St> HttpTxnTraceDrain<St> {
         Ok(())
     }
 
-    fn buffer_entry<T: Serialize>(&mut self, entry: T) {
+    /// Appends a single item as its own ndjson line.
+    fn buffer_one<T: Serialize>(&mut self, entry: T) {
         let mut writer = BytesMutWriter {
             bufmut: &mut self.ndjson_buffer,
         };
@@ -239,153 +247,124 @@ impl<St> HttpTxnTraceDrain<St> {
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to serialize LandedTransaction: {}", e);
+                tracing::error!("Failed to serialize ndjson entry: {}", e);
             }
+        }
+    }
+
+    /// Unpacks one `start_send` item into its individual elements, each buffered as its own
+    /// ndjson line -- see the `Sink` impl below for why this matters.
+    fn buffer_entries<I>(&mut self, entries: I)
+    where
+        I: IntoIterator,
+        I::Item: Serialize,
+    {
+        for entry in entries {
+            self.buffer_one(entry);
+        }
+    }
+
+    ///
+    /// Spawns a send for the next queued payload if there's room, then makes progress on
+    /// exactly one in-flight send (logging success/failure). Returns `Ready(Ok(()))` if the
+    /// caller should re-check its own condition and loop again, `Pending` if there is nothing
+    /// further to do until the registered waker fires, or `Ready(Err(_))` on a fatal transport
+    /// error.
+    ///
+    fn poll_advance(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), HttpTxnTraceDrainError>> {
+        self.spawn_send_payload()?;
+        match self.send_joinset.poll_join_next(cx) {
+            Poll::Ready(Some(Ok(Ok(send_ok)))) => {
+                let SendOk {
+                    send_at_timestamp,
+                    ndjson_lines_sent: lines_sent,
+                } = send_ok;
+                tracing::info!(
+                    "Successfully sent {} lines in {:?}",
+                    lines_sent,
+                    send_at_timestamp.elapsed()
+                );
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Some(Ok(Err(e)))) => {
+                if let Some(status) = e.status() {
+                    tracing::error!("Failed to send landed txn payload: HTTP status {}", status);
+                    Poll::Ready(Ok(()))
+                } else {
+                    Poll::Ready(Err(HttpTxnTraceDrainError::ReqwestError(e)))
+                }
+            }
+            Poll::Ready(Some(Err(e))) => {
+                Poll::Ready(Err(HttpTxnTraceDrainError::SendTaskFailed(e)))
+            }
+            // Nothing in flight to wait on. Given `spawn_send_payload` just ran, this only
+            // happens when `pending_ndjson_payloads` was already empty too (a non-zero
+            // `max_inflight_sends` -- enforced by `with_config` -- would otherwise have spawned
+            // it), so the caller's own condition is already satisfied; let it re-check rather
+            // than block forever with no waker source.
+            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
 
-impl<St> HttpTxnTraceDrain<St>
+impl<Item> Sink<Item> for HttpNdJsonSink
 where
-    St: Stream + Unpin,
-    St::Item: IntoIterator,
-    <St::Item as IntoIterator>::Item: Serialize,
+    Item: IntoIterator,
+    Item::Item: Serialize,
 {
-    fn poll_drain_source(&mut self, cx: &mut std::task::Context<'_>) -> PollDrain {
-        if !self.pending_ndjson_payloads.is_empty() {
-            return PollDrain::AlreadyFlushable;
-        }
-        // Once the source has signaled completion, never poll it again: many `Stream`
-        // implementations (e.g. `futures::stream::unfold`) panic if polled after returning
-        // `None`, and there is nothing more to read regardless.
-        if self.stop {
-            return PollDrain::Done;
-        }
-        loop {
-            match self.source.poll_next_unpin(cx) {
-                std::task::Poll::Ready(Some(item)) => {
-                    for entry in item {
-                        self.buffer_entry(entry);
-                    }
-                    if !self.pending_ndjson_payloads.is_empty() {
-                        return PollDrain::NeedFlush;
-                    }
-                }
-                std::task::Poll::Ready(None) => {
-                    self.stop = true;
-                    return PollDrain::Done;
-                }
-                std::task::Poll::Pending => return PollDrain::Pending,
-            }
-        }
-    }
-}
+    type Error = HttpTxnTraceDrainError;
 
-impl<St> Future for HttpTxnTraceDrain<St>
-where
-    St: Stream + Unpin,
-    St::Item: IntoIterator,
-    <St::Item as IntoIterator>::Item: Serialize,
-{
-    type Output = Result<(), HttpTxnTraceDrainError>;
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
+    ///
+    /// Ready as long as (in-flight sends) + (payloads already queued waiting for a send slot)
+    /// stays below `max_inflight_sends` -- treating a queued-but-unspawned payload as consuming
+    /// capacity too, so the queue can't grow without bound while sends are slow.
+    ///
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
         loop {
-            let mut is_drainable = false;
-            match this.poll_drain_source(cx) {
-                PollDrain::NeedFlush => {
-                    // The source was just polled and produced data that filled the buffer:
-                    // genuine new progress, so no waker was registered for it and it's worth
-                    // looping to see if more is synchronously available.
-                    is_drainable = true;
-                }
-                PollDrain::AlreadyFlushable => {
-                    // A payload was already queued from a previous round and the source was not
-                    // touched this call -- no new progress here. Whether to keep looping is
-                    // entirely up to the JoinSet outcome below.
-                }
-                PollDrain::Done => {
-                    this.queue_for_sending_if_any();
-                    // Mark the drain as stopped, but continue to flush any remaining payloads.
-                }
-                PollDrain::Pending => {
-                    // When pending is returned, the waker has been registered.
-                    // Note: we don't actually wait to build the biggest payload possible,
-                    // we just flush when the buffer is full or when the source is pending.
-                    // This make data available to the consumer faster.
-                    this.queue_for_sending_if_any();
-                }
+            let capacity = this
+                .max_inflight_sends
+                .saturating_sub(this.pending_ndjson_payloads.len());
+            if this.send_joinset.len() < capacity {
+                return Poll::Ready(Ok(()));
             }
-
-            this.spawn_send_payload()?;
-
-            match this.send_joinset.poll_join_next(cx) {
-                std::task::Poll::Ready(Some(Ok(Ok(send_ok)))) => {
-                    let SendOk {
-                        send_at_timestamp,
-                        ndjson_lines_sent: lines_sent,
-                    } = send_ok;
-                    // No waker registered.
-                    // Successfully sent the payload
-                    let send_latency = send_at_timestamp.elapsed();
-                    tracing::info!(
-                        "Successfully sent {} lines of landed txn payload in {:?}",
-                        lines_sent,
-                        send_latency
-                    );
-                }
-                std::task::Poll::Ready(Some(Ok(Err(e)))) => {
-                    if let Some(status) = e.status() {
-                        tracing::error!(
-                            "Failed to send landed txn payload: HTTP status {}",
-                            status
-                        );
-                    } else {
-                        return std::task::Poll::Ready(Err(HttpTxnTraceDrainError::ReqwestError(
-                            e,
-                        )));
-                    }
-                }
-                std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Err(HttpTxnTraceDrainError::SendTaskFailed(e)));
-                }
-                std::task::Poll::Ready(None) => {
-                    // The JoinSet is empty, so `poll_join_next` did NOT register a waker
-                    // (there is nothing in flight to wait on).
-                    if this.stop && this.pending_ndjson_payloads.is_empty() {
-                        return std::task::Poll::Ready(Ok(()));
-                    }
-                    if !is_drainable {
-                        // Nothing in flight and nothing new happened this round: we're
-                        // purely waiting on the source, whose waker was already registered
-                        // by `poll_drain_source` (we only get here via its `Done` or
-                        // `Pending` case).
-                        return std::task::Poll::Pending;
-                    }
-                }
-                std::task::Poll::Pending => {
-                    // The JoinSet is non-empty and registered a waker for the next task
-                    // completion.
-                    if !is_drainable {
-                        return std::task::Poll::Pending;
-                    }
-                }
+            match this.poll_advance(cx) {
+                Poll::Ready(Ok(())) => continue,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
             }
         }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Item) -> Result<(), Self::Error> {
+        self.get_mut().buffer_entries(item);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        this.queue_for_sending_if_any();
+        loop {
+            if this.pending_ndjson_payloads.is_empty() && this.send_joinset.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            match this.poll_advance(cx) {
+                Poll::Ready(Ok(())) => continue,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        <Self as Sink<Item>>::poll_flush(self, cx)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use {
-        super::*,
-        futures::stream,
-        std::task::{Context, Waker},
-    };
+    use {super::*, futures::SinkExt, std::task::Waker};
 
     #[derive(Debug, Clone, Serialize)]
     struct LandedTransaction {
@@ -402,27 +381,25 @@ mod tests {
         }
     }
 
-    fn test_drain<St>(source: St, max_ndjson_buffer_size: usize) -> HttpTxnTraceDrain<St> {
-        HttpTxnTraceDrain {
+    fn test_drain(max_ndjson_buffer_size: usize, max_inflight_sends: usize) -> HttpNdJsonSink {
+        HttpNdJsonSink {
             url: Url::parse("http://127.0.0.1:1").unwrap(),
             credentials: None,
             client: reqwest::Client::new(),
-            source,
             ndjson_buffer: BytesMut::new(),
             ndjson_len: 0,
             max_ndjson_len: max_ndjson_buffer_size,
             pending_ndjson_payloads: VecDeque::new(),
             send_joinset: JoinSet::new(),
-            max_inflight_sends: 1,
-            stop: false,
+            max_inflight_sends: max_inflight_sends.max(1),
         }
     }
 
     #[tokio::test]
-    async fn buffer_entry_appends_one_ndjson_line() {
-        let mut drain = test_drain(stream::empty::<LandedTransaction>(), 100);
+    async fn buffer_one_appends_one_ndjson_line() {
+        let mut drain = test_drain(100, 1);
 
-        drain.buffer_entry(entry("sig1", 42, false));
+        drain.buffer_one(entry("sig1", 42, false));
 
         assert_eq!(drain.ndjson_len, 1);
         assert!(drain.pending_ndjson_payloads.is_empty());
@@ -437,10 +414,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buffer_entry_flushes_once_buffer_reaches_max_size() {
-        let mut drain = test_drain(stream::empty::<LandedTransaction>(), 1);
+    async fn buffer_one_flushes_once_buffer_reaches_max_size() {
+        let mut drain = test_drain(1, 1);
 
-        drain.buffer_entry(entry("sig1", 1, false));
+        drain.buffer_one(entry("sig1", 1, false));
 
         assert_eq!(
             drain.ndjson_len, 0,
@@ -452,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_for_sending_if_any_moves_buffered_lines_into_a_payload() {
-        let mut drain = test_drain(stream::empty::<LandedTransaction>(), 100);
+        let mut drain = test_drain(100, 1);
         drain.ndjson_buffer.extend_from_slice(b"{}\n");
         drain.ndjson_len = 1;
 
@@ -466,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_for_sending_if_any_is_noop_on_empty_buffer() {
-        let mut drain = test_drain(stream::empty::<LandedTransaction>(), 100);
+        let mut drain = test_drain(100, 1);
 
         drain.queue_for_sending_if_any();
 
@@ -478,63 +455,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_drain_source_reports_already_flushable_without_polling_when_already_pending() {
-        struct PanicsIfPolled;
-        impl Stream for PanicsIfPolled {
-            type Item = Vec<LandedTransaction>;
-            fn poll_next(
-                self: std::pin::Pin<&mut Self>,
-                _cx: &mut Context<'_>,
-            ) -> std::task::Poll<Option<Self::Item>> {
-                panic!("source should not be polled while a payload is already pending");
-            }
-        }
+    async fn with_config_clamps_zero_max_inflight_sends_to_one() {
+        let drain = HttpNdJsonSink::with_config(HttpTxnTraceDrainConfig {
+            max_inflight_sends: 0,
+            ..Default::default()
+        });
+        assert_eq!(drain.max_inflight_sends, 1);
+    }
 
-        let mut drain = test_drain(PanicsIfPolled, 100);
+    #[tokio::test]
+    async fn poll_ready_is_immediately_ready_when_idle() {
+        let mut drain = test_drain(100, 2);
+        let mut cx = poll_cx();
+        assert!(matches!(
+            Sink::<Vec<LandedTransaction>>::poll_ready(Pin::new(&mut drain), &mut cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    #[tokio::test]
+    async fn poll_ready_blocks_once_inflight_plus_pending_reach_the_limit() {
+        let mut drain = test_drain(100, 1);
         drain.pending_ndjson_payloads.push_back(NdjsonPayload {
             data: Bytes::from_static(b"{}\n"),
             len: 1,
         });
+        drain
+            .send_joinset
+            .spawn(std::future::pending::<Result<SendOk, reqwest::Error>>());
 
         let mut cx = poll_cx();
         assert!(matches!(
-            drain.poll_drain_source(&mut cx),
-            PollDrain::AlreadyFlushable
+            Sink::<Vec<LandedTransaction>>::poll_ready(Pin::new(&mut drain), &mut cx),
+            Poll::Pending
         ));
     }
 
     #[tokio::test]
-    async fn poll_drain_source_drains_the_stream_and_reports_done() {
-        let mut drain = test_drain(stream::empty::<Vec<LandedTransaction>>(), 100);
+    async fn start_send_buffers_without_touching_the_joinset() {
+        let mut drain = test_drain(100, 1);
 
-        let mut cx = poll_cx();
-        assert!(matches!(drain.poll_drain_source(&mut cx), PollDrain::Done));
-        assert!(drain.stop);
+        Pin::new(&mut drain)
+            .start_send(vec![entry("sig1", 1, false)])
+            .unwrap();
+
+        assert_eq!(drain.ndjson_len, 1);
+        assert!(drain.send_joinset.is_empty());
     }
 
-    #[tokio::test]
-    async fn poll_drain_source_stops_early_once_a_response_fills_the_buffer() {
-        let first = entry("sig1", 1, false);
-        let second = entry("sig2", 2, false);
-        // Each poll of the outer stream yields its own single-entry batch, so filling the
-        // buffer on the first batch bails out before the second batch is ever polled.
-        let mut drain = test_drain(stream::iter(vec![vec![first], vec![second]]), 1);
-
-        let mut cx = poll_cx();
-        assert!(matches!(
-            drain.poll_drain_source(&mut cx),
-            PollDrain::NeedFlush
-        ));
-        // Only the first item should have been consumed before bailing out to flush.
-        assert_eq!(drain.pending_ndjson_payloads.len(), 1);
-    }
-
-    /// Runs `poll()` on a separate thread and waits (with a bound) for it to return, instead of
-    /// `.await`-ing it directly: if `poll()` regresses into a busy-loop, it never yields, so an
-    /// `.await` on the same thread would hang the test runner forever. A background thread lets
-    /// the timeout actually fire.
+    /// Runs `poll_ready`/`poll_flush` on a separate thread and waits (with a bound) for it to
+    /// return `Pending`, instead of `.await`-ing it directly: if it regresses into a busy-loop,
+    /// it never yields, so an `.await` on the same thread would hang the test runner forever. A
+    /// background thread lets the timeout actually fire.
     fn assert_poll_returns_pending_within(
-        build: impl FnOnce() -> HttpTxnTraceDrain<futures::stream::Pending<Vec<LandedTransaction>>>
+        build: impl FnOnce() -> HttpNdJsonSink + Send + 'static,
+        poll: impl FnOnce(
+            Pin<&mut HttpNdJsonSink>,
+            &mut Context<'_>,
+        ) -> Poll<Result<(), HttpTxnTraceDrainError>>
         + Send
         + 'static,
     ) {
@@ -544,53 +522,49 @@ mod tests {
             let _guard = handle.enter();
             let mut drain = build();
             let mut cx = poll_cx();
-            let result = std::pin::Pin::new(&mut drain).poll(&mut cx);
-            let _ = tx.send(matches!(result, std::task::Poll::Pending));
+            let result = poll(Pin::new(&mut drain), &mut cx);
+            let _ = tx.send(matches!(result, Poll::Pending));
         });
 
         match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(returned_pending) => assert!(
-                returned_pending,
-                "poll() should have returned Poll::Pending"
-            ),
+            Ok(returned_pending) => assert!(returned_pending, "poll should have returned Pending"),
             Err(_) => panic!(
-                "poll() did not return within 2s -- it is spinning in a tight loop instead of \
+                "poll did not return within 2s -- it is spinning in a tight loop instead of \
                  yielding, without having registered a waker"
             ),
         }
     }
 
     #[tokio::test]
-    async fn poll_returns_pending_instead_of_spinning_when_idle() {
-        assert_poll_returns_pending_within(|| {
-            test_drain(stream::pending::<Vec<LandedTransaction>>(), 100)
-        });
+    async fn poll_ready_returns_pending_instead_of_spinning_while_a_send_is_in_flight() {
+        assert_poll_returns_pending_within(
+            || {
+                let mut drain = test_drain(100, 1);
+                drain.pending_ndjson_payloads.push_back(NdjsonPayload {
+                    data: Bytes::from_static(b"{}\n"),
+                    len: 1,
+                });
+                drain
+                    .send_joinset
+                    .spawn(std::future::pending::<Result<SendOk, reqwest::Error>>());
+                drain
+            },
+            Sink::<Vec<LandedTransaction>>::poll_ready,
+        );
     }
 
     #[tokio::test]
-    async fn poll_returns_pending_instead_of_spinning_while_a_send_is_in_flight() {
-        assert_poll_returns_pending_within(|| {
-            let mut drain = test_drain(stream::pending::<Vec<LandedTransaction>>(), 100);
-            drain
-                .send_joinset
-                .spawn(std::future::pending::<Result<SendOk, reqwest::Error>>());
-            drain
-        });
-    }
-
-    #[tokio::test]
-    async fn poll_returns_pending_instead_of_spinning_with_backlog_and_a_send_in_flight() {
-        assert_poll_returns_pending_within(|| {
-            let mut drain = test_drain(stream::pending::<Vec<LandedTransaction>>(), 100);
-            drain.pending_ndjson_payloads.push_back(NdjsonPayload {
-                data: Bytes::from_static(b"{}\n"),
-                len: 1,
-            });
-            drain
-                .send_joinset
-                .spawn(std::future::pending::<Result<SendOk, reqwest::Error>>());
-            drain
-        });
+    async fn poll_flush_returns_pending_instead_of_spinning_while_a_send_is_in_flight() {
+        assert_poll_returns_pending_within(
+            || {
+                let mut drain = test_drain(100, 1);
+                drain
+                    .send_joinset
+                    .spawn(std::future::pending::<Result<SendOk, reqwest::Error>>());
+                drain
+            },
+            Sink::<Vec<LandedTransaction>>::poll_flush,
+        );
     }
 
     /// Reads a minimal HTTP/1.1 request off `socket` and returns its body. Good enough for a
@@ -633,7 +607,7 @@ mod tests {
     /// End-to-end test: a real `reqwest::Client` sending real HTTP requests over a real TCP
     /// socket to a small in-process server, which just records whatever body it receives.
     #[test]
-    fn future_poll_sends_buffered_entries_to_a_real_http_server() {
+    fn sink_send_all_delivers_buffered_entries_to_a_real_http_server() {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
@@ -669,12 +643,16 @@ mod tests {
                 let first = entry("sig1", 1, false);
                 let second = entry("sig2", 2, true);
                 // max_ndjson_buffer_size = 1 so each entry is flushed (and sent) as its own
-                // request, and max_inflight_sends = 1 (from `test_drain`) forces them to be sent
-                // one after another rather than concurrently.
-                let mut drain = test_drain(stream::iter(vec![vec![first], vec![second]]), 1);
+                // request, and max_inflight_sends = 1 forces them to be sent one after another
+                // rather than concurrently.
+                let mut drain = test_drain(1, 1);
                 drain.url = Url::parse(&format!("http://{addr}")).expect("mock server url");
 
-                drain.await.expect("drain future should complete successfully");
+                drain.send(vec![first]).await.expect("send sig1");
+                drain.send(vec![second]).await.expect("send sig2");
+                SinkExt::<Vec<LandedTransaction>>::close(&mut drain)
+                    .await
+                    .expect("close drain");
                 server.abort();
 
                 let mut received = Vec::new();
@@ -699,9 +677,9 @@ mod tests {
                 assert!(received.contains(&serde_json::Value::String("sig1".into())));
                 assert!(received.contains(&serde_json::Value::String("sig2".into())));
             }
-            Err(_) => panic!(
-                "drain future (or the mock http server) did not complete within 5s -- likely hung"
-            ),
+            Err(_) => {
+                panic!("drain (or the mock http server) did not complete within 5s -- likely hung")
+            }
         }
     }
 
