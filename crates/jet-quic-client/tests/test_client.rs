@@ -1,7 +1,7 @@
 use {
     jet_quic_client::{
-        ALPN_JET_RAW_TX_PROTOCOL_ID, JetQuicEndpoint, RawJetTransactionSender, ServerAddr,
-        ServerVerification, default_client_config, load_cert_pem, load_key_pem,
+        ALPN_JET_RAW_TX_PROTOCOL_ID, ClientIdentity, JetQuicEndpoint, JetQuicSender, ServerAddr,
+        ServerVerification, client_config_with_verification, load_cert_pem, load_key_pem,
     },
     quinn::crypto::rustls::QuicServerConfig,
     rcgen::{CertifiedKey, generate_simple_self_signed},
@@ -200,17 +200,17 @@ async fn recv_n(rx: &mut mpsc::UnboundedReceiver<Received>, n: usize) -> Vec<Rec
 /// Connects one [`RawJetTransactionSender`] to `addr`, using an insecure (no cert
 /// validation) client config — this is the crate's basic building block: bind an
 /// endpoint, build a client config, connect, wrap the connection for sending.
-async fn connect_sender(addr: SocketAddr) -> RawJetTransactionSender {
-    let (client_cert, client_key) = test_customer();
+async fn connect_sender(addr: SocketAddr) -> JetQuicSender {
+    let (cert, key) = test_customer();
     let client_config =
-        default_client_config(client_cert, client_key, ServerVerification::Insecure)
+        client_config_with_verification(ClientIdentity { cert, key }, ServerVerification::Insecure)
             .expect("client config");
     let endpoint = JetQuicEndpoint::bind(None).expect("bind endpoint");
     let connection = endpoint
         .connect(&ServerAddr::SocketAddr(addr), "localhost", client_config)
         .await
         .expect("connect");
-    RawJetTransactionSender::new(connection)
+    JetQuicSender::new(connection)
 }
 
 #[tokio::test]

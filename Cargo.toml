@@ -55,6 +55,7 @@ rcgen = "0.13.2"
 reqwest = "0.13.0"
 retry = "2.1.0"
 rustls = { version = "0.23.35", default-features = false }
+rustls-native-certs = "0.8.4"
 rustls-pki-types = "1.15.0"
 semver = "1.0.22"
 serde = "1.0.215"
@@ -124,6 +125,7 @@ yellowstone-grpc-client = "13.1.0"
 yellowstone-grpc-proto = "12.5.0"
 yellowstone-jet-tpu-client = { path = "crates/tpu-client", version = "0.6.0", default-features = false }
 yellowstone-shield-store = "0.11.0"
+yellowstone-jet-quic-client = { path = "crates/jet-quic-client", version = "0.1.0" }
 
 [workspace.lints.clippy]
 clone_on_ref_ptr = "deny"

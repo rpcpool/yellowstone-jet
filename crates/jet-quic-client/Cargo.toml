@@ -11,24 +11,20 @@ publish = false
 rust-version.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
-prost = { workspace = true }
 quinn = { workspace = true }
 rand = { workspace = true }
+rcgen = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
+rustls-native-certs = { workspace = true }
 rustls-pki-types = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tokio-stream = { workspace = true }
-tonic = { workspace = true }
-tonic-prost = { workspace = true }
-
-[build-dependencies]
-protobuf-src = { workspace = true }
-tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
-rcgen = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]

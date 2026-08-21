@@ -1,12 +1,10 @@
 //! TLS: the client identity we present, how we validate jet's server certificate, and
 //! building the `quinn::ClientConfig` that ties both together.
 
-use std::time::Duration;
-
-use quinn::{IdleTimeout, TransportConfig};
 pub use rustls::RootCertStore;
 use {
     crate::ConnectError,
+    quinn::{IdleTimeout, TransportConfig},
     rustls::{
         DigitallySignedStruct, Error as RustlsError, SignatureScheme,
         client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -16,6 +14,7 @@ use {
     std::{
         fmt::{self, Debug, Formatter},
         sync::Arc,
+        time::Duration,
     },
 };
 
@@ -32,19 +31,62 @@ pub enum ServerVerification {
     Insecure,
 }
 
-/// Builds a `quinn::ClientConfig` presenting `client_cert`/`client_key` as the mTLS
-/// client identity, and validating jet's server certificate per `server_verification`.
-/// Extracted as a standalone function (rather than tied to any connecting/connector
-/// type) so it can be called once and the result reused across many
-/// [`JetQuicEndpoint::connect`](crate::JetQuicEndpoint::connect) calls.
+impl ServerVerification {
+    /// Standard root-of-trust validation against the OS's native root store (see
+    /// [`native_root_cert_store`]) -- the same trust a browser would use.
+    pub fn with_native_root_cert_store() -> Self {
+        Self::WebPki(Arc::new(native_root_cert_store()))
+    }
+}
+
+/// The client's mTLS identity presented to jet's server during the handshake: the
+/// certificate and the private key that signs for it.
+#[derive(Debug)]
+pub struct ClientIdentity {
+    pub cert: CertificateDer<'static>,
+    pub key: PrivateKeyDer<'static>,
+}
+
+impl ClientIdentity {
+    /// Generates a fresh, random self-signed certificate/key pair. For tests and local
+    /// development against a server that doesn't check the client certificate's
+    /// identity, just that the mTLS handshake itself succeeds -- not a substitute for a
+    /// real, provisioned identity in production, since jet's server is free to reject
+    /// unrecognized client certificates.
+    pub fn random() -> Result<Self, rcgen::Error> {
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["jet-client.invalid".to_owned()])?;
+        Ok(Self {
+            cert: load_cert_pem(cert.pem().as_bytes())
+                .expect("freshly generated certificate PEM should always parse"),
+            key: load_key_pem(key_pair.serialize_pem().as_bytes())
+                .expect("freshly generated key PEM should always parse"),
+        })
+    }
+}
+
+/// Builds a `quinn::ClientConfig` presenting `identity` as the mTLS client identity,
+/// and validating jet's server certificate against the OS's native root store (see
+/// [`native_root_cert_store`]) -- the same trust a browser would use. Use
+/// [`client_config_with_verification`] instead if jet's server certificate needs a
+/// pinned certificate, a private/custom CA, or (dev/test only) no verification at all.
 pub fn default_client_config(
-    client_cert: CertificateDer<'static>,
-    client_key: PrivateKeyDer<'static>,
+    identity: ClientIdentity,
+) -> Result<quinn::ClientConfig, ConnectError> {
+    client_config_with_verification(identity, ServerVerification::with_native_root_cert_store())
+}
+
+/// Builds a `quinn::ClientConfig` presenting `identity` as the mTLS client identity,
+/// and validating jet's server certificate per `server_verification`. Extracted as a
+/// standalone function (rather than tied to any connecting/connector type) so it can
+/// be called once and the result reused across many
+/// [`JetQuicEndpoint::connect`](crate::JetQuicEndpoint::connect) calls.
+pub fn client_config_with_verification(
+    identity: ClientIdentity,
     server_verification: ServerVerification,
 ) -> Result<quinn::ClientConfig, ConnectError> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let verifier = build_server_verifier(server_verification, Arc::clone(&provider))?;
-
 
     let transport_config = {
         let mut res = TransportConfig::default();
@@ -66,12 +108,14 @@ pub fn default_client_config(
         .map_err(ConnectError::Tls)?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_client_auth_cert(vec![client_cert], client_key)?;
+        .with_client_auth_cert(vec![identity.cert], identity.key)?;
     crypto.alpn_protocols = vec![crate::ALPN_JET_RAW_TX_PROTOCOL_ID.to_vec()];
 
     let quic_client_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .map_err(|e| ConnectError::Tls(RustlsError::General(e.to_string())))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_client_config)))
+    let mut quic_client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+    quic_client_config.transport_config(Arc::new(transport_config));
+    Ok(quic_client_config)
 }
 
 fn build_server_verifier(
@@ -102,6 +146,22 @@ pub fn load_cert_pem(pem: &[u8]) -> Result<CertificateDer<'static>, PemError> {
 pub fn load_key_pem(pem: &[u8]) -> Result<PrivateKeyDer<'static>, PemError> {
     use rustls::pki_types::pem::PemObject;
     PrivateKeyDer::from_pem_slice(pem)
+}
+
+/// Builds a [`RootCertStore`] from the OS's own trust store -- the certificates the
+/// platform already trusts (`/etc/ssl/certs` on Linux, Keychain on macOS, the Windows
+/// certificate store, etc.), for use with [`ServerVerification::WebPki`] when jet's
+/// server certificate chains to a public/well-known CA rather than a pinned or
+/// private one.
+///
+/// Certificates that fail to parse are skipped rather than treated as a hard failure --
+/// a single unreadable entry in a large native store shouldn't prevent using the rest
+/// of it.
+pub fn native_root_cert_store() -> RootCertStore {
+    let native_certs = rustls_native_certs::load_native_certs();
+    let mut store = RootCertStore::empty();
+    store.add_parsable_certificates(native_certs.certs);
+    store
 }
 
 struct InsecureServerCertVerifier {

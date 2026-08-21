@@ -29,13 +29,15 @@
 //! yourself, rather than fanning many tasks out over one shared connection/endpoint and
 //! paying quinn's internal lock contention for it.
 
-pub mod discovery;
-mod dns;
-mod tls;
+pub mod dns;
+pub mod tls;
 
 pub use {
     dns::{DnsResolver, ResolveError, StdDnsResolver, set_resolver},
-    tls::{RootCertStore, ServerVerification, default_client_config, load_cert_pem, load_key_pem},
+    tls::{
+        ClientIdentity, RootCertStore, ServerVerification, client_config_with_verification,
+        default_client_config, load_cert_pem, load_key_pem, native_root_cert_store,
+    },
 };
 use {
     futures::{FutureExt, Stream, StreamExt, future::BoxFuture},
@@ -130,9 +132,27 @@ impl JetQuicEndpoint {
         let connection = quinn_endpoint.connect(remote_addr, &server_name)?.await?;
         Ok(JetQuicConnection {
             _quinn_endpoint: quinn_endpoint,
-            client_config,
             quinn_conn: connection,
         })
+    }
+
+    /// Connects to `addr` (a bare `"host"` or `"host:port"` string, always resolved as
+    /// [`ServerAddr::Named`]), using the host portion as the TLS server name (SNI) too.
+    /// Convenience for the common case where the hostname you dial is also the name
+    /// jet's certificate is issued for -- use [`connect`](Self::connect) directly when
+    /// that's not true (e.g. connecting by IP but validating against a hostname).
+    pub async fn connect_named(
+        self,
+        addr: impl Into<String>,
+        client_config: quinn::ClientConfig,
+    ) -> Result<JetQuicConnection, ConnectError> {
+        let server_addr: ServerAddr = addr.into().into();
+        let ServerAddr::Named { host, .. } = &server_addr else {
+            unreachable!("ServerAddr::from(String) always constructs ServerAddr::Named")
+        };
+        let server_name = host.clone();
+        self.connect(&server_addr, &server_name, client_config)
+            .await
     }
 }
 
@@ -143,16 +163,15 @@ impl JetQuicEndpoint {
 pub struct JetQuicConnection {
     // Kept alive: dropping it would close `quinn_conn`.
     _quinn_endpoint: quinn::Endpoint,
-    client_config: quinn::ClientConfig,
     quinn_conn: quinn::Connection,
 }
 
 /// Owns one [`JetQuicConnection`] and sends transactions on it.
-pub struct RawJetTransactionSender {
+pub struct JetQuicSender {
     connection: JetQuicConnection,
 }
 
-impl RawJetTransactionSender {
+impl JetQuicSender {
     pub const fn new(connection: JetQuicConnection) -> Self {
         Self { connection }
     }
@@ -216,7 +235,7 @@ where
     St: Stream<Item = T> + Unpin + Send + 'static,
     T: AsRef<[u8]> + Send,
 {
-    pub fn new(source: St, raw_sender: RawJetTransactionSender) -> Self {
+    pub fn new(source: St, raw_sender: JetQuicSender) -> Self {
         let drain_loop_fut = jet_transaction_drain_loop(source, raw_sender);
         JetTransactionDrain {
             inner: drain_loop_fut.boxed(),
@@ -235,7 +254,7 @@ pub struct DrainLoopError<St, T> {
 
 async fn jet_transaction_drain_loop<St>(
     mut stream: St,
-    mut raw_sender: RawJetTransactionSender,
+    mut raw_sender: JetQuicSender,
 ) -> Result<(), DrainLoopError<St, St::Item>>
 where
     St: Stream + Unpin,
@@ -319,5 +338,3 @@ impl From<String> for ServerAddr {
 /// The port [`ServerAddr::Named`] resolves to when none is given — the standard TLS
 /// port.
 pub const DEFAULT_SERVER_PORT: u16 = 443;
-
-
