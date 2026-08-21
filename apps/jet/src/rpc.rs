@@ -299,7 +299,7 @@ pub mod rpc_admin {
 pub mod rpc_solana_like {
     use {
         crate::{
-            http_tx_handler::{SimulationPerformed, XRequestId},
+            http_tx_handler::{SimulationPerformed, XRequestId, XSubscriptionId},
             metrics,
             payload::JetRpcSendTransactionConfig,
             rpc::invalid_params,
@@ -374,9 +374,10 @@ pub mod rpc_solana_like {
             )?;
             let maybe_txn_sig = transaction.signatures.first().cloned();
             let maybe_request_id = extensions.get::<XRequestId>().map(|x| x.0);
+            let maybe_subscription_id = extensions.get::<XSubscriptionId>().map(|x| x.0);
 
             self.tx_handler
-                .handle_versioned_transaction(transaction, config_with_policies, maybe_request_id)
+                .handle_versioned_transaction(transaction, config_with_policies, maybe_request_id, maybe_subscription_id)
                 .await
                 .inspect_err(|e| {
                     let name = e.variant_name();

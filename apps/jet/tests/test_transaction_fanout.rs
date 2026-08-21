@@ -47,6 +47,7 @@ pub fn create_send_transaction_request(hash: Hash) -> SendTransactionRequest {
         x_request_id: None,
         durable_nonce: None,
         recent_blockhash: hash,
+        x_subscription_id: None,
     }
 }
 

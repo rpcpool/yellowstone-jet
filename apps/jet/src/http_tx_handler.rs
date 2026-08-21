@@ -147,6 +147,8 @@ pub struct HttpTransactionHandler {
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 
+const X_SUBSCRIPTION_ID_HEADER: &str = "x-subscription-id";
+
 impl HttpTransactionHandler {
     pub const fn new(tx_handler: TransactionHandler, log_invalid_txn: bool) -> Self {
         Self {
@@ -167,6 +169,7 @@ impl HttpTransactionHandler {
         }
 
         let x_request_id = req.extensions().get::<XRequestId>().map(|x| x.0);
+        let x_subscription_id = req.extensions().get::<XSubscriptionId>().map(|x| x.0);
 
         let params = match RequestParams::parse(req.uri().query(), req.headers()) {
             Ok(p) => p,
@@ -222,7 +225,12 @@ impl HttpTransactionHandler {
                 forwarding_policies: params.forwarding_policies.clone(),
             };
             self.tx_handler
-                .handle_raw_transaction(Bytes::clone(&body_bytes), config, x_request_id)
+                .handle_raw_transaction(
+                    Bytes::clone(&body_bytes),
+                    config,
+                    x_request_id,
+                    x_subscription_id,
+                )
                 .await
         } else {
             let data = match String::from_utf8(body_bytes.to_vec()) {
@@ -251,7 +259,7 @@ impl HttpTransactionHandler {
                 forwarding_policies: params.forwarding_policies.clone(),
             };
             self.tx_handler
-                .handle_transaction(data, Some(config), x_request_id)
+                .handle_transaction(data, Some(config), x_request_id, x_subscription_id)
                 .await
         };
 
@@ -337,6 +345,9 @@ impl<S> HttpTxMiddleware<S> {
 #[derive(Clone, Debug)]
 pub struct XRequestId(pub Uuid);
 
+#[derive(Clone, Debug)]
+pub struct XSubscriptionId(pub Uuid);
+
 impl<S> Service<Request<Body>> for HttpTxMiddleware<S>
 where
     S: Service<Request<Body>, Response = Response<Body>>,
@@ -360,8 +371,19 @@ where
             .and_then(|x_req_id| Uuid::try_parse(x_req_id).ok())
             .map(XRequestId);
 
+        let subscription_id = request
+            .headers()
+            .get(X_SUBSCRIPTION_ID_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|sub_id| Uuid::try_parse(sub_id).ok())
+            .map(XSubscriptionId);
+
         if let Some(x_request_id) = x_request_id {
             request.extensions_mut().insert(x_request_id);
+        }
+
+        if let Some(subscription_id) = subscription_id {
+            request.extensions_mut().insert(subscription_id);
         }
 
         if request.uri().path() == API_TX_PATH {

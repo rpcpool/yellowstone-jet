@@ -92,6 +92,7 @@ impl TransactionHandler {
         transaction: VersionedTransaction,
         config_with_forwarding_policies: JetRpcSendTransactionConfig,
         x_request_id: Option<Uuid>,
+        x_subscription_id: Option<Uuid>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         let config = config_with_forwarding_policies.config;
 
@@ -119,6 +120,7 @@ impl TransactionHandler {
             wire_transaction: wire_transaction.into(),
             policies: config_with_forwarding_policies.forwarding_policies,
             x_request_id,
+            x_subscription_id,
             durable_nonce: get_durable_nonce(&transaction),
             recent_blockhash: *transaction.message.recent_blockhash(),
         };
@@ -135,6 +137,7 @@ impl TransactionHandler {
         wire_transaction: Bytes,
         config_with_forwarding_policies: JetRpcSendTransactionConfig,
         x_request_id: Option<Uuid>,
+        x_subscription_id: Option<Uuid>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         if wire_transaction.len() > PACKET_DATA_SIZE {
             return Err(TransactionHandlerError::InvalidTransaction(format!(
@@ -163,6 +166,7 @@ impl TransactionHandler {
             x_request_id,
             durable_nonce: get_durable_nonce(&transaction),
             recent_blockhash: *transaction.message.recent_blockhash(),
+            x_subscription_id,
         };
         self.transaction_sink
             .send(req)
@@ -177,6 +181,7 @@ impl TransactionHandler {
         data: String,
         config_with_forwarding_policies: Option<JetRpcSendTransactionConfig>,
         x_request_id: Option<Uuid>,
+        x_subscription_id: Option<Uuid>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         let config_with_forwarding_policies = config_with_forwarding_policies.unwrap_or_default();
         let config = config_with_forwarding_policies.config;
@@ -191,6 +196,7 @@ impl TransactionHandler {
             x_request_id,
             durable_nonce: get_durable_nonce(&transaction),
             recent_blockhash: *transaction.message.recent_blockhash(),
+            x_subscription_id,
         };
         self.transaction_sink
             .send(req)

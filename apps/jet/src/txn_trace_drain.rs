@@ -115,6 +115,7 @@ pub struct TxnTraceEntry<'a> {
     pub signature: Cow<'a, str>,
     pub send_at_slot: u64,
     pub x_request_id: Option<Uuid>,
+    pub x_subscription_id: Option<Uuid>,
     pub state: TxnState,
     pub error_msg: Option<&'a str>,
     pub remote_peer_solana_client_id: Option<Cow<'a, str>>,
@@ -265,6 +266,7 @@ where
             remote_peer_addr: Some(tx_sent.remote_peer_addr),
             drop_reason: None,
             drain_id: drain_id.map(Cow::Borrowed),
+            x_subscription_id: info.x_subscription_id,
         }),
         TpuSenderResponse::TxFailed(tx_failed) => one_or_many.map(|info| TxnTraceEntry {
             signature: Cow::Owned(info.signature.to_string()),
@@ -279,6 +281,7 @@ where
             remote_peer_addr: Some(tx_failed.remote_peer_addr),
             drop_reason: None,
             drain_id: drain_id.map(Cow::Borrowed),
+            x_subscription_id: info.x_subscription_id,
         }),
         TpuSenderResponse::TxDrop(tx_drop) => {
             let many = tx_drop
@@ -300,6 +303,7 @@ where
                     remote_peer_addr: None,
                     drop_reason: Some(tx_drop.drop_reason.as_str()),
                     drain_id: drain_id.map(Cow::Borrowed),
+                    x_subscription_id: info.x_subscription_id,
                 })
                 .collect::<Vec<_>>();
             OneOrMany::Many(many)
@@ -667,11 +671,16 @@ mod tests {
         "127.0.0.1:8001".parse().unwrap()
     }
 
-    fn info(signature: Signature, x_request_id: Option<Uuid>) -> TpuSenderTxnInfo {
+    fn info(
+        signature: Signature,
+        x_request_id: Option<Uuid>,
+        x_subscription_id: Option<Uuid>,
+    ) -> TpuSenderTxnInfo {
         TpuSenderTxnInfo::new(JetTxnInfo {
             signature,
             send_at_slot: 1,
             x_request_id,
+            x_subscription_id,
         })
     }
 
@@ -680,7 +689,7 @@ mod tests {
         let response = TpuSenderResponse::TxSent(TxSent {
             remote_peer_identity: Pubkey::new_unique(),
             remote_peer_addr: addr(),
-            info: with_info.then(|| info(sig, Some(Uuid::new_v4()))),
+            info: with_info.then(|| info(sig, Some(Uuid::new_v4()), Some(Uuid::new_v4()))),
         });
         (response, sig)
     }
@@ -691,7 +700,7 @@ mod tests {
             remote_peer_identity: Pubkey::new_unique(),
             remote_peer_addr: addr(),
             failure_reason: "connection reset".to_string(),
-            info: with_info.then(|| info(sig, None)),
+            info: with_info.then(|| info(sig, None, None)),
         });
         (response, sig)
     }
@@ -702,7 +711,7 @@ mod tests {
         let dropped_tx_vec = infos
             .into_iter()
             .map(|maybe_sig| {
-                let txn_info = maybe_sig.map(|sig| info(sig, None));
+                let txn_info = maybe_sig.map(|sig| info(sig, None, None));
                 (
                     TpuSenderTxn::from_bytes(
                         Pubkey::new_unique(),
