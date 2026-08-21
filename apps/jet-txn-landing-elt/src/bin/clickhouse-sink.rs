@@ -1,26 +1,29 @@
 use {
     clap::Parser,
-    futures::{Stream, StreamExt},
-    jet_transaction_landing::http_ndjson_drain::{HttpTxnTraceDrain, HttpTxnTraceDrainConfig},
+    futures::{Sink, SinkExt, TryStreamExt, future},
+    jet_transaction_landing::http_ndjson_drain::{
+        Credentials, DEFAULT_MAX_INFLIGHT_SENDS, DEFAULT_MAX_NDJSON_LEN, HttpNdJsonSink,
+        HttpTxnTraceDrainConfig, XHeaderEntry,
+    },
     serde::{Deserialize, Serialize},
     std::{
-        collections::{HashMap, VecDeque},
+        collections::HashMap,
         num::NonZeroUsize,
         path::PathBuf,
         pin::Pin,
         task::{Context, Poll},
-        time::{Duration, Instant},
     },
+    url::Url,
     yellowstone_fumarole_client::{
         FumaroleClient, FumaroleSubscribeConfig,
         config::FumaroleConfig,
         proto::{CreateConsumerGroupRequest, InitialOffsetPolicy},
-        stream::{BlockStream, FumaroleBlockIterator, FumaroleBlockStreamEvent},
+        stream::{FumaroleBlockEvent, FumaroleBlockStreamEvent},
     },
     yellowstone_grpc_proto::{
         geyser::{
-            SubscribeRequest, SubscribeRequestFilterTransactions, SubscribeUpdateTransactionStatus,
-            subscribe_update::UpdateOneof,
+            SubscribeRequest, SubscribeRequestFilterTransactions, SubscribeUpdateEntry,
+            SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
         },
         tonic::Code::AlreadyExists,
     },
@@ -33,7 +36,19 @@ use {
 pub struct LandedTransaction {
     pub signature: String,
     pub slot: u64,
+    pub txn_index: u64,
     pub failed: bool,
+}
+
+///
+/// A block entry -- a batch of transactions sharing a single PoH tick -- as observed from a
+/// Fumarole block stream. Destined for `chain_entry_staging`.
+///
+#[derive(Debug, Clone, Serialize)]
+pub struct LandedEntry {
+    pub slot: u64,
+    pub entry_index: u64,
+    pub executed_transactions_count: u64,
 }
 
 #[derive(Debug, Parser)]
@@ -67,112 +82,165 @@ struct ConfigTracing {
 #[serde(deny_unknown_fields)]
 struct Config {
     fumarole: MyFumaroleConfig,
-    /// Name of the persistent Fumarole subscriber to use.
-    drain: HttpTxnTraceDrainConfig,
+    #[serde(default = "Config::default_clickhouse_url")]
+    clickhouse_url: Url,
+    #[serde(default = "Config::default_clickhouse_username")]
+    clickhouse_username: String,
+    #[serde(default = "Config::default_clickhouse_password")]
+    clickhouse_password: String,
+    #[serde(default = "Config::default_max_batch_size")]
+    max_batch_size: usize,
+    #[serde(default = "Config::default_max_inflight_batches")]
+    max_inflight_batches: usize,
     #[serde(default)]
     tracing: ConfigTracing,
 }
 
-pub struct LandedTransactionBlockIterator {
-    slot: u64,
-    block: FumaroleBlockIterator,
-    txn_count: usize,
+impl Config {
+    fn default_max_batch_size() -> usize {
+        DEFAULT_MAX_NDJSON_LEN
+    }
+
+    fn default_max_inflight_batches() -> usize {
+        DEFAULT_MAX_INFLIGHT_SENDS
+    }
+
+    fn default_clickhouse_url() -> Url {
+        Url::parse("http://localhost:8123").unwrap()
+    }
+
+    fn default_clickhouse_username() -> String {
+        "default".to_string()
+    }
+
+    fn default_clickhouse_password() -> String {
+        "".to_string()
+    }
 }
 
-impl Iterator for LandedTransactionBlockIterator {
-    type Item = LandedTransaction;
+const INSERT_CHAIN_TRANASCTION_STAGING_HTTP_ROUTE: &str = "/?query=INSERT%20INTO%20jet.chain_transaction_staging%20FORMAT%20JSONEachRow&async_insert=1&wait_for_async_insert=0";
 
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(update) = self.block.next() {
-            let slot = self.slot;
-            let UpdateOneof::TransactionStatus(SubscribeUpdateTransactionStatus {
+const INSERT_CHAIN_ENTRY_STAGING_HTTP_ROUTE: &str = "/?query=INSERT%20INTO%20jet.chain_entry_staging%20FORMAT%20JSONEachRow&async_insert=1&wait_for_async_insert=0";
+
+///
+/// Filters one block's updates down to its landed transactions. Takes `&FumaroleBlockEvent`
+/// rather than consuming it -- the block is shared (via `Arc`) between this projection and
+/// `project_entries`, so neither side can take ownership of it.
+///
+fn project_transactions(block: &FumaroleBlockEvent) -> Vec<LandedTransaction> {
+    let slot = block.slot;
+    block
+        .iter()
+        .filter_map(|update| match update.update_oneof.clone()? {
+            UpdateOneof::TransactionStatus(SubscribeUpdateTransactionStatus {
                 signature,
                 err,
+                index,
                 ..
-            }) = update.update_oneof?
-            else {
-                continue;
-            };
-            self.txn_count += 1;
-            let failed = err.is_some();
-            return Some(LandedTransaction {
+            }) => Some(LandedTransaction {
                 signature: bs58::encode(&signature).into_string(),
+                txn_index: index,
                 slot,
-                failed,
-            });
-        }
-        tracing::info!(
-            slot = self.slot,
-            txn_count = self.txn_count,
-            "finished fumarole block landed transactions"
-        );
-        None
-    }
+                failed: err.is_some(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 ///
-/// Adapts a Fumarole `BlockStream` into a `Stream<Item = LandedTransaction>`, flattening each
-/// completed block into its landed transactions.
+/// Filters one block's updates down to its entries. See `project_transactions` for why this
+/// borrows rather than consumes.
 ///
-/// Written as a plain `poll_next` rather than `.filter_map().flat_map()` with async closures:
-/// every `async {}` block's generated `Future` is unconditionally `!Unpin`, which poisons the
-/// whole `futures`-combinator chain built on top of it and forces `.boxed()` further up. This
-/// type holds only plain, already-`Unpin` fields (`BlockStream`, `VecDeque`), so it's `Unpin`
-/// for free and can be handed to `HttpTxnTraceDrain` directly.
-///
-struct LandedTransactionStream {
-    inner: BlockStream,
-    block_recv_since_last_tick: usize,
-    pending: VecDeque<LandedTransactionBlockIterator>,
-    last_block_received_at: Instant,
+fn project_entries(block: &FumaroleBlockEvent) -> Vec<LandedEntry> {
+    let slot = block.slot;
+    block
+        .iter()
+        .filter_map(|update| match update.update_oneof.clone()? {
+            UpdateOneof::Entry(SubscribeUpdateEntry {
+                index,
+                executed_transaction_count,
+                ..
+            }) => Some(LandedEntry {
+                slot,
+                entry_index: index,
+                executed_transactions_count: executed_transaction_count,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
-impl LandedTransactionStream {
-    fn new(inner: BlockStream) -> Self {
+struct LandedBlockSink {
+    transaction_drain: HttpNdJsonSink,
+    entry_drain: HttpNdJsonSink,
+}
+
+impl LandedBlockSink {
+    fn new(transaction_drain: HttpNdJsonSink, entry_drain: HttpNdJsonSink) -> Self {
         Self {
-            inner,
-            pending: VecDeque::new(),
-            block_recv_since_last_tick: 0,
-            last_block_received_at: Instant::now(),
+            transaction_drain,
+            entry_drain,
         }
     }
 }
 
-impl Stream for LandedTransactionStream {
-    type Item = LandedTransactionBlockIterator;
+impl Sink<FumaroleBlockEvent> for LandedBlockSink {
+    type Error = jet_transaction_landing::http_ndjson_drain::HttpTxnTraceDrainError;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
-        loop {
-            if let Some(item) = this.pending.pop_front() {
-                return Poll::Ready(Some(item));
-            }
-            match this.inner.poll_next_unpin(cx) {
-                Poll::Ready(Some(Ok(FumaroleBlockStreamEvent::Block(block)))) => {
-                    this.block_recv_since_last_tick += 1;
-                    let now = Instant::now();
-                    if now.duration_since(this.last_block_received_at) > Duration::from_secs(5) {
-                        let block_per_second = this.block_recv_since_last_tick.div_euclid(5);
-                        tracing::info!(
-                            "block reception rate over last 5 seconds: {block_per_second}/s"
-                        );
-                        this.block_recv_since_last_tick = 0;
-                        this.last_block_received_at = now;
-                    }
-                    this.pending.push_back(LandedTransactionBlockIterator {
-                        slot: block.slot,
-                        block: block.into_iter(),
-                        txn_count: 0,
-                    });
-                }
-                Poll::Ready(Some(Ok(FumaroleBlockStreamEvent::SlotStatus(_)))) => {}
-                Poll::Ready(Some(Err(err))) => {
-                    tracing::error!(?err, "fumarole subscription error");
-                }
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
-            }
+        match <HttpNdJsonSink as Sink<Vec<LandedTransaction>>>::poll_ready(
+            Pin::new(&mut this.transaction_drain),
+            cx,
+        ) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
         }
+
+        <HttpNdJsonSink as Sink<Vec<LandedEntry>>>::poll_ready(Pin::new(&mut this.entry_drain), cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: FumaroleBlockEvent) -> Result<(), Self::Error> {
+        let this = self.get_mut();
+        <HttpNdJsonSink as Sink<Vec<LandedTransaction>>>::start_send(
+            Pin::new(&mut this.transaction_drain),
+            project_transactions(&item),
+        )?;
+        <HttpNdJsonSink as Sink<Vec<LandedEntry>>>::start_send(
+            Pin::new(&mut this.entry_drain),
+            project_entries(&item),
+        )?;
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        match <HttpNdJsonSink as Sink<Vec<LandedTransaction>>>::poll_flush(
+            Pin::new(&mut this.transaction_drain),
+            cx,
+        ) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+
+        <HttpNdJsonSink as Sink<Vec<LandedEntry>>>::poll_flush(Pin::new(&mut this.entry_drain), cx)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        match <HttpNdJsonSink as Sink<Vec<LandedTransaction>>>::poll_close(
+            Pin::new(&mut this.transaction_drain),
+            cx,
+        ) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+
+        <HttpNdJsonSink as Sink<Vec<LandedEntry>>>::poll_close(Pin::new(&mut this.entry_drain), cx)
     }
 }
 
@@ -228,12 +296,58 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
     let (_sink, fumarole_stream) = subscription.split();
-    let block_stream = fumarole_stream.block_stream();
 
-    let source = LandedTransactionStream::new(block_stream);
+    let transaction_drain_url = config
+        .clickhouse_url
+        .join(INSERT_CHAIN_TRANASCTION_STAGING_HTTP_ROUTE)?;
 
-    let drain = HttpTxnTraceDrain::with_config(source, config.drain);
-    drain.await?;
+    tracing::info!(?transaction_drain_url, "clickhouse transaction drain url");
+    let entry_drain_url = config
+        .clickhouse_url
+        .join(INSERT_CHAIN_ENTRY_STAGING_HTTP_ROUTE)?;
+
+    tracing::info!(?entry_drain_url, "clickhouse entry drain url");
+    let creds = Credentials::XHeaders(vec![
+        XHeaderEntry {
+            name: "X-ClickHouse-User".to_string(),
+            value: config.clickhouse_username.clone(),
+        },
+        XHeaderEntry {
+            name: "X-ClickHouse-Key".to_string(),
+            value: config.clickhouse_password.clone(),
+        },
+    ]);
+
+    let transaction_drain_config = HttpTxnTraceDrainConfig {
+        url: transaction_drain_url,
+        credentials: Some(creds.clone()),
+        max_ndjson_len: config.max_batch_size,
+        max_inflight_sends: config.max_inflight_batches,
+    };
+
+    let entry_drain_config = HttpTxnTraceDrainConfig {
+        url: entry_drain_url,
+        credentials: Some(creds.clone()),
+        max_ndjson_len: config.max_batch_size,
+        max_inflight_sends: config.max_inflight_batches,
+    };
+
+    let transaction_drain = HttpNdJsonSink::with_config(transaction_drain_config);
+    let entry_drain = HttpNdJsonSink::with_config(entry_drain_config);
+    let mut landed_sink =
+        LandedBlockSink::new(transaction_drain, entry_drain).sink_map_err(anyhow::Error::from);
+
+    let mut block_items = fumarole_stream
+        .block_stream()
+        .try_filter_map(|event| {
+            future::ready(Ok(match event {
+                FumaroleBlockStreamEvent::Block(block) => Some(block),
+                FumaroleBlockStreamEvent::SlotStatus(_) => None,
+            }))
+        })
+        .map_err(anyhow::Error::from);
+
+    landed_sink.send_all(&mut block_items).await?;
 
     tracing::info!("fumarole stream ended; exiting");
     Ok(())

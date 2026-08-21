@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS chain_transaction_staging
 (
     signature String,
     slot UInt64,
+    txn_index UInt64,
     failed Bool,
     ts DateTime64(3) DEFAULT now64(3),
     INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64
@@ -15,11 +16,48 @@ ORDER BY (slot, signature)
 TTL ts + INTERVAL 1 DAY;
 
 
+CREATE TABLE IF NOT EXISTS chain_entry_staging
+(
+    slot UInt64,
+    entry_index UInt64,
+    executed_transactions_count UInt64,
+    ts DateTime64(3) DEFAULT now64(3),
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (slot, entry_index)
+TTL ts + INTERVAL 1 DAY;
+
+CREATE OR REPLACE VIEW chain_entry_with_txn_count_bounds AS
+SELECT
+    slot,
+    entry_index,
+    executed_transactions_count,
+    sum(executed_transactions_count) OVER (ORDER BY slot) AS txn_count_cumu_upper_bound,
+    sum(executed_transactions_count) OVER (ORDER BY slot) - executed_transactions_count AS txn_count_cumu_lower_bound
+FROM chain_entry_staging;
+
+
+CREATE TABLE IF NOT EXISTS landed_transaction_entry_pos (
+    signature String,
+    slot UInt64,
+    entry_index UInt64,
+    txn_index UInt64,
+    ts DateTime64(3) DEFAULT now64(3),
+    INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64
+)
+ENGINE = ReplacingMergeTree(ts)
+PARTITION BY toDate(ts)
+ORDER BY (slot, entry_index, txn_index)
+TTL ts + INTERVAL 90 DAY;
+
+
 CREATE TABLE IF NOT EXISTS landed_transactions
 (
     signature String,
     send_at_slot UInt64,
     landed_slot UInt64,
+    txn_index UInt64,
     failed Bool,
     trace_remote_peer_identity Nullable(String),
     trace_remote_peer_addr Nullable(String),
@@ -196,6 +234,7 @@ WITH
 SELECT
     lt.signature AS signature,
     lt.failed AS failed,
+    lt.txn_index AS txn_index,
     tt.remote_peer_identity AS trace_remote_peer_identity,
     tt.remote_peer_addr AS trace_remote_peer_addr,
     tt.x_request_id AS trace_x_request_id,
@@ -206,4 +245,22 @@ SELECT
 FROM chain_transaction_staging AS lt
 ANY INNER JOIN sent_transaction_pending AS tt ON tt.signature = lt.signature
 WHERE tt.send_at_slot BETWEEN batch_min_slot - 64 AND batch_max_slot
+SETTINGS join_use_nulls = 1;
+
+
+-- Fires the instant landed_transactions gets a new row (i.e. whenever mv_landed_transactions posts a batch)
+-- Match landed transaction with their on chain position (slot, entry_index, txn_index) in the chain_entry_staging table.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_landed_transaction_entry_pos
+TO landed_transaction_entry_pos
+AS
+SELECT
+    lt.signature AS signature,
+    lt.landed_slot AS slot,
+    es.entry_index AS entry_index,
+    lt.txn_index AS txn_index
+FROM landed_transactions AS lt
+ANY INNER JOIN chain_entry_with_txn_count_bounds AS es
+ON lt.landed_slot = es.slot
+AND lt.txn_index < es.txn_count_cumu_upper_bound
+AND lt.txn_index >= es.txn_count_cumu_lower_bound
 SETTINGS join_use_nulls = 1;
