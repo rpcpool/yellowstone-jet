@@ -444,7 +444,7 @@ async fn run_jet(
             let raw_quic_shutdown = jet_cancellation_token.child_token();
             let ah = tg.spawn(async move {
                 raw_quic_server
-                    .with_shutdown(raw_quic_shutdown.cancelled_owned())
+                    .server_with_shutdown(raw_quic_shutdown.cancelled_owned())
                     .await;
             });
             tg_name_map.insert(ah.id(), format!("raw_quic_server_{worker_id}"));

@@ -2,23 +2,27 @@
 //! transactions directly over QUIC streams, alongside jet's existing HTTP/JSON-RPC
 //! ingress.
 //!
-//! [`RawQuicServer`] follows hyper's `Server` shape: a builder that only deals in
-//! trait objects (so it's independently testable with in-memory certs/verifiers, no
-//! filesystem or network involved), and `with_shutdown` to run the accept loop until an
-//! arbitrary shutdown future resolves. Turning on-disk/HTTP config into those trait
-//! objects — [`from_config`] — is separate glue code, not part of the builder itself.
+//! [`Server`] follows hyper's `Server` shape: a builder that only deals in trait
+//! objects (so it's independently testable with in-memory certs/verifiers, no
+//! filesystem or network involved), and `server_with_shutdown` to run the accept loop
+//! until an arbitrary shutdown future resolves. Turning on-disk/HTTP config into those
+//! trait objects — [`from_config`] — is separate glue code, not part of the builder
+//! itself.
 
 pub mod cert_resolver;
+pub mod client_identity;
 pub mod client_verifier;
-mod listener;
+pub mod connection_limiter;
+mod server;
 
 use {
     self::{
-        cert_resolver::{CertResolver, CertResolverError},
+        cert_resolver::{CertResolver, CertResolverError, SelfSignedCertResolver},
         client_verifier::{
             AllowAnyClientVerifier, Allowlist, AllowlistSource, AllowlistSourceError,
-            DirAllowlistSource, HttpAllowlistSource,
+            DirAllowlistSource, HttpAllowlistSource, SkipClientVerifier,
         },
+        connection_limiter::ConnectionLimiter,
     },
     crate::{
         config::{ConfigClientAllowlistSource, ConfigRawQuicServer},
@@ -27,7 +31,7 @@ use {
     },
     quinn::crypto::rustls::{NoInitialCipherSuite, QuicServerConfig},
     rustls::server::{ResolvesServerCert, danger::ClientCertVerifier},
-    std::{future::Future, net::SocketAddr, sync::Arc, time::Duration},
+    std::{future::Future, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration},
     tracing::warn,
 };
 
@@ -36,9 +40,7 @@ use {
 pub const ALPN_JET_RAW_TX_PROTOCOL_ID: &[u8] = jet_quic_client::ALPN_JET_RAW_TX_PROTOCOL_ID;
 
 #[derive(Debug, thiserror::Error)]
-pub enum RawQuicServerError {
-    #[error("missing required raw quic server builder field: {0}")]
-    MissingField(&'static str),
+pub enum ServerError {
     #[error("invalid TLS server config: {0}")]
     Tls(#[from] rustls::Error),
     #[error("invalid QUIC server config: {0}")]
@@ -57,40 +59,47 @@ pub enum RawQuicServerError {
 }
 
 #[derive(Clone, Default)]
-pub struct RawQuicServerBuilder {
+pub struct ServerBuilder {
     bind: Option<SocketAddr>,
     cert_resolver: Option<Arc<dyn ResolvesServerCert>>,
     client_verifier: Option<Arc<dyn ClientCertVerifier>>,
-    tx_handler: Option<TransactionHandler>,
     reuse_port: bool,
+    connection_limiter: Option<ConnectionLimiter>,
 }
 
-impl RawQuicServerBuilder {
+impl ServerBuilder {
+    /// The address the built [`Server`]'s `Endpoint` binds to. Optional: if never
+    /// called, [`Self::build`] defaults to `0.0.0.0:0` (all interfaces, an
+    /// OS-assigned ephemeral port).
     pub const fn bind(mut self, addr: SocketAddr) -> Self {
         self.bind = Some(addr);
         self
     }
 
+    /// Injects the strategy used to resolve which certificate the server presents per
+    /// connection (e.g. by SNI) -- any [`ResolvesServerCert`] implementation, whether
+    /// that's [`CertResolver`]'s hot-reloadable PEM directory or a custom one. Optional:
+    /// if never called, [`Self::build`] defaults to [`SelfSignedCertResolver`], a
+    /// freshly generated, random self-signed certificate.
     pub fn cert_resolver(mut self, resolver: Arc<dyn ResolvesServerCert>) -> Self {
         self.cert_resolver = Some(resolver);
         self
     }
 
+    /// Injects the strategy used to verify a client's certificate -- e.g. [`Allowlist`]'s
+    /// pinned-cert verifier, or [`AllowAnyClientVerifier`] for dev/debug. Optional: if
+    /// never called, [`Self::build`] defaults to [`SkipClientVerifier`], which doesn't
+    /// even request a client certificate.
     pub fn client_verifier(mut self, verifier: Arc<dyn ClientCertVerifier>) -> Self {
         self.client_verifier = Some(verifier);
         self
     }
 
-    pub fn transaction_handler(mut self, handler: TransactionHandler) -> Self {
-        self.tx_handler = Some(handler);
-        self
-    }
-
     /// Binds the endpoint's socket with `SO_REUSEPORT`, so multiple independent
-    /// [`RawQuicServer`] instances (each with their own socket, endpoint state, and
-    /// accept loop) can share the same listen address. The kernel load-balances
-    /// incoming datagrams across them, consistently by 4-tuple, so a given
-    /// connection's packets keep landing on the same instance.
+    /// [`Server`] instances (each with their own socket, endpoint state, and accept
+    /// loop) can share the same listen address. The kernel load-balances incoming
+    /// datagrams across them, consistently by 4-tuple, so a given connection's packets
+    /// keep landing on the same instance.
     ///
     /// This exists because every `Connection`/stream/`Incoming` derived from a
     /// `quinn::Endpoint` shares that endpoint's internal state (its connection-ID
@@ -104,17 +113,40 @@ impl RawQuicServerBuilder {
         self
     }
 
-    pub fn build(self) -> Result<RawQuicServer, RawQuicServerError> {
-        let bind = self.bind.ok_or(RawQuicServerError::MissingField("bind"))?;
-        let cert_resolver = self
-            .cert_resolver
-            .ok_or(RawQuicServerError::MissingField("cert_resolver"))?;
+    /// Caps how many concurrent connections a single client identity (account +
+    /// subscription, per the client certificate's Subject Alternative Name -- see
+    /// [`client_identity::ClientIdentity`]) may hold open at once, across every
+    /// endpoint the built [`Server`] accepts on -- see [`ConnectionLimiter`]. Unset by
+    /// default: no per-client cap.
+    ///
+    /// The limiter this constructs is shared by every `Server` built from a clone of
+    /// `self` ([`ConnectionLimiter`] is cheap to [`Clone`] -- an `Arc`-backed count map
+    /// inside -- so cloning the builder carries the same shared limiter along), so
+    /// calling this once on a base builder *before* cloning it once per
+    /// [`Self::reuse_port`] worker gives all those workers one shared cap; calling it
+    /// again on an already-cloned builder instead creates an independent limiter for
+    /// that clone alone.
+    pub fn max_connections_per_client(mut self, max: NonZeroUsize) -> Self {
+        self.connection_limiter = Some(ConnectionLimiter::new(max));
+        self
+    }
+
+    /// Builds the [`Server`], binding its `Endpoint` to [`Self::bind`]'s address (or
+    /// its default -- see that method). `tx_handler` is the one field every server
+    /// needs with no sensible default, so unlike the others it's a required argument
+    /// here rather than an optional builder method backed by a runtime check.
+    pub fn build(self, tx_handler: TransactionHandler) -> Result<Server, ServerError> {
+        let bind = self
+            .bind
+            .unwrap_or_else(|| SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)));
+        let cert_resolver = match self.cert_resolver {
+            Some(resolver) => resolver,
+            None => SelfSignedCertResolver::new()? as Arc<dyn ResolvesServerCert>,
+        };
         let client_verifier = self
             .client_verifier
-            .ok_or(RawQuicServerError::MissingField("client_verifier"))?;
-        let tx_handler = self
-            .tx_handler
-            .ok_or(RawQuicServerError::MissingField("transaction_handler"))?;
+            .unwrap_or_else(|| SkipClientVerifier::new() as Arc<dyn ClientCertVerifier>);
+        let connection_limiter = self.connection_limiter;
 
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let mut tls_config = rustls::ServerConfig::builder_with_provider(provider)
@@ -134,23 +166,20 @@ impl RawQuicServerBuilder {
                 .expect("no async runtime found (are we inside a Tokio runtime?)"),
         )?;
 
-        Ok(RawQuicServer {
+        Ok(Server {
             endpoint,
             tx_handler,
+            connection_limiter,
         })
     }
 }
 
-/// Plain `UdpSocket::bind` by default; with `SO_REUSEPORT` set first when requested
-/// (see [`RawQuicServerBuilder::reuse_port`]). Mirrors exactly what
+/// Binds `addr`, optionally with `SO_REUSEPORT` -- mirroring exactly what
 /// `quinn::Endpoint::server` itself does internally, plus the reuse-port option quinn
 /// doesn't expose.
-fn bind_socket(
-    addr: SocketAddr,
-    reuse_port: bool,
-) -> Result<std::net::UdpSocket, RawQuicServerError> {
+fn bind_socket(addr: SocketAddr, reuse_port: bool) -> Result<std::net::UdpSocket, ServerError> {
     if !reuse_port {
-        return std::net::UdpSocket::bind(addr).map_err(RawQuicServerError::Bind);
+        return std::net::UdpSocket::bind(addr).map_err(ServerError::Bind);
     }
 
     #[cfg(unix)]
@@ -158,32 +187,29 @@ fn bind_socket(
         use socket2::{Domain, Protocol, Socket, Type};
 
         let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))
-            .map_err(RawQuicServerError::Bind)?;
-        socket
-            .set_reuse_port(true)
-            .map_err(RawQuicServerError::Bind)?;
+            .map_err(ServerError::Bind)?;
+        socket.set_reuse_port(true).map_err(ServerError::Bind)?;
         if addr.is_ipv6() {
             let _ = socket.set_only_v6(false);
         }
-        socket
-            .bind(&addr.into())
-            .map_err(RawQuicServerError::Bind)?;
+        socket.bind(&addr.into()).map_err(ServerError::Bind)?;
         Ok(socket.into())
     }
     #[cfg(not(unix))]
     {
-        Err(RawQuicServerError::ReusePortUnsupported)
+        Err(ServerError::ReusePortUnsupported)
     }
 }
 
-pub struct RawQuicServer {
+pub struct Server {
     endpoint: quinn::Endpoint,
     tx_handler: TransactionHandler,
+    connection_limiter: Option<ConnectionLimiter>,
 }
 
-impl RawQuicServer {
-    pub fn builder() -> RawQuicServerBuilder {
-        RawQuicServerBuilder::default()
+impl Server {
+    pub fn builder() -> ServerBuilder {
+        ServerBuilder::default()
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -192,18 +218,24 @@ impl RawQuicServer {
 
     /// Runs the accept loop until `shutdown` resolves, then stops accepting new
     /// connections and lets in-flight ones drain.
-    pub async fn with_shutdown(self, shutdown: impl Future<Output = ()>) {
-        listener::accept_loop(self.endpoint, self.tx_handler, shutdown).await
+    pub async fn server_with_shutdown(self, shutdown: impl Future<Output = ()>) {
+        server::accept_loop(
+            self.endpoint,
+            self.tx_handler,
+            self.connection_limiter,
+            shutdown,
+        )
+        .await
     }
 
     /// Runs the accept loop forever — for callers who manage cancellation externally
     /// (e.g. by aborting the task this is spawned on).
     pub async fn serve(self) {
-        self.with_shutdown(std::future::pending()).await
+        self.server_with_shutdown(std::future::pending()).await
     }
 }
 
-impl std::future::IntoFuture for RawQuicServer {
+impl std::future::IntoFuture for Server {
     type Output = ();
     type IntoFuture = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -279,8 +311,8 @@ pub async fn poll_reload_loop(
     }
 }
 
-/// Turns [`ConfigRawQuicServer`] into `config.workers` bound [`RawQuicServer`]
-/// instances (sharing one address via `SO_REUSEPORT` when `workers > 1`) plus a single
+/// Turns [`ConfigRawQuicServer`] into `config.workers` bound [`Server`] instances
+/// (sharing one address via `SO_REUSEPORT` when `workers > 1`) plus a single
 /// [`RawQuicReloadHandle`] — all shards share the same cert resolver/allow-list `Arc`s,
 /// so one `reload()` call updates every shard at once. This is the only place that
 /// knows how to go from directories/URLs/config to the trait objects the builder
@@ -288,7 +320,7 @@ pub async fn poll_reload_loop(
 pub async fn from_config(
     config: &ConfigRawQuicServer,
     tx_handler: TransactionHandler,
-) -> Result<(Vec<RawQuicServer>, RawQuicReloadHandle), RawQuicServerError> {
+) -> Result<(Vec<Server>, RawQuicReloadHandle), ServerError> {
     let cert_resolver = CertResolver::from_dir(&config.server_cert_dir)?;
 
     let (client_verifier, allowlist): (Arc<dyn ClientCertVerifier>, Option<Arc<Allowlist>>) =
@@ -319,18 +351,67 @@ pub async fn from_config(
     };
 
     let worker_count = config.workers.get();
-    let mut builder = RawQuicServer::builder()
+    let mut builder = Server::builder()
         .bind(config.bind[0])
         .cert_resolver(cert_resolver as Arc<dyn ResolvesServerCert>)
-        .client_verifier(client_verifier)
-        .transaction_handler(tx_handler);
+        .client_verifier(client_verifier);
     if worker_count > 1 {
         builder = builder.reuse_port(true);
     }
 
     let servers = (0..worker_count)
-        .map(|_| builder.clone().build())
+        .map(|_| builder.clone().build(tx_handler.clone()))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok((servers, reload_handle))
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn build_binds_to_the_requested_address() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+
+        let server = ServerBuilder::default()
+            .bind(addr)
+            .cert_resolver(Arc::new(NoCertsResolver) as Arc<dyn ResolvesServerCert>)
+            .client_verifier(AllowAnyClientVerifier::new())
+            .build(TransactionHandler::new(tx, true))
+            .expect("build server");
+
+        assert_eq!(server.local_addr().expect("local addr").ip(), addr.ip());
+    }
+
+    #[tokio::test]
+    async fn build_defaults_bind_cert_resolver_and_client_verifier() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+
+        let server = ServerBuilder::default()
+            .build(TransactionHandler::new(tx, true))
+            .expect("build server with every default applied");
+
+        assert_eq!(
+            server.local_addr().expect("local addr").ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            "bind should default to 0.0.0.0"
+        );
+    }
+
+    /// A [`ResolvesServerCert`] that never actually needs to resolve anything -- this
+    /// test only exercises binding, not a live TLS handshake, so this just satisfies
+    /// the builder's required field.
+    #[derive(Debug)]
+    struct NoCertsResolver;
+
+    impl ResolvesServerCert for NoCertsResolver {
+        fn resolve(
+            &self,
+            _hello: rustls::server::ClientHello<'_>,
+        ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+            None
+        }
+    }
 }

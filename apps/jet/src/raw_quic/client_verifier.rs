@@ -353,9 +353,100 @@ impl Debug for AllowAnyClientVerifier {
     }
 }
 
+/// Skips client certificate verification entirely -- unlike [`AllowAnyClientVerifier`],
+/// this doesn't even request a client certificate (`offer_client_auth` is `false`), so
+/// there's no mTLS at all. This is [`super::ServerBuilder`]'s default when no
+/// [`ClientCertVerifier`] is configured via
+/// [`super::ServerBuilder::client_verifier`] -- fine for a server that doesn't need
+/// per-customer identity, but see [`AllowAnyClientVerifier`] or [`Allowlist`] if it does.
+pub struct SkipClientVerifier {
+    provider: Arc<CryptoProvider>,
+}
+
+impl SkipClientVerifier {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        })
+    }
+}
+
+impl ClientCertVerifier for SkipClientVerifier {
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, RustlsError> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+
+    fn offer_client_auth(&self) -> bool {
+        false
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+}
+
+impl Debug for SkipClientVerifier {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SkipClientVerifier").finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_client_verifier_disables_client_auth() {
+        let verifier = SkipClientVerifier::new();
+        assert!(
+            !verifier.offer_client_auth(),
+            "SkipClientVerifier must not even request a client certificate"
+        );
+        assert!(!verifier.client_auth_mandatory());
+    }
 
     fn self_signed_cert_pem() -> String {
         let rcgen::CertifiedKey { cert, .. } =

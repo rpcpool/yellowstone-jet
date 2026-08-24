@@ -19,7 +19,7 @@ use {
     tokio::{sync::mpsc, time::timeout},
     yellowstone_jet::{
         config::{ConfigClientAllowlistSource, ConfigRawQuicServer},
-        raw_quic::{self, RawQuicServer},
+        raw_quic::{self, Server},
         transaction_handler::TransactionHandler,
         transactions::SendTransactionRequest,
     },
@@ -86,7 +86,7 @@ struct TestServer {
 async fn build_server(
     debug_accept_any_client: bool,
     initial_customers: &[(&str, &Customer)],
-) -> (RawQuicServer, raw_quic::RawQuicReloadHandle, TestServer) {
+) -> (Server, raw_quic::RawQuicReloadHandle, TestServer) {
     let server_cert_dir = tempfile::tempdir().expect("tempdir");
     write_server_default_bundle(server_cert_dir.path());
     let allowlist_dir = tempfile::tempdir().expect("tempdir");
@@ -239,7 +239,7 @@ async fn debug_accept_any_client_bypasses_allowlist() {
 }
 
 #[tokio::test]
-async fn with_shutdown_stops_accepting_new_connections() {
+async fn server_with_shutdown_stops_accepting_new_connections() {
     let customer = generate_customer();
     let (server, _reload, ctx) = build_server(false, &[("customer-a", &customer)]).await;
 
@@ -247,7 +247,7 @@ async fn with_shutdown_stops_accepting_new_connections() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move {
         server
-            .with_shutdown(async move {
+            .server_with_shutdown(async move {
                 let _ = shutdown_rx.await;
             })
             .await;

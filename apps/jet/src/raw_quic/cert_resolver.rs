@@ -12,7 +12,7 @@ use {
     arc_swap::ArcSwap,
     rustls::{
         crypto::aws_lc_rs::sign::any_supported_type,
-        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject},
         server::{ClientHello, ResolvesServerCert},
         sign::CertifiedKey,
     },
@@ -41,6 +41,10 @@ pub enum CertResolverError {
     InvalidPrivateKey(PathBuf, rustls::pki_types::pem::Error),
     #[error("bundle {0:?} certificate/key pair is not usable: {1}")]
     UnusableKeyPair(PathBuf, rustls::Error),
+    #[error("failed to generate a self-signed certificate: {0}")]
+    SelfSignedGeneration(#[from] rcgen::Error),
+    #[error("generated self-signed certificate/key pair is not usable: {0}")]
+    UnusableSelfSignedKeyPair(rustls::Error),
 }
 
 struct CertStore {
@@ -92,6 +96,45 @@ impl ResolvesServerCert for CertResolver {
             return Some(Arc::clone(certified_key));
         }
         Some(Arc::clone(&store.default))
+    }
+}
+
+/// A [`ResolvesServerCert`] that generates one random self-signed certificate when
+/// constructed and serves it for every connection, regardless of SNI. This is
+/// [`super::ServerBuilder`]'s default when no [`ResolvesServerCert`] is configured via
+/// [`super::ServerBuilder::cert_resolver`] -- fine for a server whose clients don't
+/// validate the presented certificate against a known identity (e.g. paired with
+/// `ServerVerification::Insecure` on the client), but see [`CertResolver`] for a real
+/// deployment with a stable, customer-facing identity.
+pub struct SelfSignedCertResolver {
+    certified_key: Arc<CertifiedKey>,
+}
+
+impl SelfSignedCertResolver {
+    pub fn new() -> Result<Arc<Self>, CertResolverError> {
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
+
+        let key: PrivateKeyDer<'static> = PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into();
+        let signing_key =
+            any_supported_type(&key).map_err(CertResolverError::UnusableSelfSignedKeyPair)?;
+
+        Ok(Arc::new(Self {
+            certified_key: Arc::new(CertifiedKey::new(vec![cert.der().clone()], signing_key)),
+        }))
+    }
+}
+
+impl std::fmt::Debug for SelfSignedCertResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelfSignedCertResolver")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResolvesServerCert for SelfSignedCertResolver {
+    fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(Arc::clone(&self.certified_key))
     }
 }
 
@@ -165,6 +208,11 @@ fn load_bundle(path: &Path) -> Result<Arc<CertifiedKey>, CertResolverError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_signed_resolver_generates_a_usable_key() {
+        SelfSignedCertResolver::new().expect("generate self-signed cert");
+    }
 
     fn write_bundle(dir: &Path, name: &str, cert_pem: &str, key_pem: &str) {
         let mut contents = cert_pem.to_owned();

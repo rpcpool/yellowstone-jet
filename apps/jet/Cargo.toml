@@ -39,6 +39,7 @@ prost-types = { workspace = true }
 quinn = { workspace = true }
 quinn-proto = { workspace = true }
 rand = { workspace = true }
+rcgen = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 retry = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
@@ -62,10 +63,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 url = { workspace = true, features = ["serde"] }
+x509-parser = { workspace = true }
 
 # Agave Monorepo
 solana-bincode = { workspace = true }
 solana-client = { workspace = true }
+solana-net-utils = { workspace = true, features = ["agave-unstable-api"] }
 solana-rpc-client = { workspace = true }
 solana-rpc-client-api = { workspace = true }
 solana-system-interface = { workspace = true, features = ["bincode"] }
@@ -112,7 +115,6 @@ tonic-prost-build = { workspace = true }
 vergen = { workspace = true, features = ["build", "rustc"] }
 
 [dev-dependencies]
-rcgen = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
