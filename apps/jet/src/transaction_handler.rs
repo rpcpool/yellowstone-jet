@@ -1,6 +1,7 @@
 use {
     crate::{
-        payload::JetRpcSendTransactionConfig, solana::decode_and_deserialize,
+        payload::JetRpcSendTransactionConfig,
+        solana::{decode_and_deserialize, get_durable_nonce},
         transactions::SendTransactionRequest,
     },
     anyhow::Result,
@@ -91,6 +92,7 @@ impl TransactionHandler {
         transaction: VersionedTransaction,
         config_with_forwarding_policies: JetRpcSendTransactionConfig,
         x_request_id: Option<Uuid>,
+        x_subscription_id: Option<Uuid>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         let config = config_with_forwarding_policies.config;
 
@@ -113,16 +115,17 @@ impl TransactionHandler {
                 PACKET_DATA_SIZE
             )));
         }
-
+        let req = SendTransactionRequest {
+            signature,
+            wire_transaction: wire_transaction.into(),
+            policies: config_with_forwarding_policies.forwarding_policies,
+            x_request_id,
+            x_subscription_id,
+            durable_nonce: get_durable_nonce(&transaction),
+            recent_blockhash: *transaction.message.recent_blockhash(),
+        };
         self.transaction_sink
-            .send(SendTransactionRequest {
-                signature,
-                transaction,
-                wire_transaction: wire_transaction.into(),
-                max_retries: config.max_retries,
-                policies: config_with_forwarding_policies.forwarding_policies,
-                x_request_id,
-            })
+            .send(req)
             .await
             .expect("transaction sink closed");
 
@@ -134,6 +137,7 @@ impl TransactionHandler {
         wire_transaction: Bytes,
         config_with_forwarding_policies: JetRpcSendTransactionConfig,
         x_request_id: Option<Uuid>,
+        x_subscription_id: Option<Uuid>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         if wire_transaction.len() > PACKET_DATA_SIZE {
             return Err(TransactionHandlerError::InvalidTransaction(format!(
@@ -155,16 +159,17 @@ impl TransactionHandler {
             .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         let signature = transaction.signatures[0];
-
+        let req = SendTransactionRequest {
+            signature,
+            wire_transaction,
+            policies: config_with_forwarding_policies.forwarding_policies,
+            x_request_id,
+            durable_nonce: get_durable_nonce(&transaction),
+            recent_blockhash: *transaction.message.recent_blockhash(),
+            x_subscription_id,
+        };
         self.transaction_sink
-            .send(SendTransactionRequest {
-                signature,
-                transaction,
-                wire_transaction,
-                max_retries: config_with_forwarding_policies.config.max_retries,
-                policies: config_with_forwarding_policies.forwarding_policies,
-                x_request_id,
-            })
+            .send(req)
             .await
             .expect("transaction sink closed");
 
@@ -176,6 +181,7 @@ impl TransactionHandler {
         data: String,
         config_with_forwarding_policies: Option<JetRpcSendTransactionConfig>,
         x_request_id: Option<Uuid>,
+        x_subscription_id: Option<Uuid>,
     ) -> Result<String /* Signature */, TransactionHandlerError> {
         let config_with_forwarding_policies = config_with_forwarding_policies.unwrap_or_default();
         let config = config_with_forwarding_policies.config;
@@ -183,15 +189,17 @@ impl TransactionHandler {
         let (wire_transaction, transaction) = self.prepare_transaction(data, config).await?;
         let signature = transaction.signatures[0];
 
+        let req = SendTransactionRequest {
+            signature,
+            wire_transaction: wire_transaction.into(),
+            policies: config_with_forwarding_policies.forwarding_policies,
+            x_request_id,
+            durable_nonce: get_durable_nonce(&transaction),
+            recent_blockhash: *transaction.message.recent_blockhash(),
+            x_subscription_id,
+        };
         self.transaction_sink
-            .send(SendTransactionRequest {
-                signature,
-                transaction,
-                wire_transaction: wire_transaction.into(),
-                max_retries: config.max_retries,
-                policies: config_with_forwarding_policies.forwarding_policies,
-                x_request_id,
-            })
+            .send(req)
             .await
             .expect("transaction sink closed");
 

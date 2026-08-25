@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS chain_transaction_staging
 (
     signature String,
     slot UInt64,
+    txn_index UInt64,
     failed Bool,
     ts DateTime64(3) DEFAULT now64(3),
     INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64
@@ -15,14 +16,61 @@ ORDER BY (slot, signature)
 TTL ts + INTERVAL 1 DAY;
 
 
+CREATE TABLE IF NOT EXISTS chain_entry_staging
+(
+    slot UInt64,
+    entry_index UInt64,
+    executed_transactions_count UInt64,
+    ts DateTime64(3) DEFAULT now64(3),
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (slot, entry_index)
+TTL ts + INTERVAL 1 DAY;
+
+CREATE OR REPLACE VIEW chain_entry_with_txn_count_bounds AS
+SELECT
+    slot,
+    entry_index,
+    executed_transactions_count,
+    sum(executed_transactions_count) OVER (
+        PARTITION BY slot
+        ORDER BY entry_index
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS txn_count_cumu_upper_bound,
+    sum(executed_transactions_count) OVER (
+        PARTITION BY slot
+        ORDER BY entry_index
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) - executed_transactions_count AS txn_count_cumu_lower_bound
+FROM chain_entry_staging;
+
+
+CREATE TABLE IF NOT EXISTS landed_transaction_entry_pos (
+    signature String,
+    slot UInt64,
+    entry_index UInt64,
+    txn_index UInt64,
+    ts DateTime64(3) DEFAULT now64(3),
+    INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64
+)
+ENGINE = ReplacingMergeTree(ts)
+PARTITION BY toDate(ts)
+ORDER BY (slot, entry_index, txn_index)
+TTL ts + INTERVAL 90 DAY;
+
+
 CREATE TABLE IF NOT EXISTS landed_transactions
 (
     signature String,
     send_at_slot UInt64,
     landed_slot UInt64,
+    txn_index UInt64,
     failed Bool,
     trace_remote_peer_identity Nullable(String),
     trace_remote_peer_addr Nullable(String),
+    trace_x_request_id Nullable(UUID),
+    trace_x_subscription_id Nullable(UUID),
     trace_inserted_at DateTime64(3),
     ts DateTime64(3) DEFAULT now64(3),
     INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64
@@ -99,6 +147,8 @@ CREATE TABLE IF NOT EXISTS sent_transaction_pending
     send_at_slot UInt64,
     remote_peer_identity Nullable(String),
     remote_peer_addr Nullable(String),
+    x_request_id Nullable(UUID),
+    x_subscription_id Nullable(UUID),
     trace_inserted_at DateTime64(3),
     INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64,
     -- Needed for mv_landed_transactions' `send_at_slot BETWEEN ...` filter below to actually
@@ -139,6 +189,8 @@ SELECT
     tt.send_at_slot AS send_at_slot,
     tt.remote_peer_identity AS remote_peer_identity,
     tt.remote_peer_addr AS remote_peer_addr,
+    tt.x_request_id AS x_request_id,
+    tt.x_subscription_id AS x_subscription_id,
     tt.ts AS trace_inserted_at
 FROM txn_trace AS tt
 WHERE
@@ -190,8 +242,11 @@ WITH
 SELECT
     lt.signature AS signature,
     lt.failed AS failed,
+    lt.txn_index AS txn_index,
     tt.remote_peer_identity AS trace_remote_peer_identity,
     tt.remote_peer_addr AS trace_remote_peer_addr,
+    tt.x_request_id AS trace_x_request_id,
+    tt.x_subscription_id AS trace_x_subscription_id,
     tt.send_at_slot AS send_at_slot,
     lt.slot AS landed_slot,
     tt.trace_inserted_at AS trace_inserted_at
@@ -199,3 +254,137 @@ FROM chain_transaction_staging AS lt
 ANY INNER JOIN sent_transaction_pending AS tt ON tt.signature = lt.signature
 WHERE tt.send_at_slot BETWEEN batch_min_slot - 64 AND batch_max_slot
 SETTINGS join_use_nulls = 1;
+
+
+-- Fires the instant landed_transactions gets a new row (i.e. whenever mv_landed_transactions posts a batch)
+-- Match landed transaction with their on chain position (slot, entry_index, txn_index) in the chain_entry_staging table.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_landed_transaction_entry_pos
+TO landed_transaction_entry_pos
+AS
+SELECT
+    lt.signature AS signature,
+    lt.landed_slot AS slot,
+    es.entry_index AS entry_index,
+    lt.txn_index AS txn_index
+FROM landed_transactions AS lt
+ANY INNER JOIN chain_entry_with_txn_count_bounds AS es
+ON lt.landed_slot = es.slot
+AND lt.txn_index < es.txn_count_cumu_upper_bound
+AND lt.txn_index >= es.txn_count_cumu_lower_bound
+SETTINGS join_use_nulls = 1;
+
+
+-- Per-slot histogram of where transactions land: each slot's entries are bucketed into 256
+-- equal-width position bins (bucket 0 = start of slot, 255 = end), giving a fixed-length
+-- distribution comparable across slots regardless of how many entries they actually had.
+-- Durable beyond chain_entry_staging's own 1-day TTL -- this is the long-lived record of slot
+-- shape history.
+CREATE TABLE IF NOT EXISTS chain_entry_txn_bucket_distribution
+(
+    slot UInt64,
+    bucket UInt8,
+    slot_first_seen_ts DateTime64(3),
+    bucket_txn_count UInt64,
+    bucket_txn_share Float64,
+    computed_at DateTime64(3) DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(computed_at)
+PARTITION BY toDate(slot_first_seen_ts)
+ORDER BY (slot, bucket)
+TTL slot_first_seen_ts + INTERVAL 90 DAY;
+
+-- Can't be a plain event-driven MV: bucket boundaries need each entry's position relative to
+-- its slot's FINAL entry count, which isn't known until the slot is complete -- a plain MV only
+-- ever sees whatever partial batch of entries was just inserted, not the slot's full history.
+--
+-- Instead, refreshes every 10 seconds over a rolling 30-second window that stays 2 seconds
+-- behind `now()`. Assumes a slot's entries all arrive within ~2s of its first entry (slots are
+-- produced roughly every 400ms) -- so any slot fully inside a window ending 2s ago is safe to
+-- treat as complete. The 30s width (3x the 10s refresh cadence) gives every slot multiple
+-- refresh cycles to be captured before it ages out of the window; the explicit
+-- `slot_last_seen_ts - slot_first_seen_ts <= 2` filter is a backstop that drops any slot whose
+-- entries genuinely spread wider than assumed, rather than risk silently computing wrong bucket
+-- boundaries for it. Dropping the occasional straggling slot is fine -- the goal is a
+-- probabilistic distribution over many slots, not an exhaustive per-slot record.
+--
+-- Overlapping refreshes will recompute the same slot more than once; APPEND into a
+-- ReplacingMergeTree(computed_at) target makes that harmless (query with FINAL, or after a
+-- merge, to see the deduplicated result).
+--
+-- Runs as SQL SECURITY DEFINER (whoever creates it), same as mv_landed_transaction_slot_latency_1m
+-- above -- unlike the plain MVs elsewhere in this file, it does NOT run under the privileges of
+-- whoever inserted into chain_entry_staging, so it needs no additional grants for that user.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_chain_entry_txn_bucket_distribution
+REFRESH EVERY 10 SECOND
+APPEND
+TO chain_entry_txn_bucket_distribution
+AS
+SELECT
+    slot,
+    bucket,
+    min(slot_first_seen_ts) AS slot_first_seen_ts,
+    sum(executed_transactions_count) AS bucket_txn_count,
+    bucket_txn_count / sum(bucket_txn_count) OVER (PARTITION BY slot) AS bucket_txn_share
+FROM
+(
+    SELECT slot, entry_index, executed_transactions_count, slot_first_seen_ts, bucket
+    FROM
+    (
+        SELECT
+            slot,
+            entry_index,
+            executed_transactions_count,
+            ts,
+            min(ts) OVER (PARTITION BY slot) AS slot_first_seen_ts,
+            max(ts) OVER (PARTITION BY slot) AS slot_last_seen_ts,
+            least(255, intDiv(entry_index * 256, count() OVER (PARTITION BY slot))) AS bucket
+        FROM chain_entry_staging
+        WHERE ts >= now() - INTERVAL 30 SECOND
+          AND ts < now() - INTERVAL 2 SECOND
+    )
+    WHERE (slot_last_seen_ts - slot_first_seen_ts) <= 2
+)
+GROUP BY slot, bucket;
+
+
+-- One row per (minute, bucket, density_bin): how many slots observed a given relative density
+-- of transactions in that bucket, where relative density = bucket_txn_share * 256 (1.0 = exactly
+-- what uniform spread across 256 buckets would predict, 2.0 = double, etc). A plain average per
+-- (minute, bucket) would collapse each bucket's whole distribution to one number and lose
+-- spread/shape; this keeps enough resolution to plot a heatmap (bucket on one axis, density_bin
+-- on the other, count as intensity) and see where observations actually concentrate per bucket,
+-- not just their mean.
+--
+-- density_bin is relative density bucketed in steps of 0.1, clamped to [0, 50] -- so density_bin
+-- * 0.1 is a bin's lower edge, and bin 50 is a "5.0x and above" overflow catch-all. Median
+-- relative density across the table today is ~1.0 (as expected) with p99 ~1.85 and a max of 256
+-- (a slot with its entire volume in one bucket) -- the 0.1-wide/5.0-cap scheme keeps resolution
+-- where the real variation lives without rare extreme outliers blowing out the bin range.
+CREATE TABLE IF NOT EXISTS chain_entry_txn_bucket_density_histogram_1m
+(
+    period_start DateTime,
+    bucket UInt8,
+    density_bin UInt8,
+    n_observations UInt64
+)
+ENGINE = MergeTree
+PARTITION BY toDate(period_start)
+ORDER BY (period_start, bucket, density_bin)
+TTL period_start + INTERVAL 180 DAY;
+
+-- Same timing/staleness reasoning as mv_chain_entry_txn_bucket_distribution_1m above (2-minute
+-- buffer, plain MergeTree, approximate at the edges).
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_chain_entry_txn_bucket_density_histogram_1m
+REFRESH EVERY 1 MINUTE
+APPEND
+TO chain_entry_txn_bucket_density_histogram_1m
+AS
+SELECT
+    toStartOfMinute(now()) - INTERVAL 2 MINUTE AS period_start,
+    bucket,
+    least(50, toUInt8(floor(bucket_txn_share * 256 * 10))) AS density_bin,
+    count() AS n_observations
+FROM chain_entry_txn_bucket_distribution FINAL
+WHERE slot_first_seen_ts >= toStartOfMinute(now()) - INTERVAL 2 MINUTE
+  AND slot_first_seen_ts <  toStartOfMinute(now()) - INTERVAL 1 MINUTE
+GROUP BY bucket, density_bin;

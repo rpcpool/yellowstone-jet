@@ -430,6 +430,7 @@ mod tests {
                 signature: sig,
                 send_at_slot,
                 x_request_id: None,
+                x_subscription_id: None,
             })),
         });
 
@@ -466,6 +467,7 @@ mod tests {
                 signature: tx_sig,
                 send_at_slot,
                 x_request_id: None,
+                x_subscription_id: None,
             })),
         });
 
