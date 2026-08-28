@@ -18,10 +18,12 @@ single-use cubbyhole holding the real secret:
   refuse a token that was not minted by the expected Vault endpoint.
 
 The whole flow lives in `load_identity_from_wrapped_token` in
-[`src/main.rs`](src/main.rs): read the wrapping token from the file the Nomad
-job rendered, verify its `creation_path`, unwrap it (authenticated with the
-wrapping token itself — jet needs no other Vault credentials), and parse the
-`keypair` field into a `solana_keypair::Keypair`. In jet proper that keypair
+[`src/main.rs`](src/main.rs), built on the [`vaultrs`](https://docs.rs/vaultrs)
+crate, which ships the wrapping endpoints out of the box
+(`vaultrs::sys::wrapping::{lookup, unwrap}`): read the wrapping token from the
+file the Nomad job rendered, verify its `creation_path`, unwrap it
+(authenticated with the wrapping token itself — jet needs no other Vault
+credentials), and parse the `keypair` field into a `solana_keypair::Keypair`. In jet proper that keypair
 would become `initial_identity` for `JetIdentitySyncGroup`.
 
 ## Producer side (sample)
