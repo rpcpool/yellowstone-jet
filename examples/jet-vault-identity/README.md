@@ -21,7 +21,7 @@ The whole flow lives in `load_identity_from_wrapped_token` in
 [`src/main.rs`](src/main.rs), built on the [`vaultrs`](https://docs.rs/vaultrs)
 crate, which ships the wrapping endpoints out of the box
 (`vaultrs::sys::wrapping::{lookup, unwrap}`): read the wrapping token from the
-file the Nomad job rendered, verify its `creation_path`, unwrap it
+environment variable the Nomad job rendered, verify its `creation_path`, unwrap it
 (authenticated with the wrapping token itself — jet needs no other Vault
 credentials), and parse the `keypair` field into a `solana_keypair::Keypair`. In jet proper that keypair
 would become `initial_identity` for `JetIdentitySyncGroup`.
@@ -35,26 +35,32 @@ vault kv put kv/jet/identity keypair=@/path/to/jet-identity.json
 vault kv get -wrap-ttl=300s -field=wrapping_token kv/jet/identity
 ```
 
-In Nomad, a template stanza on the jet task can render only the wrapping
-token into the task's secrets dir (sketch, not a full job spec):
+In Nomad, a template stanza on the jet task can export only the wrapping token
+into the task environment (sketch, not a full job spec):
 
 ```hcl
 template {
-  destination = "${NOMAD_SECRETS_DIR}/identity.wrapped"
-  perms       = "0400"
+  destination = "${NOMAD_SECRETS_DIR}/identity.env"
+  env         = true
   change_mode = "restart"
-  data        = "{{ with secret \"kv/data/jet/identity\" \"wrap_ttl=5m\" }}{{ .WrapInfo.Token }}{{ end }}"
+  data        = "VAULT_WRAPPED_TOKEN={{ with secret \"kv/data/jet/identity\" \"wrap_ttl=5m\" }}{{ .WrapInfo.Token }}{{ end }}"
 }
 ```
 
 Because the token is single-use, every task (re)start needs a freshly minted
 wrapping token — `change_mode = "restart"` takes care of that.
 
+The token lives only in the task environment, so it is never written to a
+volume — but it does remain readable through `/proc/self/environ` for the
+life of the process. Scrubbing it after the unwrap costs an `unsafe` block in
+edition 2024 and is only sound before any thread starts, so do it at the very
+top of `main` if that matters for your threat model.
+
 ## Running the sample
 
 ```bash
 export VAULT_ADDR=https://vault.service.consul:8200
-export VAULT_WRAPPED_TOKEN_FILE="$NOMAD_SECRETS_DIR/identity.wrapped"
+export VAULT_WRAPPED_TOKEN="$(vault kv get -wrap-ttl=300s -field=wrapping_token kv/jet/identity)"
 export VAULT_EXPECTED_CREATION_PATH=kv/data/jet/identity   # optional tamper check
 cargo run --bin jet-vault-identity
 # jet identity unwrapped: <pubkey>

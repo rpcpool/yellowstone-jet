@@ -6,12 +6,12 @@
 //! response-wrapping endpoints out of the box
 //! (`vaultrs::sys::wrapping::{lookup, unwrap}`).
 //!
-//! The Nomad job only hands jet a *wrapping token* (e.g. rendered into
-//! `${NOMAD_SECRETS_DIR}/identity.wrapped` by a template stanza). The real
-//! keypair sits in a single-use cubbyhole inside Vault. At startup jet:
+//! The Nomad job only hands jet a *wrapping token*, rendered into the task
+//! environment by a `template { env = true }` stanza. The real keypair sits
+//! in a single-use cubbyhole inside Vault. At startup jet:
 //!
-//! 1. reads the wrapping token — it is the only Vault credential jet has or
-//!    needs, so it becomes the client token,
+//! 1. reads the wrapping token from the environment — it is the only Vault
+//!    credential jet has or needs, so it becomes the client token,
 //! 2. (optionally) verifies via `sys/wrapping/lookup` — which does NOT
 //!    consume the token — that it was created by the expected Vault path,
 //!    refusing a substituted/forged token,
@@ -28,7 +28,7 @@
 //! ```
 //!
 //! or, in a Nomad template stanza rendered by the cluster's Vault
-//! integration, writes only the wrapping token into the task secrets dir.
+//! integration, exports only the wrapping token into the task environment.
 //!
 //! In jet proper, `load_identity_from_wrapped_token` is what would be called
 //! from `main` to produce `initial_identity` when the config selects the
@@ -38,7 +38,7 @@
 //! identity:
 //!   vault:
 //!     addr: https://vault.service.consul:8200
-//!     wrapped_token_file: /secrets/identity.wrapped
+//!     wrapped_token_env: VAULT_WRAPPED_TOKEN
 //!     expected_creation_path: kv/data/jet/identity
 //! ```
 
@@ -60,9 +60,10 @@ use {
 pub struct VaultIdentityConfig {
     /// Vault address, e.g. `https://vault.service.consul:8200`
     pub addr: String,
-    /// File the Nomad job rendered the wrapping token into
-    /// (e.g. `${NOMAD_SECRETS_DIR}/identity.wrapped`)
-    pub wrapped_token_file: String,
+    /// Name of the environment variable holding the response-wrapped token,
+    /// e.g. `VAULT_WRAPPED_TOKEN`. A Nomad `template { env = true }` stanza
+    /// renders it into the task environment.
+    pub wrapped_token_env: String,
     /// If set, refuse to unwrap a token that was not created by exactly this
     /// Vault path (e.g. `kv/data/jet/identity`)
     pub expected_creation_path: Option<String>,
@@ -74,17 +75,24 @@ pub struct VaultIdentityConfig {
 pub async fn load_identity_from_wrapped_token(
     config: &VaultIdentityConfig,
 ) -> anyhow::Result<Keypair> {
-    // 1. Ingest the wrapping token provided by the Nomad job
-    let wrapping_token = tokio::fs::read_to_string(&config.wrapped_token_file)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to read wrapped token from {}",
-                config.wrapped_token_file
-            )
-        })?
+    // 1. Ingest the wrapping token from the environment, where the Nomad job
+    //    rendered it — so the token never lands on disk.
+    //
+    //    It does stay in the process environment (readable through
+    //    /proc/self/environ). Scrubbing it needs an `unsafe` block in edition
+    //    2024 and is only sound before any thread starts, so do that at the
+    //    very top of `main` if your threat model calls for it, not here.
+    let wrapping_token = std::env::var(&config.wrapped_token_env)
+        .with_context(|| format!("{} is not set", config.wrapped_token_env))?
         .trim()
         .to_owned();
+    if wrapping_token.is_empty() {
+        bail!(
+            "{} is empty — the Nomad template that mints the wrapping token probably did not \
+             render",
+            config.wrapped_token_env
+        );
+    }
 
     // The wrapping token authenticates its own lookup and unwrap, so it is
     // the client token — jet needs no other Vault credentials.
@@ -159,8 +167,7 @@ fn parse_keypair(value: &Value) -> anyhow::Result<Keypair> {
 async fn main() -> anyhow::Result<()> {
     let config = VaultIdentityConfig {
         addr: std::env::var("VAULT_ADDR").unwrap_or_else(|_| "http://127.0.0.1:8200".to_owned()),
-        wrapped_token_file: std::env::var("VAULT_WRAPPED_TOKEN_FILE")
-            .context("VAULT_WRAPPED_TOKEN_FILE is not set")?,
+        wrapped_token_env: "VAULT_WRAPPED_TOKEN".to_owned(),
         expected_creation_path: std::env::var("VAULT_EXPECTED_CREATION_PATH").ok(),
     };
 
