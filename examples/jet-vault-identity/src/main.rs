@@ -30,17 +30,17 @@
 //! or, in a Nomad template stanza rendered by the cluster's Vault
 //! integration, exports only the wrapping token into the task environment.
 //!
-//! In jet proper, `load_identity_from_wrapped_token` is what would be called
-//! from `main` to produce `initial_identity` when the config selects the
-//! Vault-wrapped source, e.g.:
+//! Everything comes from the environment, so there is no config to thread
+//! through:
 //!
-//! ```yaml
-//! identity:
-//!   vault:
-//!     addr: https://vault.service.consul:8200
-//!     wrapped_token_env: VAULT_WRAPPED_TOKEN
-//!     expected_creation_path: kv/data/jet/identity
-//! ```
+//! * `VAULT_ADDR` — Vault address (read by vaultrs itself; defaults to
+//!   `http://127.0.0.1:8200`)
+//! * `VAULT_WRAPPED_TOKEN` — the response-wrapped token, required
+//! * `VAULT_EXPECTED_CREATION_PATH` — optional; when set, enables the
+//!   creation-path tamper check
+//!
+//! In jet proper, `load_identity_from_wrapped_token` is what would be called
+//! from `main` to produce `initial_identity`.
 
 use {
     anyhow::{bail, Context},
@@ -54,27 +54,11 @@ use {
     },
 };
 
-/// Where jet finds the wrapping token. Mirrors what a `ConfigIdentity`
-/// extension would carry.
-#[derive(Debug)]
-pub struct VaultIdentityConfig {
-    /// Vault address, e.g. `https://vault.service.consul:8200`
-    pub addr: String,
-    /// Name of the environment variable holding the response-wrapped token,
-    /// e.g. `VAULT_WRAPPED_TOKEN`. A Nomad `template { env = true }` stanza
-    /// renders it into the task environment.
-    pub wrapped_token_env: String,
-    /// If set, refuse to unwrap a token that was not created by exactly this
-    /// Vault path (e.g. `kv/data/jet/identity`)
-    pub expected_creation_path: Option<String>,
-}
-
-/// Ingest the response-wrapped token and unwrap it into the jet identity.
+/// Ingest the response-wrapped token from `$VAULT_WRAPPED_TOKEN` and unwrap
+/// it into the jet identity.
 ///
 /// The returned `Keypair` only ever lives in memory.
-pub async fn load_identity_from_wrapped_token(
-    config: &VaultIdentityConfig,
-) -> anyhow::Result<Keypair> {
+pub async fn load_identity_from_wrapped_token() -> anyhow::Result<Keypair> {
     // 1. Ingest the wrapping token from the environment, where the Nomad job
     //    rendered it — so the token never lands on disk.
     //
@@ -82,36 +66,37 @@ pub async fn load_identity_from_wrapped_token(
     //    /proc/self/environ). Scrubbing it needs an `unsafe` block in edition
     //    2024 and is only sound before any thread starts, so do that at the
     //    very top of `main` if your threat model calls for it, not here.
-    let wrapping_token = std::env::var(&config.wrapped_token_env)
-        .with_context(|| format!("{} is not set", config.wrapped_token_env))?
+    let wrapping_token = std::env::var("VAULT_WRAPPED_TOKEN")
+        .context("VAULT_WRAPPED_TOKEN is not set")?
         .trim()
         .to_owned();
     if wrapping_token.is_empty() {
         bail!(
-            "{} is empty — the Nomad template that mints the wrapping token probably did not \
-             render",
-            config.wrapped_token_env
+            "VAULT_WRAPPED_TOKEN is empty — the Nomad template that mints the wrapping token \
+             probably did not render"
         );
     }
 
     // The wrapping token authenticates its own lookup and unwrap, so it is
-    // the client token — jet needs no other Vault credentials.
+    // the client token — jet needs no other Vault credentials. The address
+    // is left to vaultrs, which reads $VAULT_ADDR and otherwise falls back to
+    // http://127.0.0.1:8200.
     let client = VaultClient::new(
         VaultClientSettingsBuilder::default()
-            .address(&config.addr)
             .token(&wrapping_token)
             .build()
-            .context("invalid Vault client settings")?,
+            .context("invalid Vault client settings (check $VAULT_ADDR)")?,
     )
     .context("failed to build Vault client")?;
 
-    // 2. Optional tamper check. `sys/wrapping/lookup` does not consume the
-    //    token, and a wrapping token is allowed to look itself up.
-    if let Some(expected) = &config.expected_creation_path {
+    // 2. Optional tamper check, enabled by setting
+    //    $VAULT_EXPECTED_CREATION_PATH. `sys/wrapping/lookup` does not consume
+    //    the token, and a wrapping token is allowed to look itself up.
+    if let Ok(expected) = std::env::var("VAULT_EXPECTED_CREATION_PATH") {
         let info = wrapping::lookup(&client, &wrapping_token)
             .await
             .context("sys/wrapping/lookup failed")?;
-        if &info.creation_path != expected {
+        if info.creation_path != expected {
             bail!(
                 "SECURITY: wrapping token creation_path mismatch: expected {expected}, got {} — \
                  refusing to unwrap, the token may have been substituted",
@@ -165,13 +150,7 @@ fn parse_keypair(value: &Value) -> anyhow::Result<Keypair> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = VaultIdentityConfig {
-        addr: std::env::var("VAULT_ADDR").unwrap_or_else(|_| "http://127.0.0.1:8200".to_owned()),
-        wrapped_token_env: "VAULT_WRAPPED_TOKEN".to_owned(),
-        expected_creation_path: std::env::var("VAULT_EXPECTED_CREATION_PATH").ok(),
-    };
-
-    let identity = load_identity_from_wrapped_token(&config).await?;
+    let identity = load_identity_from_wrapped_token().await?;
 
     // In jet this Keypair would become `initial_identity`, handed to
     // `JetIdentitySyncGroup::new(...)` — here we just prove we have it.

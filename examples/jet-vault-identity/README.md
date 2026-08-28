@@ -26,6 +26,14 @@ environment variable the Nomad job rendered, verify its `creation_path`, unwrap 
 credentials), and parse the `keypair` field into a `solana_keypair::Keypair`. In jet proper that keypair
 would become `initial_identity` for `JetIdentitySyncGroup`.
 
+It takes no arguments — everything comes from the environment:
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `VAULT_ADDR` | no | Vault address; read by vaultrs itself, defaults to `http://127.0.0.1:8200` |
+| `VAULT_WRAPPED_TOKEN` | yes | the response-wrapped, single-use token |
+| `VAULT_EXPECTED_CREATION_PATH` | no | when set, enables the creation-path tamper check |
+
 ## Producer side (sample)
 
 Store the identity and mint a wrapped read of it:
