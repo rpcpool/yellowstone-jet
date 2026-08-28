@@ -86,6 +86,11 @@ pub mod config;
 ///
 pub mod core;
 ///
+/// module for the TPU sender's identity: a public key paired with its derived, memory-hardened
+/// QUIC client TLS credentials
+///
+pub mod identity;
+///
 /// module for common tpu sender implementation
 ///
 pub mod sender;

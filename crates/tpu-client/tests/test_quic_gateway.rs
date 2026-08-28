@@ -17,7 +17,7 @@ use {
         sync::{Arc, Mutex, RwLock},
         time::{Duration, Instant},
     },
-    testkit::{build_random_endpoint, generate_random_local_addr},
+    testkit::{build_random_endpoint, generate_random_local_addr, tpu_identity},
     tokio::{
         sync::mpsc,
         task::{self, JoinHandle, JoinSet},
@@ -264,7 +264,7 @@ async fn send_buffer_should_land_properly() {
         identity_updater: _,
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
-    } = gateway_spawner.spawn_default_with_callback(gateway_kp.insecure_clone(), callback_tx);
+    } = gateway_spawner.spawn_default_with_callback(tpu_identity(&gateway_kp), callback_tx);
 
     let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
         rx_server_identity.insecure_clone(),
@@ -319,7 +319,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
         identity_updater: _,
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
-    } = gateway_spawner.spawn_default_with_callback(gateway_kp.insecure_clone(), callback_tx);
+    } = gateway_spawner.spawn_default_with_callback(tpu_identity(&gateway_kp), callback_tx);
     const MAX_TX: u64 = 5;
 
     let (mut client_rx, _rx_server_handle) = MockedRemoteValidator::spawn(
@@ -396,7 +396,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
-        gateway_kp.insecure_clone(),
+        tpu_identity(&gateway_kp),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
@@ -467,7 +467,7 @@ async fn it_should_update_gatway_identity() {
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
-        gateway_kp.insecure_clone(),
+        tpu_identity(&gateway_kp),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
@@ -494,7 +494,7 @@ async fn it_should_update_gatway_identity() {
     let gateway_identity2 = Keypair::new();
 
     identity_updater
-        .update_identity(gateway_identity2.insecure_clone())
+        .update_identity(tpu_identity(&gateway_identity2))
         .await
         .unwrap();
 
@@ -539,7 +539,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
-        gateway_kp.insecure_clone(),
+        tpu_identity(&gateway_kp),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
@@ -635,7 +635,7 @@ async fn it_should_evict_connection() {
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
-        gateway_kp.insecure_clone(),
+        tpu_identity(&gateway_kp),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
@@ -772,7 +772,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
-        gateway_kp.insecure_clone(),
+        tpu_identity(&gateway_kp),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
@@ -842,7 +842,7 @@ async fn it_should_refuse_txn_bigger_than_1232_bytes() {
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
-        gateway_kp.insecure_clone(),
+        tpu_identity(&gateway_kp),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
@@ -913,7 +913,7 @@ async fn it_should_detect_remote_peer_address_change() {
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
-        gateway_kp.insecure_clone(),
+        tpu_identity(&gateway_kp),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::new(IgnorantLeaderPredictor),
@@ -1072,7 +1072,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
     } = driver_spawner.spawn(
-        gateway_kp.insecure_clone(),
+        tpu_identity(&gateway_kp),
         gateway_config,
         Arc::new(StakeBasedEvictionStrategy::default()),
         Arc::clone(&fake_predictor) as Arc<dyn UpcomingLeaderPredictor + Send + Sync>,
@@ -1197,7 +1197,7 @@ async fn it_should_support_multiplexed_connection() {
         driver_tx_sink: transaction_sink,
         driver_join_handle: _,
     } = tpu_sender_spawner.spawn(
-        tpu_sender_identity.insecure_clone(),
+        tpu_identity(&tpu_sender_identity),
         tpu_sender_config,
         Arc::new(spy_eviction_strategy.clone()),
         Arc::new(IgnorantLeaderPredictor),
@@ -1291,7 +1291,7 @@ async fn it_should_support_multiplexed_connection() {
     let tpu_sender_identity2 = Keypair::new();
 
     identity_updater
-        .update_identity(tpu_sender_identity2.insecure_clone())
+        .update_identity(tpu_identity(&tpu_sender_identity2))
         .await
         .unwrap();
 

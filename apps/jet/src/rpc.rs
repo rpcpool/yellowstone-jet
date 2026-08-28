@@ -178,12 +178,11 @@ pub mod rpc_admin {
             core::{RpcResult, async_trait},
             proc_macros::rpc,
         },
-        solana_keypair::{Keypair, read_keypair_file},
         solana_pubkey::Pubkey,
-        solana_signer::Signer,
         std::sync::Arc,
         tokio::sync::Mutex,
         tracing::info,
+        yellowstone_jet_tpu_client::identity::HardenedKeypair,
     };
 
     #[rpc(server, client)]
@@ -210,7 +209,7 @@ pub mod rpc_admin {
 
     #[async_trait::async_trait]
     pub trait JetIdentityUpdater {
-        async fn update_identity(&mut self, identity: Keypair);
+        async fn update_identity(&mut self, identity: HardenedKeypair);
 
         fn get_identity(&self) -> Pubkey;
     }
@@ -239,7 +238,7 @@ pub mod rpc_admin {
                     "set_identity with require_tower is not supported".to_owned(),
                 ));
             }
-            let keypair = read_keypair_file(&keypair_file).map_err(|err| {
+            let keypair = HardenedKeypair::read_from_file(&keypair_file).map_err(|err| {
                 invalid_params(format!(
                     "Failed to read identity keypair from {keypair_file}: {err}"
                 ))
@@ -257,16 +256,18 @@ pub mod rpc_admin {
                     "set_identity_from_bytes with require_tower is not supported".to_owned(),
                 ));
             }
-            let keypair = Keypair::try_from(identity_keypair.as_slice()).map_err(|err| {
-                invalid_params(format!(
-                    "Failed to read identity keypair from provided byte array: {err}"
-                ))
-            })?;
+            let keypair =
+                HardenedKeypair::try_from(identity_keypair.as_slice()).map_err(|err| {
+                    invalid_params(format!(
+                        "Failed to read identity keypair from provided byte array: {err}"
+                    ))
+                })?;
             self.set_keypair(keypair).await
         }
 
         async fn reset_identity(&self) -> RpcResult<()> {
-            let random_identity = Keypair::new();
+            let random_identity = HardenedKeypair::new();
+
             self.jet_identity_updater
                 .lock()
                 .await
@@ -277,7 +278,7 @@ pub mod rpc_admin {
     }
 
     impl RpcServerImpl {
-        async fn set_keypair(&self, identity: Keypair) -> RpcResult<()> {
+        async fn set_keypair(&self, identity: HardenedKeypair) -> RpcResult<()> {
             if let Some(allow_ident) = &self.allowed_identity
                 && allow_ident != &identity.pubkey()
             {

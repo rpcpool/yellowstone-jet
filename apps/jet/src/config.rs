@@ -81,9 +81,6 @@ pub struct ConfigJet {
     #[serde(default = "default_true")]
     pub enable_yellowstone_shield: bool,
 
-    /// Prometheus Push Gateway
-    pub prometheus: Option<PrometheusConfig>,
-
     /// Shield Program ID (Optional, default to yellowstone-shield-store default)
     #[serde(default, deserialize_with = "ConfigJet::deserialize_maybe_program_id")]
     pub program_id: Option<Pubkey>,
