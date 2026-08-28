@@ -1,7 +1,3 @@
-CREATE DATABASE IF NOT EXISTS jet;
-
-USE DATABASE jet;
-
 CREATE TABLE IF NOT EXISTS txn_trace
 (
     signature String,
@@ -23,4 +19,5 @@ CREATE TABLE IF NOT EXISTS txn_trace
 )
 ENGINE = MergeTree
 PARTITION BY toDate(ts)
-ORDER BY (ts, signature);
+ORDER BY (ts, signature)
+TTL ts + INTERVAL 180 DAY;

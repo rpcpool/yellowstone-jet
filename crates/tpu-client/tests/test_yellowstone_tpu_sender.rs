@@ -3,7 +3,7 @@
 mod testkit;
 
 use {
-    crate::testkit::{build_validator_quic_tpu_endpoint, generate_random_local_addr},
+    crate::testkit::{build_validator_quic_tpu_endpoint, generate_random_local_addr, tpu_identity},
     bytes::Bytes,
     quinn::ConnectionError,
     solana_keypair::Keypair,
@@ -27,6 +27,7 @@ use {
             IgnorantLeaderPredictor, LeaderTpuInfoService, Nothing, StakeBasedEvictionStrategy,
             ValidatorStakeInfoService,
         },
+        identity::TpuIdentity,
         rpc::schedule::ManagedLeaderSchedule,
         sender::create_base_tpu_client,
         slot::SlotTracker,
@@ -180,19 +181,19 @@ impl MockedRemoteValidator {
 }
 
 async fn build_sender_from_parts(
-    gateway_kp: Keypair,
+    gateway_identity: TpuIdentity,
     leader_tpu_info: Arc<dyn LeaderTpuInfoService + Send + Sync>,
     schedule: Vec<Pubkey>,
     current_slot: u64,
 ) -> YellowstoneTpuSender {
-    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1_000)]);
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_identity.pubkey(), 1_000)]);
 
     let base_tpu_sender = create_base_tpu_client(
         TpuSenderConfig {
             max_connection_attempts: 1,
             ..Default::default()
         },
-        gateway_kp,
+        gateway_identity,
         Arc::clone(&leader_tpu_info),
         Arc::new(stake_info_map),
         Arc::new(StakeBasedEvictionStrategy::default()),
@@ -223,7 +224,7 @@ async fn from_parts_send_txn_many_dest_should_land_properly() {
     )])) as Arc<dyn LeaderTpuInfoService + Send + Sync>;
 
     let mut sender =
-        build_sender_from_parts(gateway_kp.insecure_clone(), leader_tpu_info, vec![], 0).await;
+        build_sender_from_parts(tpu_identity(&gateway_kp), leader_tpu_info, vec![], 0).await;
 
     let (mut client_rx, _rx_server_handle) =
         MockedRemoteValidator::spawn(remote_identity.insecure_clone(), remote_addr);
@@ -259,7 +260,7 @@ async fn from_parts_sending_multiple_tx_to_same_peer_should_reuse_connection() {
     )])) as Arc<dyn LeaderTpuInfoService + Send + Sync>;
 
     let mut sender =
-        build_sender_from_parts(gateway_kp.insecure_clone(), leader_tpu_info, vec![], 0).await;
+        build_sender_from_parts(tpu_identity(&gateway_kp), leader_tpu_info, vec![], 0).await;
 
     let (mut client_rx, _rx_server_handle) =
         MockedRemoteValidator::spawn(remote_identity.insecure_clone(), remote_addr);
@@ -313,7 +314,7 @@ async fn from_parts_send_txn_should_follow_managed_schedule() {
     ])) as Arc<dyn LeaderTpuInfoService + Send + Sync>;
 
     let mut sender = build_sender_from_parts(
-        gateway_kp.insecure_clone(),
+        tpu_identity(&gateway_kp),
         leader_tpu_info,
         vec![leader_identity.pubkey()],
         0,
@@ -359,7 +360,7 @@ async fn from_parts_should_support_identity_update() {
     )])) as Arc<dyn LeaderTpuInfoService + Send + Sync>;
 
     let mut sender = build_sender_from_parts(
-        gateway_identity_1.insecure_clone(),
+        tpu_identity(&gateway_identity_1),
         leader_tpu_info,
         vec![],
         0,
@@ -386,7 +387,7 @@ async fn from_parts_should_support_identity_update() {
     assert_eq!(first_req.from, gateway_identity_1.pubkey());
 
     sender
-        .update_identity(gateway_identity_2.insecure_clone())
+        .update_identity(tpu_identity(&gateway_identity_2))
         .await
         .expect("update identity");
 

@@ -21,6 +21,7 @@ use {
     url::Url,
     yellowstone_jet_tpu_client::{
         core::{TpuSenderResponse, TpuSenderTxnInfo},
+        identity::TpuIdentity,
         yellowstone_grpc::sender::{
             Endpoints, NewYellowstoneTpuSender, YellowstoneTpuSender, YellowstoneTpuSenderConfig,
             create_yellowstone_tpu_sender_with_callback,
@@ -154,11 +155,13 @@ async fn main() {
         ..Default::default()
     };
 
+    let tpu_identity = TpuIdentity::from_keypair(&identity);
+
     let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel();
     let NewYellowstoneTpuSender {
         sender,
         related_objects_jh: _,
-    } = create_yellowstone_tpu_sender_with_callback(config, identity.insecure_clone(), callback_tx)
+    } = create_yellowstone_tpu_sender_with_callback(config, tpu_identity, callback_tx)
         .await
         .expect("tpu-sender");
 

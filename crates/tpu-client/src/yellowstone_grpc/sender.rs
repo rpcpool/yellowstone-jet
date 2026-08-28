@@ -5,6 +5,7 @@ use {
             Nothing, StakeBasedEvictionStrategy, TpuSenderResponseCallback, TpuSenderTxn,
             TpuSenderTxnInfo, UpdateIdentity,
         },
+        identity::TpuIdentity,
         rpc::{
             schedule::{
                 ManagedLeaderSchedule, ManagedLeaderScheduleConfig, spawn_managed_leader_schedule,
@@ -28,7 +29,6 @@ use {
         client_error::ClientError, nonblocking::rpc_client, rpc_client::RpcClientConfig,
     },
     solana_commitment_config::CommitmentConfig,
-    solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_rpc_client::http_sender::HttpSender,
     std::{
@@ -124,13 +124,14 @@ pub enum CreateTpuSenderError {
 /// ```ignore
 ///
 /// let my_identity = solana_keypair::read_keypair_file("/path/to/my/id.json").expect("read_keypair_file");
+/// let tpu_identity = TpuIdentity::from_keypair(&my_identity);
 ///
 /// let NewYellowstoneTpuSender {
 ///     sender,
 ///     related_objects_jh: _,
 /// } = create_yellowstone_tpu_sender(
 ///     Default::default(),
-///     my_identity,
+///     tpu_identity,
 ///     Endpoints {
 ///         rpc: "https://my.rpc.endpoint".to_string(),
 ///         grpc: "https://my.grpc.endpoint".to_string(),
@@ -563,16 +564,16 @@ impl YellowstoneTpuSender {
     /// # Arguments
     ///
     /// - `config`: Configuration for the TPU sender [`YellowstoneTpuSenderConfig`], including TPU event-loop, RPC, gRPC, and other settings.
-    /// - `initial_identity`: The initial [`Keypair`] identity to use for sending transactions.
+    /// - `initial_identity`: The initial [`TpuIdentity`] to use for sending transactions.
     ///
     /// # Notes
     ///
-    /// They initial [`Keypair`] could be a temporary identity, and you can update it later using [`YellowstoneTpuSender::update_identity`].
-    /// You can generate one easily via [`Keypair::new()`].
+    /// The initial identity could be a temporary one, and you can update it later using [`YellowstoneTpuSender::update_identity`].
+    /// Build one via [`TpuIdentity::from_keypair`].
     ///
     pub async fn connect(
         config: YellowstoneTpuSenderConfig,
-        initial_identity: Keypair,
+        initial_identity: TpuIdentity,
     ) -> Result<YellowstoneTpuSender, CreateTpuSenderError> {
         let NewYellowstoneTpuSender {
             sender,
@@ -587,12 +588,12 @@ impl YellowstoneTpuSender {
     /// # Arguments
     ///
     /// - `config`: Configuration for the TPU sender [`YellowstoneTpuSenderConfig`], including TPU event-loop, RPC, gRPC, and other settings.
-    /// - `initial_identity`: The initial [`Keypair`] identity to use for sending transactions.
+    /// - `initial_identity`: The initial [`TpuIdentity`] to use for sending transactions.
     /// - `callback`: An implementation of [`TpuSenderResponseCallback`] that will be invoked for each response received from the TPU, including successful sends, failures, and dropped transactions.
     ///
     pub async fn connect_with_callback(
         config: YellowstoneTpuSenderConfig,
-        initial_identity: Keypair,
+        initial_identity: TpuIdentity,
         callback: impl TpuSenderResponseCallback + 'static,
     ) -> Result<YellowstoneTpuSender, CreateTpuSenderError> {
         let NewYellowstoneTpuSender {
@@ -878,13 +879,13 @@ impl YellowstoneTpuSender {
     }
 
     ///
-    /// Updates the identity keypair used by the TPU sender.
+    /// Updates the identity used by the TPU sender.
     ///
     /// # Arguments
     ///
-    /// * `new_identity` - The new identity [`Keypair`] to use.
+    /// * `new_identity` - The new [`TpuIdentity`] to use.
     ///
-    pub fn update_identity(&mut self, new_identity: Keypair) -> UpdateIdentity {
+    pub fn update_identity(&mut self, new_identity: TpuIdentity) -> UpdateIdentity {
         self.base_tpu_sender.update_identity(new_identity)
     }
 }
@@ -1203,7 +1204,7 @@ impl PollYellowstoneTpuSender {
     ///
     /// Updates the identity keypair used by the underlying [`YellowstoneTpuSender`].
     ///
-    pub fn update_identity(&mut self, new_identity: Keypair) -> UpdateIdentity {
+    pub fn update_identity(&mut self, new_identity: TpuIdentity) -> UpdateIdentity {
         self.sender.update_identity(new_identity)
     }
 
@@ -1443,7 +1444,7 @@ pub struct NewYellowstoneTpuSender {
 /// # Arguments
 ///
 /// * `config` - [`YellowstoneTpuSenderConfig`] for the Yellowstone TPU sender.
-/// * `initial_identity` - The initial identity [`Keypair`] for the TPU sender.
+/// * `initial_identity` - The initial [`TpuIdentity`] for the TPU sender.
 /// * `rpc_client` - An RPC client [`rpc_client::RpcClient`] to interact with the Solana network.
 /// * `grpc_client` - A gRPC client [`GeyserGrpcClient`] to interact with the Yellowstone Geyser service.
 ///
@@ -1454,7 +1455,7 @@ pub struct NewYellowstoneTpuSender {
 ///
 pub async fn create_yellowstone_tpu_sender_with_clients<CB>(
     config: YellowstoneTpuSenderConfig,
-    initial_identity: Keypair,
+    initial_identity: TpuIdentity,
     rpc_client: Arc<rpc_client::RpcClient>,
     grpc_client: GeyserGrpcClient,
     callback: Option<CB>,
@@ -1589,7 +1590,7 @@ impl Endpoints {
 ///
 pub async fn create_yellowstone_tpu_sender_with_callback<CB>(
     config: YellowstoneTpuSenderConfig,
-    initial_identity: Keypair,
+    initial_identity: TpuIdentity,
     callback: CB,
 ) -> Result<NewYellowstoneTpuSender, CreateTpuSenderError>
 where
@@ -1636,7 +1637,7 @@ where
 
 pub async fn create_yellowstone_tpu_sender(
     config: YellowstoneTpuSenderConfig,
-    initial_identity: Keypair,
+    initial_identity: TpuIdentity,
 ) -> Result<NewYellowstoneTpuSender, CreateTpuSenderError> {
     create_yellowstone_tpu_sender_with_callback(config, initial_identity, Nothing).await
 }

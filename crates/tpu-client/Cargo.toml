@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet-tpu-client"
-version = "0.7.0"
+version = "0.8.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -72,6 +72,7 @@ intg-testing = []
 simd-0296 = []
 
 [dependencies]
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 wincode = { workspace = true, optional = true }
@@ -81,6 +82,7 @@ bytes = { workspace = true }
 clap = { workspace = true, features = ["cargo", "derive", "env"], optional = true }
 derive_more = { workspace = true, features = ["display"] }
 dotenvy = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true }
 futures = { workspace = true }
 hostname = { workspace = true }
 http-body-util = { workspace = true }
@@ -93,6 +95,7 @@ prometheus = { workspace = true, optional = true }
 quinn = { workspace = true }
 quinn-proto = { workspace = true }
 rand = { workspace = true }
+region = { workspace = true }
 retry = { workspace = true }
 rustls = { workspace = true }
 semver = { workspace = true }
@@ -106,6 +109,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"], optional = true }
 url = { workspace = true, features = ["serde"] }
+zeroize = { workspace = true }
 
 # Agave Monorepo
 solana-client = { workspace = true }

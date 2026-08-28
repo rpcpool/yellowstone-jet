@@ -5,11 +5,9 @@ use {
     clap::{Parser, Subcommand},
     futures::FutureExt,
     jsonrpsee::http_client::HttpClientBuilder,
-    reqwest::{Client, Url},
     solana_client::rpc_client::RpcClientConfig,
     solana_commitment_config::CommitmentConfig,
     solana_keypair::{Keypair, read_keypair},
-    solana_pubkey::Pubkey,
     solana_rpc_client::http_sender::HttpSender,
     std::{
         collections::HashMap,
@@ -25,8 +23,8 @@ use {
     tokio::{
         runtime::Builder,
         signal::unix::{SignalKind, signal},
-        sync::{Mutex, mpsc, watch},
-        task::{self, JoinHandle, JoinSet},
+        sync::{Mutex, mpsc},
+        task::{self, JoinSet},
         time::Instant,
     },
     tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream},
@@ -35,11 +33,10 @@ use {
     yellowstone_jet::{
         blockhash_queue::BlockhashQueue,
         cluster_tpu_info::ClusterTpuInfo,
-        config::{ConfigJet, PrometheusConfig, RpcErrorStrategy, load_config},
+        config::{ConfigJet, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_lewis::create_lewis_pipeline,
-        identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
-        metrics::{REGISTRY, collect_to_text, jet as metrics},
+        metrics::{REGISTRY, jet as metrics},
         rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
         setup_tracing,
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
@@ -50,13 +47,14 @@ use {
             SendTransactionRequest, TransactionFanout, TransactionPolicyStore,
         },
         txn_trace_drain::HttpTxnTraceDrain,
-        util::{WaitShutdown, prom::inject_job_label},
+        util::WaitShutdown,
     },
     yellowstone_jet_tpu_client::{
         core::{
             IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
-            StakeBasedEvictionStrategy, UpcomingLeaderPredictor,
+            StakeBasedEvictionStrategy, TpuSenderIdentityUpdater, UpcomingLeaderPredictor,
         },
+        identity::TpuIdentity,
         sender::{PollTpuSender, create_base_tpu_client},
     },
     yellowstone_shield_store::PolicyStore,
@@ -197,12 +195,12 @@ async fn run_cmd_admin(config: ConfigJet, admin_cmd: ArgsCommandAdmin) -> anyhow
 /// This task keeps the stake metrics up to date for the current identity.
 ///
 async fn keep_stake_metrics_up_to_date_task(
-    mut stake_info_identity_observer: watch::Receiver<Pubkey>,
+    tpu_identity_update: TpuSenderIdentityUpdater,
     stake_info_map: StakeInfoMap,
     cancellation_token: CancellationToken,
 ) {
     loop {
-        let current_identy = *stake_info_identity_observer.borrow_and_update();
+        let current_identy = tpu_identity_update.current_identity();
 
         let (stake, total_stake) = stake_info_map
             .get_stake_info_with_total_stake(current_identy)
@@ -226,10 +224,7 @@ async fn keep_stake_metrics_up_to_date_task(
             _ = cancellation_token.cancelled() => {
                 break;
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
-            result = stake_info_identity_observer.changed() => {
-                result.expect("stake_info_identity_observer changed failed");
-            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {}
         }
     }
 }
@@ -319,6 +314,7 @@ async fn run_jet(
     .await;
 
     let initial_identity = config.identity.keypair.unwrap_or(Keypair::new());
+    let initial_identity = TpuIdentity::from_keypair(&initial_identity);
 
     let leader_tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync + 'static> =
         Arc::new(OverrideTpuInfoService {
@@ -375,7 +371,7 @@ async fn run_jet(
 
     let tpu_sender = create_base_tpu_client(
         config.quic.tpu_sender.clone(),
-        initial_identity.insecure_clone(),
+        initial_identity,
         leader_tpu_info_service,
         Arc::new(stake_info_map.clone()),
         Arc::new(StakeBasedEvictionStrategy {
@@ -386,7 +382,7 @@ async fn run_jet(
         1000, // This capacity should not be too deep, so transaction does not sits too long in the queue.
     )
     .await;
-    let identity_updater = tpu_sender.get_owned_identity_updater();
+    let tpu_identity_updater = tpu_sender.get_owned_identity_updater();
     let tpu_sender = PollTpuSender::new(tpu_sender);
 
     // Root means the first stage of the transaction pipeline.
@@ -417,9 +413,6 @@ async fn run_jet(
     let ah = tg.spawn(async move { tx_forwader.run().await });
     tg_name_map.insert(ah.id(), "transaction_fanout".to_string());
 
-    let jet_identity_sync_members: Vec<Box<dyn JetIdentitySyncMember + Send + Sync + 'static>> =
-        vec![Box::new(identity_updater)];
-
     let tx_handler =
         TransactionHandler::new(root_txn_inlet, config.listen_solana_like.fail_on_preflight);
 
@@ -434,13 +427,10 @@ async fn run_jet(
 
     let mut sigint = signal(SignalKind::interrupt())?;
 
-    let jet_identity_group_syncer =
-        JetIdentitySyncGroup::new(initial_identity, jet_identity_sync_members);
-    let identity_observer = jet_identity_group_syncer.get_identity_watcher();
     let rpc_admin = RpcServer::new(
         config.listen_admin.bind[0],
         RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group_syncer))),
+            jet_identity_updater: Arc::new(Mutex::new(Box::new(tpu_identity_updater.clone()))),
             allowed_identity: config.identity.expected,
             cluster_tpu_info: Arc::new(cluster_tpu_info),
         },
@@ -451,7 +441,7 @@ async fn run_jet(
     tg_name_map.insert(ah.id(), "stake_refresh_task".to_string());
 
     let ah = tg.spawn(keep_stake_metrics_up_to_date_task(
-        identity_observer.clone(),
+        tpu_identity_updater.clone(),
         stake_info_map.clone(),
         jet_cancellation_token.child_token(),
     ));
@@ -477,19 +467,6 @@ async fn run_jet(
         cluster_tpu_info_tasks.await;
     });
     tg_name_map.insert(ah.id(), "cluster_tpu_info".to_string());
-
-    if let Some(config_prometheus) = config.prometheus {
-        let push_gw_task = spawn_push_prometheus_metrics(
-            identity_observer.clone(),
-            config_prometheus,
-            jet_cancellation_token.child_token(),
-        )
-        .await;
-        let ah = tg.spawn(async move {
-            push_gw_task.await.expect("prometheus_push_gw");
-        });
-        tg_name_map.insert(ah.id(), "prometheus_push_gw".to_string());
-    }
 
     if let Some(prometheus_bind_addr) = prometheus_bind_addr {
         let my_ct = jet_cancellation_token.child_token();
@@ -570,39 +547,4 @@ async fn run_jet(
     }
     tg.abort_all();
     Ok(())
-}
-
-async fn spawn_push_prometheus_metrics(
-    mut jet_identity: watch::Receiver<Pubkey>,
-    config: PrometheusConfig,
-    cancellation_token: CancellationToken,
-) -> JoinHandle<()> {
-    let prometheus_url = Url::parse(&config.url).expect("");
-    let mut interval = tokio::time::interval(config.push_interval);
-    let client = Client::new();
-
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let current_identity = *jet_identity.borrow_and_update();
-                    let labels_to_inject = [
-                        ("job", "jet"),
-                        ("instance", &current_identity.to_string() as &str),
-                    ];
-                    if let Err(error) = client
-                        .post(prometheus_url.clone())
-                        .header("Content-Type", "text/plain")
-                        .body(inject_job_label(&collect_to_text(), labels_to_inject))
-                        .send()
-                        .await {
-                            warn!(?error, "Error pushing metrics");
-                        }
-                }
-                _ = cancellation_token.cancelled() => {
-                    break;
-                }
-            }
-        }
-    })
 }

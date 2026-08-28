@@ -7,9 +7,9 @@ use {
             TpuSenderSessionContext, TpuSenderTxn, UpcomingLeaderPredictor, UpdateIdentity,
             ValidatorStakeInfoService,
         },
+        identity::TpuIdentity,
     },
     futures::{Sink, SinkExt},
-    solana_keypair::Keypair,
     std::{
         panic::{AssertUnwindSafe, catch_unwind},
         pin::Pin,
@@ -80,7 +80,7 @@ impl TpuSender {
     ///
     /// Updates the identity used by the TPU sender.
     ///
-    pub fn update_identity(&mut self, new_identity: Keypair) -> UpdateIdentity {
+    pub fn update_identity(&mut self, new_identity: TpuIdentity) -> UpdateIdentity {
         self.identity_updater.update_identity(new_identity)
     }
 
@@ -112,7 +112,7 @@ impl TpuSender {
 /// # Arguments
 ///
 /// * `config` - Configuration for the TPU sender.
-/// * `initial_identity` - The initial identity keypair for the TPU sender.
+/// * `initial_identity` - The initial [`TpuIdentity`] for the TPU sender.
 /// * `tpu_info_service` - Service to get TPU gossip info of leaders.
 /// * `stake_map_service` - Service to get stake info of validators.
 /// * `eviction_strategy` - Strategy to evict connections when needed.
@@ -130,7 +130,7 @@ impl TpuSender {
 #[allow(clippy::too_many_arguments)]
 pub async fn create_base_tpu_client<CB>(
     config: TpuSenderConfig,
-    initial_identity: Keypair,
+    initial_identity: TpuIdentity,
     tpu_info_service: Arc<dyn LeaderTpuInfoService + Send + Sync>,
     stake_map_service: Arc<dyn ValidatorStakeInfoService + Send + Sync>,
     eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync>,
@@ -288,7 +288,7 @@ impl PollTpuSender {
     /// Updates the identity used by the underlying [`TpuSender`]. See
     /// [`TpuSender::update_identity`].
     ///
-    pub fn update_identity(&mut self, new_identity: Keypair) -> UpdateIdentity {
+    pub fn update_identity(&mut self, new_identity: TpuIdentity) -> UpdateIdentity {
         self.inner.update_identity(new_identity)
     }
 }

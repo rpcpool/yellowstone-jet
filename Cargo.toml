@@ -31,6 +31,7 @@ cargo-lock = "10.0.1"
 clap = "4.5.51"
 derive_more = "2.0.1"
 dotenvy = "0.15.0"
+ed25519-dalek = "2.2.0"
 futures = "0.3.31"
 git-version = "0.3.9"
 hostname = "0.4.1"
@@ -52,6 +53,7 @@ quinn-proto = "0.11.6"
 rand = "0.9.2"
 reqwest = "0.13.0"
 retry = "2.1.0"
+region = "4.0.0"
 rustls = { version = "0.23.35", default-features = false }
 semver = "1.0.22"
 serde = "1.0.215"
@@ -74,6 +76,7 @@ uuid = "1.11.0"
 url = "2.0.0"
 vergen = "9.1.0"
 x509-parser = "0.18.1"
+zeroize = "1.9.0"
 
 # Agave Monorepo
 solana-bincode = "3.0.0"
@@ -110,10 +113,10 @@ solana-transaction-error = "3.0.0"
 wincode = "0.5.5"
 
 # Yellowstone
-yellowstone-fumarole-client = "0.6.1-rc2"
+yellowstone-fumarole-client = "0.7.1"
 yellowstone-grpc-client = "13.1.0"
 yellowstone-grpc-proto = "12.5.0"
-yellowstone-jet-tpu-client = { path = "crates/tpu-client", version = "0.7.0", default-features = false }
+yellowstone-jet-tpu-client = { path = "crates/tpu-client", version = "0.8.0", default-features = false }
 yellowstone-shield-store = "0.11.0"
 
 [workspace.lints.clippy]
