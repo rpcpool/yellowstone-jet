@@ -21,7 +21,7 @@ impl LeaderTpuInfoService for ClusterTpuInfo {
 impl UpcomingLeaderPredictor for ClusterTpuInfo {
     fn try_predict_next_n_leaders(&self, n: usize) -> Vec<Pubkey> {
         self.get_leader_tpus(n)
-            .iter()
+            .into_iter()
             .map(|info| info.leader)
             .collect()
     }

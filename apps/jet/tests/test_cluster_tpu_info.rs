@@ -329,7 +329,7 @@ async fn test_get_tpus_in_cluster() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let tpus = cluster_tpu.get_leader_tpus(2);
+    let tpus = Vec::from_iter(cluster_tpu.get_leader_tpus(2));
 
     assert_eq!(tpus.len(), 2);
     assert_eq!(tpus[0].leader, key1);

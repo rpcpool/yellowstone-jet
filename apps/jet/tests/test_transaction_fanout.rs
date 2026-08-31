@@ -10,6 +10,7 @@ use {
     solana_system_interface::instruction::transfer,
     solana_transaction::versioned::VersionedTransaction,
     std::{
+        mem::MaybeUninit,
         sync::{Arc, RwLock as StdRwLock},
         vec,
     },
@@ -64,9 +65,22 @@ impl FakeLeaderSchedule {
 }
 
 impl UpcomingLeaderSchedule for FakeLeaderSchedule {
-    fn leader_lookahead(&self, leader_forward_lookahead: usize) -> Vec<Pubkey> {
+    fn leader_lookahead(
+        &self,
+        leader_forward_lookahead: usize,
+        out: &mut [MaybeUninit<Pubkey>],
+    ) -> usize {
         let schedule = self.share.read().unwrap();
-        schedule[..leader_forward_lookahead].to_vec()
+
+        let it = schedule[..leader_forward_lookahead]
+            .iter()
+            .zip(out.iter_mut());
+        let mut i = 0;
+        for (src, dst) in it {
+            dst.write(*src);
+            i += 1;
+        }
+        i
     }
     fn get_current_slot(&self) -> solana_clock::Slot {
         // For testing purposes, we can return a dummy slot.
@@ -92,8 +106,8 @@ async fn it_should_fanout_three_times() {
 
     #[allow(deprecated)]
     let mut fanout = TransactionFanout::new(
-        Arc::new(fake_schedule),
-        Arc::new(AlwaysAllowTransactionPolicyStore),
+        fake_schedule,
+        AlwaysAllowTransactionPolicyStore,
         source,
         gateway_tx,
         FanoutConfig::Custom(FANOUT_FACTOR),
@@ -153,8 +167,8 @@ async fn it_should_apply_shield_policies() {
 
     #[allow(deprecated)]
     let mut fanout = TransactionFanout::new(
-        Arc::new(fake_schedule),
-        Arc::new(policy),
+        fake_schedule,
+        policy,
         source,
         gateway_tx,
         FanoutConfig::Custom(FANOUT_FACTOR),
@@ -217,8 +231,8 @@ async fn it_should_continue_fanout_after_policy_check_error() {
 
     #[allow(deprecated)]
     let mut fanout = TransactionFanout::new(
-        Arc::new(fake_schedule),
-        Arc::new(policy),
+        fake_schedule,
+        policy,
         source,
         gateway_tx,
         FanoutConfig::Custom(FANOUT_FACTOR),
@@ -266,8 +280,8 @@ async fn it_should_support_extra_fanout() {
 
     #[allow(deprecated)]
     let mut fanout = TransactionFanout::new(
-        Arc::new(fake_schedule),
-        Arc::new(AlwaysAllowTransactionPolicyStore),
+        fake_schedule,
+        AlwaysAllowTransactionPolicyStore,
         source,
         gateway_tx,
         FanoutConfig::Custom(FANOUT_FACTOR),

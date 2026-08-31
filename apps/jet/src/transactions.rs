@@ -9,7 +9,7 @@ use {
     solana_hash::Hash,
     solana_pubkey::Pubkey,
     solana_signature::Signature,
-    std::{collections::HashSet, sync::Arc},
+    std::{collections::HashSet, mem::MaybeUninit, sync::Arc},
     tokio::sync::mpsc::{self},
     uuid::Uuid,
     yellowstone_jet_tpu_client::core::{TpuSenderResponse, TpuSenderTxn, TpuSenderTxnInfo},
@@ -22,16 +22,36 @@ pub type RootedTransactionsUpdateSignature = (Signature, CommitmentLevel);
 /// Trait for getting the upcoming leader schedule
 ///
 pub trait UpcomingLeaderSchedule {
-    fn leader_lookahead(&self, leader_forward_lookahead: usize) -> Vec<Pubkey>;
+    fn leader_lookahead(
+        &self,
+        leader_forward_lookahead: usize,
+        out: &mut [MaybeUninit<Pubkey>],
+    ) -> usize;
     fn get_current_slot(&self) -> Slot;
 }
 
 impl UpcomingLeaderSchedule for ClusterTpuInfo {
-    fn leader_lookahead(&self, leader_forward_lookahead: usize) -> Vec<Pubkey> {
-        self.get_leader_tpus(leader_forward_lookahead)
+    fn leader_lookahead(
+        &self,
+        leader_forward_lookahead: usize,
+        out: &mut [MaybeUninit<Pubkey>],
+    ) -> usize {
+        let leaders = self
+            .get_leader_tpus(leader_forward_lookahead)
             .into_iter()
-            .map(|tpu| tpu.leader)
-            .collect()
+            .map(|tpu| tpu.leader);
+
+        let mut i = 0;
+
+        for leader in leaders {
+            if i < out.len() {
+                out[i].write(leader);
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        i
     }
 
     fn get_current_slot(&self) -> Slot {
@@ -139,15 +159,15 @@ pub enum FanoutConfig {
 ///
 /// Prevent duplicate transaction being inflight at the same time.
 ///
-pub struct TransactionFanout<Rx, Tx> {
-    leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
-    policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
+pub struct TransactionFanout<Rx, Tx, LS, PS> {
+    leader_schedule_service: LS,
+    policy_store_service: PS,
     tpu_sender: Tx,
     incoming_transaction_rx: Rx,
     txn_deduper: HashSet<Signature>,
     fanout_config: FanoutConfig,
     // lewis_handler: Option<Arc<LewisEventHandler>>,
-    extra_fwd: Arc<[Pubkey]>,
+    extra_fwd: Vec<Pubkey>,
     last_known_slot: Slot,
 }
 
@@ -211,27 +231,33 @@ pub struct QuicGatewayBidi {
 //
 // Custom retry logic is implemented in the "transaction scheduler" which is hidden behind a tokio channel giving us free polymorphism.
 //
-impl<Rx, Tx> TransactionFanout<Rx, Tx>
+impl<Rx, Tx, LS, PS> TransactionFanout<Rx, Tx, LS, PS>
 where
     Rx: Stream<Item = SendTransactionRequest> + Unpin + Send + 'static,
     Tx: Sink<TpuSenderTxn> + Unpin + Send + 'static,
+    LS: UpcomingLeaderSchedule + Send + Sync + 'static,
+    PS: TransactionPolicyStore + Send + Sync + 'static,
 {
     pub fn new(
-        leader_schedule_service: Arc<dyn UpcomingLeaderSchedule + Send + Sync + 'static>,
-        policy_store_service: Arc<dyn TransactionPolicyStore + Send + Sync + 'static>,
+        leader_schedule_service: LS,
+        policy_store_service: PS,
         incoming_transaction_rx: Rx,
         txn_sink: Tx,
         fanout_config: FanoutConfig,
         extra_fwd: Vec<Pubkey>,
     ) -> Self {
         let last_known_slot = leader_schedule_service.get_current_slot();
+        #[allow(deprecated)]
+        if let FanoutConfig::Custom(custom) = &fanout_config {
+            assert!(*custom <= 8usize, "custom fanout count cannot exceed 8");
+        }
         Self {
             leader_schedule_service,
             policy_store_service,
             tpu_sender: txn_sink,
             incoming_transaction_rx,
             txn_deduper: HashSet::new(),
-            extra_fwd: extra_fwd.into(),
+            extra_fwd,
             fanout_config,
             last_known_slot,
         }
@@ -275,9 +301,9 @@ where
             );
             return Ok(());
         }
-        let policy_store_service = Arc::clone(&self.policy_store_service);
+        let policy_store_service = &self.policy_store_service;
         let signature = tx.signature;
-        let extra_fwd = Arc::clone(&self.extra_fwd);
+        let extra_fwd = &self.extra_fwd;
         #[allow(deprecated)]
         let fanout_count = match self.fanout_config {
             FanoutConfig::Custom(count) => count.max(1),
@@ -287,12 +313,16 @@ where
                 if reminder < 2 { 1 } else { 2 }
             }
         };
-        let next_leaders = self.leader_schedule_service.leader_lookahead(fanout_count);
-        let mut sent_mask = Vec::with_capacity(next_leaders.capacity());
-        sent_mask.resize(next_leaders.len(), false);
+        assert!(fanout_count <= 8, "fanout count cannot exceed 8");
+        let mut next_leaders = [MaybeUninit::uninit(); 8];
+        let next_leaders_len = self
+            .leader_schedule_service
+            .leader_lookahead(fanout_count, &mut next_leaders);
+        let mut sent_mask: u8 = 0;
         let txn_wire = tx.wire_transaction.clone();
 
-        for (i, dest) in next_leaders.iter().enumerate() {
+        for (i, dest) in (0..next_leaders_len).zip(next_leaders.iter()) {
+            let dest = unsafe { dest.assume_init_ref() };
             match policy_store_service.is_allowed(&tx.policies, dest) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -310,7 +340,8 @@ where
                     continue;
                 }
             }
-            sent_mask[i] = true;
+            // Mark this leader as having been sent to
+            sent_mask |= 1 << i;
             let txn_info = JetTxnInfo {
                 signature: tx.signature,
                 send_at_slot: current_slot,
@@ -326,13 +357,15 @@ where
         }
 
         for extra in extra_fwd.iter() {
-            let already_sent = next_leaders
-                .iter()
-                .zip(sent_mask.iter())
-                .any(|(leader, &sent)| sent && (leader == extra));
+            let already_sent = (0..next_leaders_len)
+                .zip(next_leaders.iter())
+                .any(|(i, leader)| {
+                    let leader = unsafe { leader.assume_init_ref() };
+                    (sent_mask & (1 << i) != 0) && (leader == extra)
+                });
 
             if already_sent {
-                // We don'tSignature need to send again to this extra peer
+                // We don't need to send again to this extra peer
                 continue;
             }
 

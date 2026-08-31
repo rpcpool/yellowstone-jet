@@ -8,6 +8,7 @@ use {
     solana_client::rpc_client::RpcClientConfig,
     solana_commitment_config::CommitmentConfig,
     solana_keypair::{Keypair, read_keypair},
+    solana_pubkey::Pubkey,
     solana_rpc_client::http_sender::HttpSender,
     std::{
         collections::HashMap,
@@ -43,8 +44,8 @@ use {
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
         transaction_handler::TransactionHandler,
         transactions::{
-            AlwaysAllowTransactionPolicyStore, DropExpiredTransactions, FanoutConfig,
-            SendTransactionRequest, TransactionFanout, TransactionPolicyStore,
+            DropExpiredTransactions, FanoutConfig, SendTransactionRequest, TransactionFanout,
+            TransactionPolicyStore,
         },
         txn_trace_drain::HttpTxnTraceDrain,
         util::WaitShutdown,
@@ -57,7 +58,7 @@ use {
         identity::TpuIdentity,
         sender::{PollTpuSender, create_base_tpu_client},
     },
-    yellowstone_shield_store::PolicyStore,
+    yellowstone_shield_store::{CheckError, PolicyStore},
 };
 
 #[cfg(not(target_env = "msvc"))]
@@ -282,16 +283,28 @@ async fn run_jet(
     )
     .await;
 
-    let shield_policy_store = if config.enable_yellowstone_shield {
+    enum JetPolicyStoreType {
+        AlwaysAllow,
+        YellowstoneShield(PolicyStore),
+    }
+    impl TransactionPolicyStore for JetPolicyStoreType {
+        fn is_allowed(&self, policies: &[Pubkey], leader: &Pubkey) -> Result<bool, CheckError> {
+            match self {
+                JetPolicyStoreType::AlwaysAllow => Ok(true),
+                JetPolicyStoreType::YellowstoneShield(store) => store.is_allowed(policies, leader),
+            }
+        }
+    }
+
+    let shield_policy_store: JetPolicyStoreType = if config.enable_yellowstone_shield {
         let policy_store_config = config.upstream.clone().into();
         let policy_store = PolicyStore::build()
             .config(policy_store_config)
             .run()
             .await?;
-
-        Arc::new(policy_store) as Arc<dyn TransactionPolicyStore + Send + Sync>
+        JetPolicyStoreType::YellowstoneShield(policy_store)
     } else {
-        Arc::new(AlwaysAllowTransactionPolicyStore)
+        JetPolicyStoreType::AlwaysAllow
     };
 
     let (geyser, geyser_handle) = GeyserSubscriber::new(
@@ -394,7 +407,7 @@ async fn run_jet(
 
     #[allow(deprecated)]
     let mut tx_forwader = TransactionFanout::new(
-        Arc::new(cluster_tpu_info.clone()),
+        cluster_tpu_info.clone(),
         shield_policy_store,
         root_txn_outlet,
         tpu_sender,
