@@ -155,8 +155,6 @@ pub struct TransactionFanout<Rx, Tx> {
 enum SendTransactionError {
     #[error("transaction gateway sink is closed")]
     GatewayClosed,
-    #[error(transparent)]
-    ShieldPoliciesNotFound(#[from] CheckError),
 }
 
 pub trait TransactionPolicyStore {
@@ -251,9 +249,6 @@ where
                                         tracing::warn!("gateway sender is closed, stopping transaction fanout");
                                         return;
                                     },
-                                    SendTransactionError::ShieldPoliciesNotFound(_) => {
-                                        metrics::shield_policies_not_found_inc();
-                                    },
                                 }
                             }
                         },
@@ -298,10 +293,22 @@ where
         let txn_wire = tx.wire_transaction.clone();
 
         for (i, dest) in next_leaders.iter().enumerate() {
-            if !policy_store_service.is_allowed(&tx.policies, dest)? {
-                metrics::sts_tpu_denied_inc_by(1);
-                tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
-                continue;
+            match policy_store_service.is_allowed(&tx.policies, dest) {
+                Ok(true) => {}
+                Ok(false) => {
+                    metrics::sts_tpu_denied_inc_by(1);
+                    tracing::trace!("transaction {signature} is not allowed to be sent to {dest}");
+                    continue;
+                }
+                Err(error) => {
+                    // A policy store lookup failure must not abort forwarding to the
+                    // remaining leaders (or the extra_fwd pass below) for this transaction.
+                    metrics::shield_policies_not_found_inc();
+                    tracing::trace!(
+                        "transaction {signature} shield policy check failed for {dest}: {error}, skipping this leader"
+                    );
+                    continue;
+                }
             }
             sent_mask[i] = true;
             let txn_info = JetTxnInfo {
