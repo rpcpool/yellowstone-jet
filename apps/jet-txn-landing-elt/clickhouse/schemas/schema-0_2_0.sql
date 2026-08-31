@@ -71,7 +71,6 @@ CREATE TABLE IF NOT EXISTS landed_transactions
     trace_remote_peer_addr Nullable(String),
     trace_x_request_id Nullable(UUID),
     trace_x_subscription_id Nullable(UUID),
-    trace_signer Nullable(String),
     trace_inserted_at DateTime64(3),
     ts DateTime64(3) DEFAULT now64(3),
     INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64
@@ -150,7 +149,6 @@ CREATE TABLE IF NOT EXISTS sent_transaction_pending
     remote_peer_addr Nullable(String),
     x_request_id Nullable(UUID),
     x_subscription_id Nullable(UUID),
-    signer Nullable(String),
     trace_inserted_at DateTime64(3),
     INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64,
     -- Needed for mv_landed_transactions' `send_at_slot BETWEEN ...` filter below to actually
@@ -193,7 +191,6 @@ SELECT
     tt.remote_peer_addr AS remote_peer_addr,
     tt.x_request_id AS x_request_id,
     tt.x_subscription_id AS x_subscription_id,
-    tt.signer AS signer,
     tt.ts AS trace_inserted_at
 FROM txn_trace AS tt
 WHERE
@@ -250,7 +247,6 @@ SELECT
     tt.remote_peer_addr AS trace_remote_peer_addr,
     tt.x_request_id AS trace_x_request_id,
     tt.x_subscription_id AS trace_x_subscription_id,
-    tt.signer AS trace_signer,
     tt.send_at_slot AS send_at_slot,
     lt.slot AS landed_slot,
     tt.trace_inserted_at AS trace_inserted_at

@@ -65,6 +65,7 @@ pub struct JetTxnInfo {
     pub send_at_slot: Slot,
     pub x_request_id: Option<Uuid>,
     pub x_subscription_id: Option<Uuid>,
+    pub signer: Pubkey,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,7 @@ pub struct SendTransactionRequest {
     pub x_subscription_id: Option<Uuid>,
     pub recent_blockhash: Hash,
     pub durable_nonce: Option<Pubkey>,
+    pub signer: Pubkey,
 }
 
 pub struct DropExpiredTransactions<St, BH> {
@@ -347,6 +349,7 @@ where
                 send_at_slot: current_slot,
                 x_request_id: tx.x_request_id,
                 x_subscription_id: tx.x_subscription_id,
+                signer: tx.signer,
             };
             let txn_info = TpuSenderTxnInfo::new(txn_info);
             let tpu_txn = TpuSenderTxn::from_bytes(*dest, txn_wire.clone(), Some(txn_info));
@@ -374,6 +377,7 @@ where
                 send_at_slot: current_slot,
                 x_request_id: tx.x_request_id,
                 x_subscription_id: tx.x_subscription_id,
+                signer: tx.signer,
             };
             let txn_info = TpuSenderTxnInfo::new(txn_info);
             let tpu_txn = TpuSenderTxn::from_bytes(*extra, txn_wire.clone(), Some(txn_info));

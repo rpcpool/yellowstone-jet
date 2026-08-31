@@ -115,12 +115,14 @@ impl TransactionHandler {
                 PACKET_DATA_SIZE
             )));
         }
+        let signer = transaction.message.static_account_keys()[0];
         let req = SendTransactionRequest {
             signature,
             wire_transaction: wire_transaction.into(),
             policies: config_with_forwarding_policies.forwarding_policies,
             x_request_id,
             x_subscription_id,
+            signer,
             durable_nonce: get_durable_nonce(&transaction),
             recent_blockhash: *transaction.message.recent_blockhash(),
         };
@@ -159,6 +161,7 @@ impl TransactionHandler {
             .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         let signature = transaction.signatures[0];
+        let signer = transaction.message.static_account_keys()[0];
         let req = SendTransactionRequest {
             signature,
             wire_transaction,
@@ -167,6 +170,7 @@ impl TransactionHandler {
             durable_nonce: get_durable_nonce(&transaction),
             recent_blockhash: *transaction.message.recent_blockhash(),
             x_subscription_id,
+            signer,
         };
         self.transaction_sink
             .send(req)
@@ -189,6 +193,7 @@ impl TransactionHandler {
         let (wire_transaction, transaction) = self.prepare_transaction(data, config).await?;
         let signature = transaction.signatures[0];
 
+        let signer = transaction.message.static_account_keys()[0];
         let req = SendTransactionRequest {
             signature,
             wire_transaction: wire_transaction.into(),
@@ -197,6 +202,7 @@ impl TransactionHandler {
             durable_nonce: get_durable_nonce(&transaction),
             recent_blockhash: *transaction.message.recent_blockhash(),
             x_subscription_id,
+            signer,
         };
         self.transaction_sink
             .send(req)

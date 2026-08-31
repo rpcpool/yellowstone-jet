@@ -41,6 +41,7 @@ default = ["yellowstone-grpc", "txn-info-cap-64"]
 txn-info-cap-0 = []
 txn-info-cap-64 = []
 txn-info-cap-128 = []
+txn-info-cap-192 = []
 ###
 ### Reads the `TXN_INFO_CAP` env var at build time (defaults to 64 if unset), for callers who
 ### need a capacity not covered by the fixed tiers above.

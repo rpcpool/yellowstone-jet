@@ -123,6 +123,7 @@ pub struct TxnTraceEntry<'a> {
     pub remote_peer_addr: Option<SocketAddr>,
     pub drop_reason: Option<&'a str>,
     pub drain_id: Option<Cow<'a, str>>,
+    pub signer: Option<Cow<'a, str>>,
 }
 
 enum OneOrMany<T> {
@@ -267,6 +268,7 @@ where
             drop_reason: None,
             drain_id: drain_id.map(Cow::Borrowed),
             x_subscription_id: info.x_subscription_id,
+            signer: Some(Cow::Owned(info.signer.to_string())),
         }),
         TpuSenderResponse::TxFailed(tx_failed) => one_or_many.map(|info| TxnTraceEntry {
             signature: Cow::Owned(info.signature.to_string()),
@@ -282,6 +284,7 @@ where
             drop_reason: None,
             drain_id: drain_id.map(Cow::Borrowed),
             x_subscription_id: info.x_subscription_id,
+            signer: Some(Cow::Owned(info.signer.to_string())),
         }),
         TpuSenderResponse::TxDrop(tx_drop) => {
             let many = tx_drop
@@ -304,6 +307,7 @@ where
                     drop_reason: Some(tx_drop.drop_reason.as_str()),
                     drain_id: drain_id.map(Cow::Borrowed),
                     x_subscription_id: info.x_subscription_id,
+                    signer: Some(Cow::Owned(info.signer.to_string())),
                 })
                 .collect::<Vec<_>>();
             OneOrMany::Many(many)
@@ -675,32 +679,36 @@ mod tests {
         signature: Signature,
         x_request_id: Option<Uuid>,
         x_subscription_id: Option<Uuid>,
+        signer: Pubkey,
     ) -> TpuSenderTxnInfo {
         TpuSenderTxnInfo::new(JetTxnInfo {
             signature,
             send_at_slot: 1,
             x_request_id,
             x_subscription_id,
+            signer,
         })
     }
 
     fn tx_sent(with_info: bool) -> (TpuSenderResponse, Signature) {
         let sig = Signature::new_unique();
+        let signer = Pubkey::new_unique();
         let response = TpuSenderResponse::TxSent(TxSent {
             remote_peer_identity: Pubkey::new_unique(),
             remote_peer_addr: addr(),
-            info: with_info.then(|| info(sig, Some(Uuid::new_v4()), Some(Uuid::new_v4()))),
+            info: with_info.then(|| info(sig, Some(Uuid::new_v4()), Some(Uuid::new_v4()), signer)),
         });
         (response, sig)
     }
 
     fn tx_failed(with_info: bool) -> (TpuSenderResponse, Signature) {
         let sig = Signature::new_unique();
+        let signer = Pubkey::new_unique();
         let response = TpuSenderResponse::TxFailed(TxFailed {
             remote_peer_identity: Pubkey::new_unique(),
             remote_peer_addr: addr(),
             failure_reason: "connection reset".to_string(),
-            info: with_info.then(|| info(sig, None, None)),
+            info: with_info.then(|| info(sig, None, None, signer)),
         });
         (response, sig)
     }
@@ -708,10 +716,11 @@ mod tests {
     /// Builds a `TxDrop` response whose `dropped_tx_vec` carries one entry per element of
     /// `infos`: `Some(sig)` attaches trace info to that entry, `None` leaves it untraceable.
     fn tx_drop(infos: Vec<Option<Signature>>) -> TpuSenderResponse {
+        let signer = Pubkey::new_unique();
         let dropped_tx_vec = infos
             .into_iter()
             .map(|maybe_sig| {
-                let txn_info = maybe_sig.map(|sig| info(sig, None, None));
+                let txn_info = maybe_sig.map(|sig| info(sig, None, None, signer));
                 (
                     TpuSenderTxn::from_bytes(
                         Pubkey::new_unique(),
