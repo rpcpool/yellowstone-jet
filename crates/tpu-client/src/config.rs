@@ -336,7 +336,7 @@ pub const DEFAULT_QUIC_DRIVER_ENDPOINT_COUNT: NonZeroUsize =
     NonZeroUsize::new(5).expect("default endpoint count must be non-zero");
 pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(4);
 pub const DEFAULT_MAX_CONSECUTIVE_CONNECTION_ATTEMPT: usize = 3;
-pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 10_000;
+pub const DEFAULT_PER_PEER_TRANSACTION_QUEUE_SIZE: usize = 256;
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 pub const DEFAULT_MAX_LOCAL_BINDING_PORT_ATTEMPTS: usize = 3;
 pub const DEFAULT_LEADER_DURATION: Duration = Duration::from_secs(2); // 400ms * 4 rounded to seconds
