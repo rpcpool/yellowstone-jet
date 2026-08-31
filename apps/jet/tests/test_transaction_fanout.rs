@@ -40,7 +40,7 @@ pub fn create_send_transaction_request(hash: Hash) -> SendTransactionRequest {
     .expect("try new");
 
     let wire_transaction = wincode::serialize(&tx).expect("Error getting wire_transaction");
-
+    let signer = tx.message.static_account_keys()[0];
     SendTransactionRequest {
         signature: tx.signatures[0],
         wire_transaction: wire_transaction.into(),
@@ -49,6 +49,7 @@ pub fn create_send_transaction_request(hash: Hash) -> SendTransactionRequest {
         durable_nonce: None,
         recent_blockhash: hash,
         x_subscription_id: None,
+        signer,
     }
 }
 

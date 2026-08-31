@@ -4,6 +4,7 @@ fn main() {
     let cap_0 = std::env::var_os("CARGO_FEATURE_TXN_INFO_CAP_0").is_some();
     let cap_64 = std::env::var_os("CARGO_FEATURE_TXN_INFO_CAP_64").is_some();
     let cap_128 = std::env::var_os("CARGO_FEATURE_TXN_INFO_CAP_128").is_some();
+    let cap_192 = std::env::var_os("CARGO_FEATURE_TXN_INFO_CAP_192").is_some();
     let cap_custom = std::env::var_os("CARGO_FEATURE_TXN_INFO_CAP_CUSTOM").is_some();
 
     // Cargo unifies features across every crate that depends on this package within a single
@@ -21,6 +22,9 @@ fn main() {
     }
     if cap_128 {
         candidates.push(128);
+    }
+    if cap_192 {
+        candidates.push(192);
     }
     if cap_custom {
         const DEFAULT_TXN_INFO_CAP: usize = 64;
@@ -47,7 +51,8 @@ fn main() {
     let cap = candidates.into_iter().max().unwrap_or_else(|| {
         panic!(
             "No `txn-info-cap-*` feature is enabled; enable exactly one of \
-             `txn-info-cap-0`, `txn-info-cap-64`, `txn-info-cap-128`, or `txn-info-cap-custom`"
+             `txn-info-cap-0`, `txn-info-cap-64`, `txn-info-cap-128`, `txn-info-cap-192`, or \
+             `txn-info-cap-custom`"
         );
     });
 

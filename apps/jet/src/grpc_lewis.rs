@@ -431,6 +431,7 @@ mod tests {
                 send_at_slot,
                 x_request_id: None,
                 x_subscription_id: None,
+                signer: validator,
             })),
         });
 
@@ -468,6 +469,7 @@ mod tests {
                 send_at_slot,
                 x_request_id: None,
                 x_subscription_id: None,
+                signer: validator,
             })),
         });
 
