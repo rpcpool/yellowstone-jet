@@ -180,6 +180,74 @@ async fn it_should_apply_shield_policies() {
 }
 
 #[tokio::test]
+async fn it_should_continue_fanout_after_policy_check_error() {
+    const FANOUT_FACTOR: usize = 3;
+    let (sink, source) = mpsc::unbounded();
+    let (gateway_tx, mut gateway_rx) = mpsc::channel(100);
+    let fake_schedule = FakeLeaderSchedule::default();
+
+    let extra_fanout_pubkeys = vec![Pubkey::new_unique()];
+
+    let my_schedule = vec![
+        Pubkey::new_unique(),
+        Pubkey::new_unique(),
+        Pubkey::new_unique(),
+        Pubkey::new_unique(),
+    ];
+    fake_schedule.set_schedule(my_schedule.clone());
+
+    // Simulates a policy store that fails to find the policy account (e.g. not yet
+    // indexed) for the first leader, but works normally for the rest.
+    pub struct FlakyPolicy {
+        errors_on: Pubkey,
+    }
+
+    impl TransactionPolicyStore for FlakyPolicy {
+        fn is_allowed(&self, _policies: &[Pubkey], leader: &Pubkey) -> Result<bool, CheckError> {
+            if *leader == self.errors_on {
+                Err(CheckError::PolicyNotFound)
+            } else {
+                Ok(true)
+            }
+        }
+    }
+    let policy = FlakyPolicy {
+        errors_on: my_schedule[0],
+    };
+
+    #[allow(deprecated)]
+    let mut fanout = TransactionFanout::new(
+        Arc::new(fake_schedule),
+        Arc::new(policy),
+        source,
+        gateway_tx,
+        FanoutConfig::Custom(FANOUT_FACTOR),
+        extra_fanout_pubkeys.clone(),
+    );
+    let _fanout_jh = tokio::spawn(async move {
+        fanout.run().await;
+    });
+
+    let tx = create_send_transaction_request(Hash::new_unique());
+    sink.unbounded_send(tx.clone()).unwrap();
+
+    // Only my_schedule[0] errors out; the other two scheduled leaders plus the extra
+    // fanout target must still receive the transaction.
+    let expected_recipients = FANOUT_FACTOR - 1 + extra_fanout_pubkeys.len();
+    let mut actual_tx_sent = vec![];
+    for _i in 0..expected_recipients {
+        let actual_tx = gateway_rx.next().await.unwrap();
+        actual_tx_sent.push(actual_tx.remote_peer);
+    }
+
+    assert_eq!(actual_tx_sent.len(), expected_recipients);
+    assert!(!actual_tx_sent.contains(&my_schedule[0]));
+    assert!(actual_tx_sent.contains(&my_schedule[1]));
+    assert!(actual_tx_sent.contains(&my_schedule[2]));
+    assert!(actual_tx_sent.contains(&extra_fanout_pubkeys[0]));
+}
+
+#[tokio::test]
 async fn it_should_support_extra_fanout() {
     const FANOUT_FACTOR: usize = 3;
     let (sink, source) = mpsc::unbounded();
