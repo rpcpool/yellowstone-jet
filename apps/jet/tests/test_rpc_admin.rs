@@ -11,11 +11,7 @@ use {
         time::Duration,
     },
     testkit::generate_random_local_addr,
-    tokio::sync::Mutex,
-    yellowstone_jet::rpc::{
-        RpcServer, RpcServerType,
-        rpc_admin::{JetIdentityUpdater, RpcClient},
-    },
+    yellowstone_jet::rpc::admin::{AdminServer, JetIdentityUpdater, RpcClient, TpuActivityTracker},
     yellowstone_jet_tpu_client::identity::HardenedKeypair,
 };
 #[cfg(test)]
@@ -67,13 +63,12 @@ pub async fn set_identity_if_expected() {
         current: Arc::clone(&shared),
     };
     let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_updater))),
-            allowed_identity: Some(expected_identity.pubkey()),
-            cluster_tpu_info: mock_cluster_info,
-        },
+        jet_identity_updater,
+        Some(expected_identity.pubkey()),
+        mock_cluster_info,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -111,13 +106,12 @@ pub async fn set_identity_wrong_keypair() {
         current: Arc::clone(&shared),
     };
     let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_updater))),
-            allowed_identity: Some(expected_identity.pubkey()),
-            cluster_tpu_info: mock_cluster_info,
-        },
+        jet_identity_updater,
+        Some(expected_identity.pubkey()),
+        mock_cluster_info,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -150,13 +144,12 @@ pub async fn set_identity_from_file() {
         current: Arc::clone(&shared),
     };
     let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_updater))),
-            allowed_identity: Some(expected_identity.pubkey()),
-            cluster_tpu_info: mock_cluster_info,
-        },
+        jet_identity_updater,
+        Some(expected_identity.pubkey()),
+        mock_cluster_info,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -194,13 +187,12 @@ pub async fn reset_identity_to_random() {
         current: Arc::clone(&shared),
     };
     let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_updater))),
-            allowed_identity: Some(expected_identity.pubkey()),
-            cluster_tpu_info: mock_cluster_info,
-        },
+        jet_identity_updater,
+        Some(expected_identity.pubkey()),
+        mock_cluster_info,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -246,13 +238,12 @@ pub async fn test_get_latest_slot() {
         latest_slot: expected_slot,
     };
 
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_updater))),
-            allowed_identity: None,
-            cluster_tpu_info: Arc::new(mock_cluster_info),
-        },
+        jet_identity_updater,
+        None,
+        Arc::new(mock_cluster_info),
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -299,13 +290,12 @@ pub async fn test_get_latest_slot_updates() {
         inner: Arc::clone(&mock_cluster_info),
     });
 
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_updater))),
-            allowed_identity: None,
-            cluster_tpu_info: updatable_mock,
-        },
+        jet_identity_updater,
+        None,
+        updatable_mock,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 

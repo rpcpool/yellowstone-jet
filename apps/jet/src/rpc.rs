@@ -1,189 +1,40 @@
-use {
-    crate::{
-        cluster_tpu_info::ClusterTpuInfoProvider,
-        http_tx_handler::{HttpTransactionHandler, HttpTxMiddleware},
-        transaction_handler::TransactionHandler,
-    },
-    anyhow::Context as _,
-    futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
-    hyper::{Request, Response, StatusCode},
-    jsonrpsee::{
-        core::http_helpers::Body,
-        server::{ServerBuilder, ServerConfigBuilder, ServerHandle},
-        types::error::{ErrorObject, ErrorObjectOwned, INVALID_PARAMS_CODE},
-    },
-    rpc_admin::JetIdentityUpdater,
-    solana_pubkey::Pubkey,
-    std::{
-        error::Error,
-        fmt,
-        future::Future,
-        net::SocketAddr,
-        sync::{Arc, Mutex as StdMutex},
-        task::{Context, Poll},
-        time::Instant,
-    },
-    tokio::sync::Mutex,
-    tower::Service,
-    tracing::{debug, info},
-};
+use jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INVALID_PARAMS_CODE};
 
-// should be more than enough for `sendTransaction` request
-const MAX_REQUEST_BODY_SIZE: u32 = 32 * (1 << 10); // 32kB
-
-pub enum RpcServerType {
-    Admin {
-        jet_identity_updater: Arc<Mutex<Box<dyn JetIdentityUpdater + Send + 'static>>>,
-        allowed_identity: Option<Pubkey>,
-        cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
-    },
-
-    SolanaLike {
-        tx_handler: TransactionHandler,
-        log_invalid_txn: bool,
-    },
-}
-
-#[derive(Clone)]
-pub struct RpcServer {
-    server_handle: Arc<StdMutex<Option<ServerHandle>>>,
-}
-
-impl fmt::Debug for RpcServer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RpcServer").finish()
-    }
-}
-
-impl RpcServer {
-    pub async fn new(addr: SocketAddr, server_type: RpcServerType) -> Self {
-        let server_type_str = match server_type {
-            RpcServerType::Admin { .. } => "admin",
-            RpcServerType::SolanaLike { .. } => "solana-like",
-        };
-        let server_handle = match server_type {
-            RpcServerType::Admin {
-                jet_identity_updater,
-                allowed_identity,
-                cluster_tpu_info,
-            } => {
-                use rpc_admin::{RpcServer, RpcServerImpl};
-                let health_jet_identity_updater = Arc::clone(&jet_identity_updater);
-                let server_middleware = tower::ServiceBuilder::new()
-                    .layer_fn(move |service| {
-                        let jet_identity_updater = Arc::clone(&health_jet_identity_updater);
-                        UriRequestMiddleware {
-                            service,
-                            uri: "/health",
-                            get_response: move || {
-                                if let Some(expected) = allowed_identity {
-                                    let current =
-                                        jet_identity_updater.blocking_lock().get_identity();
-                                    if expected != current {
-                                        return ready((
-                                            StatusCode::SERVICE_UNAVAILABLE,
-                                            "identity mismatch".to_owned(),
-                                        ));
-                                    }
-                                }
-
-                                // TODO: need to check TPUs for processed?
-                                match crate::metrics::jet::get_health_status() {
-                                    Ok(()) => ready((StatusCode::OK, "ok".to_owned())),
-                                    Err(error) => {
-                                        ready((StatusCode::SERVICE_UNAVAILABLE, error.to_string()))
-                                    }
-                                }
-                            },
-                        }
-                    })
-                    .layer_fn(|service| UriRequestMiddleware {
-                        service,
-                        uri: "/metrics",
-                        get_response: || ready((StatusCode::OK, crate::metrics::collect_to_text())),
-                    });
-
-                ServerBuilder::new()
-                    .set_http_middleware(server_middleware)
-                    .build(addr)
-                    .await
-                    .map(|server| {
-                        server.start(
-                            RpcServerImpl {
-                                allowed_identity,
-                                jet_identity_updater,
-                                cluster_tpu_info,
-                            }
-                            .into_rpc(),
-                        )
-                    })
-            }
-            RpcServerType::SolanaLike {
-                tx_handler,
-                log_invalid_txn,
-            } => {
-                use rpc_solana_like::RpcServer;
-
-                let rpc_server_impl =
-                    Self::create_solana_like_rpc_server_impl(tx_handler.clone(), log_invalid_txn);
-                let http_tx_handler = HttpTransactionHandler::new(tx_handler, log_invalid_txn);
-                let server_middleware = tower::ServiceBuilder::new().layer_fn(move |service| {
-                    HttpTxMiddleware::new(service, http_tx_handler.clone())
-                });
-                let server_config = ServerConfigBuilder::default()
-                    .max_request_body_size(MAX_REQUEST_BODY_SIZE)
-                    .build();
-                ServerBuilder::new()
-                    .set_http_middleware(server_middleware)
-                    .set_config(server_config)
-                    .build(addr)
-                    .await
-                    .map(|server| server.start(rpc_server_impl.into_rpc()))
-            }
-        }
-        .with_context(|| format!("Failed to start HTTP server at {addr}"))
-        .expect("Failed to start HTTP server");
-        info!("started RPC {server_type_str} server on {addr}");
-
-        Self {
-            server_handle: Arc::new(StdMutex::new(Some(server_handle))),
-        }
-    }
-
-    pub const fn create_solana_like_rpc_server_impl(
-        tx_handler: TransactionHandler,
-        log_invalid_txn: bool,
-    ) -> rpc_solana_like::RpcServerImpl {
-        rpc_solana_like::RpcServerImpl {
-            tx_handler,
-            log_invalid_txn,
-        }
-    }
-
-    pub fn shutdown(self) {
-        match self.server_handle.lock().unwrap().take() {
-            Some(server_handle) => {
-                server_handle.stop().expect("alive server");
-            }
-            None => panic!("RpcServer already shutdown"),
-        }
-    }
-}
-
-pub mod rpc_admin {
+pub mod admin {
     use {
         super::invalid_params,
-        crate::cluster_tpu_info::ClusterTpuInfoProvider,
+        crate::{cluster_tpu_info::ClusterTpuInfoProvider, timer_wheel::ActivityWindow},
+        anyhow::Context as _,
+        futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
+        hyper::{Request, Response, StatusCode},
         jsonrpsee::{
-            core::{RpcResult, async_trait},
+            core::{RpcResult, async_trait, http_helpers::Body},
             proc_macros::rpc,
+            server::{ServerBuilder, ServerHandle},
         },
         solana_pubkey::Pubkey,
-        std::sync::Arc,
+        std::{
+            error::Error,
+            fmt,
+            future::Future,
+            net::SocketAddr,
+            sync::Arc,
+            task::{Context, Poll},
+            time::{Duration, Instant},
+        },
         tokio::sync::Mutex,
-        tracing::info,
+        tower::Service,
+        tracing::{debug, info},
         yellowstone_jet_tpu_client::identity::HardenedKeypair,
     };
+
+    pub const TPU_STALL_THRESHOLD: Duration = Duration::from_secs(30);
+
+    #[derive(Default)]
+    pub struct TpuActivityTracker {
+        pub sent_activity: ActivityWindow,
+        pub failed_activity: ActivityWindow,
+    }
 
     #[rpc(server, client)]
     pub trait Rpc {
@@ -214,15 +65,18 @@ pub mod rpc_admin {
         fn get_identity(&self) -> Pubkey;
     }
 
-    pub struct RpcServerImpl {
+    pub struct RpcServerImpl<JetIdentityUpdateT> {
         // pub quic: QuicTxSender,
         pub allowed_identity: Option<Pubkey>,
-        pub jet_identity_updater: Arc<Mutex<Box<dyn JetIdentityUpdater + Send + 'static>>>,
+        pub jet_identity_updater: Arc<Mutex<JetIdentityUpdateT>>,
         pub cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
     }
 
     #[async_trait]
-    impl RpcServer for RpcServerImpl {
+    impl<JetIdentityUpdateT> RpcServer for RpcServerImpl<JetIdentityUpdateT>
+    where
+        JetIdentityUpdateT: JetIdentityUpdater + Send + 'static,
+    {
         async fn get_latest_slot(&self) -> RpcResult<u64> {
             Ok(self.cluster_tpu_info.latest_seen_slot())
         }
@@ -277,7 +131,10 @@ pub mod rpc_admin {
         }
     }
 
-    impl RpcServerImpl {
+    impl<JetIdentityUpdateT> RpcServerImpl<JetIdentityUpdateT>
+    where
+        JetIdentityUpdateT: JetIdentityUpdater + Send + 'static,
+    {
         async fn set_keypair(&self, identity: HardenedKeypair) -> RpcResult<()> {
             if let Some(allow_ident) = &self.allowed_identity
                 && allow_ident != &identity.pubkey()
@@ -295,29 +152,296 @@ pub mod rpc_admin {
             Ok(())
         }
     }
+
+    /// Answers the `/metrics` endpoint with the process's Prometheus text-format metrics.
+    fn metrics_response() -> (StatusCode, String) {
+        (StatusCode::OK, crate::metrics::collect_to_text())
+    }
+
+    #[derive(Clone)]
+    pub struct UriRequestMiddleware<S, F> {
+        service: S,
+        uri: &'static str,
+        get_response: F,
+    }
+
+    impl<S, F, Fut> Service<Request<Body>> for UriRequestMiddleware<S, F>
+    where
+        S: Service<Request<Body>, Response = Response<Body>>,
+        S::Response: 'static,
+        S::Error: Into<Box<dyn Error + Send + Sync>> + 'static,
+        S::Future: Send + 'static,
+        F: Fn() -> Fut,
+        Fut: Future<Output = (StatusCode, String)> + Send + 'static,
+    {
+        type Response = S::Response;
+        type Error = Box<dyn Error + Send + Sync + 'static>;
+        type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.service.poll_ready(cx).map_err(Into::into)
+        }
+
+        fn call(&mut self, request: Request<Body>) -> Self::Future {
+            if self.uri == request.uri() {
+                let get_response_fut = (self.get_response)();
+                let uri = self.uri.to_string();
+                let ts = Instant::now();
+                async move {
+                    let (status, body) = get_response_fut.await;
+                    let response = Response::builder()
+                        .status(status)
+                        .body(Body::new(body))
+                        .expect("failed to create response");
+                    debug!(
+                        uri = uri,
+                        elapsed_ms = ts.elapsed().as_millis(),
+                        "created response for uri"
+                    );
+                    Ok(response)
+                }
+                .boxed()
+            } else {
+                self.service.call(request).map_err(Into::into).boxed()
+            }
+        }
+    }
+
+    /// A real (not closure-driven) `/health` middleware: unlike [`UriRequestMiddleware`], it
+    /// owns its dependencies directly as fields rather than through a generic `get_response`
+    /// closure, so it has somewhere to grow tracked state later (e.g. a stall tracker) without
+    /// reshaping the closure signature every time.
+    pub struct HealthService<S, JetIdentityUpdateT> {
+        service: S,
+        jet_identity_updater: Arc<Mutex<JetIdentityUpdateT>>,
+        allowed_identity: Option<Pubkey>,
+        tpu_activity_tracker: Arc<TpuActivityTracker>,
+    }
+
+    // Not `#[derive(Clone)]`: that would also require `JetIdentityUpdateT: Clone`, but it only
+    // ever appears behind `Arc<Mutex<_>>` here, which is `Clone` unconditionally.
+    impl<S: Clone, JetIdentityUpdateT> Clone for HealthService<S, JetIdentityUpdateT> {
+        fn clone(&self) -> Self {
+            Self {
+                service: self.service.clone(),
+                jet_identity_updater: Arc::clone(&self.jet_identity_updater),
+                allowed_identity: self.allowed_identity,
+                tpu_activity_tracker: Arc::clone(&self.tpu_activity_tracker),
+            }
+        }
+    }
+
+    impl<S, JetIdentityUpdateT> HealthService<S, JetIdentityUpdateT> {
+        const URI: &'static str = "/health";
+
+        const fn new(
+            service: S,
+            jet_identity_updater: Arc<Mutex<JetIdentityUpdateT>>,
+            allowed_identity: Option<Pubkey>,
+            tpu_activity_tracker: Arc<TpuActivityTracker>,
+        ) -> Self {
+            Self {
+                service,
+                jet_identity_updater,
+                allowed_identity,
+                tpu_activity_tracker,
+            }
+        }
+    }
+
+    impl<S, JetIdentityUpdateT> HealthService<S, JetIdentityUpdateT>
+    where
+        JetIdentityUpdateT: JetIdentityUpdater + Send + 'static,
+    {
+        /// Answers the `/health` endpoint: unhealthy if `allowed_identity` is set and the
+        /// current identity doesn't match it, or if
+        /// [`crate::metrics::jet::get_health_status`] reports an error; `ok` otherwise.
+        async fn health_check(
+            jet_identity_updater: &Arc<Mutex<JetIdentityUpdateT>>,
+            allowed_identity: Option<Pubkey>,
+            tpu_activity_tracker: Arc<TpuActivityTracker>,
+        ) -> (StatusCode, String) {
+            let now = Instant::now();
+            let current_identity = jet_identity_updater.lock().await.get_identity();
+            if let Some(expected) = allowed_identity {
+                if expected != current_identity {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "identity mismatch".to_owned(),
+                    );
+                }
+            }
+
+            let sent_cnt = tpu_activity_tracker.sent_activity.count_in_window(now);
+            let failed_cnt = tpu_activity_tracker.failed_activity.count_in_window(now);
+            let total_cnt = sent_cnt + failed_cnt;
+            if total_cnt > 0 {
+                // Make sure at lesat 1/5 of the slot of the time wheel has been used in case of only failure.
+                let failure_are_minimally_spread = tpu_activity_tracker
+                    .failed_activity
+                    .active_slot_fraction_at_least(now, 1, 5);
+                if sent_cnt == 0 && failed_cnt > 0 && failure_are_minimally_spread {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "tpu sender has stalled".to_owned(),
+                    );
+                }
+            }
+
+            // TODO: need to check TPUs for processed?
+            match crate::metrics::jet::get_health_status() {
+                Ok(()) => (StatusCode::OK, "ok".to_owned()),
+                Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+            }
+        }
+    }
+
+    impl<S, JetIdentityUpdateT> Service<Request<Body>> for HealthService<S, JetIdentityUpdateT>
+    where
+        S: Service<Request<Body>, Response = Response<Body>>,
+        S::Response: 'static,
+        S::Error: Into<Box<dyn Error + Send + Sync>> + 'static,
+        S::Future: Send + 'static,
+        JetIdentityUpdateT: JetIdentityUpdater + Send + 'static,
+    {
+        type Response = S::Response;
+        type Error = Box<dyn Error + Send + Sync + 'static>;
+        type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.service.poll_ready(cx).map_err(Into::into)
+        }
+
+        fn call(&mut self, request: Request<Body>) -> Self::Future {
+            if request.uri() == Self::URI {
+                let jet_identity_updater = Arc::clone(&self.jet_identity_updater);
+                let allowed_identity = self.allowed_identity;
+                let ts = Instant::now();
+                let tpu_activity_tracker = Arc::clone(&self.tpu_activity_tracker);
+                async move {
+                    let (status, body) = Self::health_check(
+                        &jet_identity_updater,
+                        allowed_identity,
+                        tpu_activity_tracker,
+                    )
+                    .await;
+                    let response = Response::builder()
+                        .status(status)
+                        .body(Body::new(body))
+                        .expect("failed to create response");
+                    debug!(
+                        uri = Self::URI,
+                        elapsed_ms = ts.elapsed().as_millis(),
+                        "created response for uri"
+                    );
+                    Ok(response)
+                }
+                .boxed()
+            } else {
+                self.service.call(request).map_err(Into::into).boxed()
+            }
+        }
+    }
+
+    pub struct AdminServer {
+        server_handle: Option<ServerHandle>,
+    }
+
+    impl fmt::Debug for AdminServer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("AdminServer").finish()
+        }
+    }
+
+    impl AdminServer {
+        pub async fn new<IU>(
+            addr: SocketAddr,
+            jet_identity_updater: IU,
+            allowed_identity: Option<Pubkey>,
+            cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
+            tpu_activity_tracker: Arc<TpuActivityTracker>,
+        ) -> Self
+        where
+            IU: JetIdentityUpdater + Send + 'static,
+        {
+            let jet_identity_updater = Arc::new(Mutex::new(jet_identity_updater));
+            let health_jet_identity_updater = Arc::clone(&jet_identity_updater);
+            let server_middleware = tower::ServiceBuilder::new()
+                .layer_fn(move |service| {
+                    let tpu_activity_tracker = Arc::clone(&tpu_activity_tracker);
+                    HealthService::new(
+                        service,
+                        Arc::clone(&health_jet_identity_updater),
+                        allowed_identity,
+                        tpu_activity_tracker,
+                    )
+                })
+                .layer_fn(|service| UriRequestMiddleware {
+                    service,
+                    uri: "/metrics",
+                    get_response: || ready(metrics_response()),
+                });
+
+            let server_handle = ServerBuilder::new()
+                .set_http_middleware(server_middleware)
+                .build(addr)
+                .await
+                .map(|server| {
+                    server.start(
+                        RpcServerImpl {
+                            allowed_identity,
+                            jet_identity_updater,
+                            cluster_tpu_info,
+                        }
+                        .into_rpc(),
+                    )
+                })
+                .with_context(|| format!("Failed to start HTTP server at {addr}"))
+                .expect("Failed to start HTTP server");
+            info!("started RPC admin server on {addr}");
+
+            Self {
+                server_handle: Some(server_handle),
+            }
+        }
+
+        pub fn shutdown(mut self) {
+            if let Some(server_handle) = self.server_handle.take() {
+                let _ = server_handle.stop();
+            }
+        }
+    }
 }
 
-pub mod rpc_solana_like {
+pub mod solana_like {
     use {
         crate::{
-            http_tx_handler::{SimulationPerformed, XRequestId, XSubscriptionId},
+            http_tx_handler::{
+                HttpTransactionHandler, HttpTxMiddleware, SimulationPerformed, XRequestId,
+                XSubscriptionId,
+            },
             metrics,
             payload::JetRpcSendTransactionConfig,
             rpc::invalid_params,
             solana::decode_and_deserialize,
             transaction_handler::TransactionHandler,
         },
+        anyhow::Context as _,
         jsonrpsee::{
             Extensions,
             core::{RpcResult, async_trait},
             proc_macros::rpc,
+            server::{ServerBuilder, ServerConfigBuilder, ServerHandle},
         },
         solana_rpc_client_api::response::RpcVersionInfo,
         solana_transaction::versioned::VersionedTransaction,
         solana_transaction_status_client_types::UiTransactionEncoding,
-        std::borrow::Cow,
-        tracing::{debug, warn},
+        std::{borrow::Cow, fmt, net::SocketAddr},
+        tracing::{debug, info, warn},
     };
+
+    // should be more than enough for `sendTransaction` request
+    const MAX_REQUEST_BODY_SIZE: u32 = 32 * (1 << 10); // 32kB
 
     #[rpc(server, client)]
     pub trait Rpc {
@@ -332,7 +456,6 @@ pub mod rpc_solana_like {
         ) -> RpcResult<String>;
     }
 
-    #[derive(Clone)]
     pub struct RpcServerImpl {
         pub log_invalid_txn: bool,
         pub tx_handler: TransactionHandler,
@@ -405,6 +528,54 @@ pub mod rpc_solana_like {
         }
     }
 
+    pub struct SolanaLikeServer {
+        server_handle: Option<ServerHandle>,
+    }
+
+    impl fmt::Debug for SolanaLikeServer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("SolanaLikeServer").finish()
+        }
+    }
+
+    impl SolanaLikeServer {
+        pub async fn new(
+            addr: SocketAddr,
+            tx_handler: TransactionHandler,
+            log_invalid_txn: bool,
+        ) -> Self {
+            let rpc_server_impl = RpcServerImpl {
+                tx_handler: tx_handler.clone(),
+                log_invalid_txn,
+            };
+            let http_tx_handler = HttpTransactionHandler::new(tx_handler, log_invalid_txn);
+            let server_middleware = tower::ServiceBuilder::new()
+                .layer_fn(move |service| HttpTxMiddleware::new(service, http_tx_handler.clone()));
+            let server_config = ServerConfigBuilder::default()
+                .max_request_body_size(MAX_REQUEST_BODY_SIZE)
+                .build();
+            let server_handle = ServerBuilder::new()
+                .set_http_middleware(server_middleware)
+                .set_config(server_config)
+                .build(addr)
+                .await
+                .map(|server| server.start(rpc_server_impl.into_rpc()))
+                .with_context(|| format!("Failed to start HTTP server at {addr}"))
+                .expect("Failed to start HTTP server");
+            info!("started RPC solana-like server on {addr}");
+
+            Self {
+                server_handle: Some(server_handle),
+            }
+        }
+
+        pub fn shutdown(mut self) {
+            if let Some(server_handle) = self.server_handle.take() {
+                let _ = server_handle.stop();
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use {super::*, solana_rpc_client_api::config::RpcSendTransactionConfig};
@@ -440,55 +611,6 @@ pub mod rpc_solana_like {
             apply_simulation_performed(&mut config, &extensions);
 
             assert!(!config.config.skip_preflight);
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct UriRequestMiddleware<S, F> {
-    service: S,
-    uri: &'static str,
-    get_response: F,
-}
-
-impl<S, F, Fut> Service<Request<Body>> for UriRequestMiddleware<S, F>
-where
-    S: Service<Request<Body>, Response = Response<Body>>,
-    S::Response: 'static,
-    S::Error: Into<Box<dyn Error + Send + Sync>> + 'static,
-    S::Future: Send + 'static,
-    F: Fn() -> Fut,
-    Fut: Future<Output = (StatusCode, String)> + Send + 'static,
-{
-    type Response = S::Response;
-    type Error = Box<dyn Error + Send + Sync + 'static>;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.service.poll_ready(cx).map_err(Into::into)
-    }
-
-    fn call(&mut self, request: Request<Body>) -> Self::Future {
-        if self.uri == request.uri() {
-            let get_response_fut = (self.get_response)();
-            let uri = self.uri.to_string();
-            let ts = Instant::now();
-            async move {
-                let (status, body) = get_response_fut.await;
-                let response = Response::builder()
-                    .status(status)
-                    .body(Body::new(body))
-                    .expect("failed to create response");
-                debug!(
-                    uri = uri,
-                    elapsed_ms = ts.elapsed().as_millis(),
-                    "created response for uri"
-                );
-                Ok(response)
-            }
-            .boxed()
-        } else {
-            self.service.call(request).map_err(Into::into).boxed()
         }
     }
 }

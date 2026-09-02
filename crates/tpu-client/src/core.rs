@@ -3318,6 +3318,17 @@ pub trait TpuSenderResponseCallback: Clone + Send + Sync + 'static {
     fn call(&self, response: TpuSenderResponse);
 }
 
+impl<T> TpuSenderResponseCallback for Option<T>
+where
+    T: TpuSenderResponseCallback,
+{
+    fn call(&self, response: TpuSenderResponse) {
+        if let Some(callback) = self {
+            callback.call(response);
+        }
+    }
+}
+
 ///
 /// A no-op implementation of [`TpuSenderResponseCallback`].
 ///

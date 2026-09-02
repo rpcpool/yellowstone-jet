@@ -20,13 +20,13 @@ use {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Instant,
     },
     tokio::{
         runtime::Builder,
         signal::unix::{SignalKind, signal},
-        sync::{Mutex, mpsc},
+        sync::mpsc,
         task::{self, JoinSet},
-        time::Instant,
     },
     tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream},
     tokio_util::sync::CancellationToken,
@@ -38,7 +38,10 @@ use {
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_lewis::create_lewis_pipeline,
         metrics::{REGISTRY, jet as metrics},
-        rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
+        rpc::{
+            admin::{AdminServer, RpcClient, TpuActivityTracker},
+            solana_like::SolanaLikeServer,
+        },
         setup_tracing,
         solana_rpc_utils::{RetryRpcSender, RetryRpcSenderStrategy},
         stake::{self, StakeInfoMap, spawn_cache_stake_info_map},
@@ -53,7 +56,8 @@ use {
     yellowstone_jet_tpu_client::{
         core::{
             IgnorantLeaderPredictor, LeaderTpuInfoService, OverrideTpuInfoService,
-            StakeBasedEvictionStrategy, TpuSenderIdentityUpdater, UpcomingLeaderPredictor,
+            StakeBasedEvictionStrategy, TpuSenderIdentityUpdater, TpuSenderResponse,
+            TpuSenderResponseCallback, TxDropReason, UpcomingLeaderPredictor,
         },
         identity::TpuIdentity,
         sender::{PollTpuSender, create_base_tpu_client},
@@ -230,6 +234,47 @@ async fn keep_stake_metrics_up_to_date_task(
     }
 }
 
+#[derive(Clone)]
+struct JetTpuCallback<Other> {
+    tpu_activity_tracker: Arc<TpuActivityTracker>,
+    other: Other,
+}
+
+impl<Other> TpuSenderResponseCallback for JetTpuCallback<Other>
+where
+    Other: TpuSenderResponseCallback,
+{
+    fn call(&self, response: yellowstone_jet_tpu_client::core::TpuSenderResponse) {
+        match &response {
+            TpuSenderResponse::TxSent(_) => {
+                self.tpu_activity_tracker
+                    .sent_activity
+                    .increment_by(Instant::now(), 1);
+            }
+            TpuSenderResponse::TxDrop(drop) => {
+                match drop.drop_reason {
+                    TxDropReason::RemotePeerUnreachable
+                    | TxDropReason::InvalidPacketSize
+                    | TxDropReason::DriverIdentityChanged => {
+                        // These drop reason are not failure, and we can't do nothing about it.
+                    }
+                    _ => self
+                        .tpu_activity_tracker
+                        .failed_activity
+                        .increment_by(Instant::now(), 1),
+                }
+            }
+            _ => {
+                self.tpu_activity_tracker
+                    .failed_activity
+                    .increment_by(Instant::now(), 1);
+            }
+        }
+
+        self.other.call(response)
+    }
+}
+
 async fn run_jet(
     config: ConfigJet,
     prometheus_bind_addr: Option<SocketAddr>,
@@ -382,6 +427,12 @@ async fn run_jet(
         }
     };
 
+    let shared_tpu_activity_tracker = Arc::new(TpuActivityTracker::default());
+    let jet_callback = JetTpuCallback {
+        tpu_activity_tracker: Arc::clone(&shared_tpu_activity_tracker),
+        other: maybe_callback_sink,
+    };
+
     let tpu_sender = create_base_tpu_client(
         config.quic.tpu_sender.clone(),
         initial_identity,
@@ -391,7 +442,7 @@ async fn run_jet(
             peer_idle_eviction_grace_period: config.quic.connection_idle_eviction_grace,
         }),
         connection_predictor,
-        maybe_callback_sink,
+        Some(jet_callback),
         1000, // This capacity should not be too deep, so transaction does not sits too long in the queue.
     )
     .await;
@@ -429,24 +480,21 @@ async fn run_jet(
     let tx_handler =
         TransactionHandler::new(root_txn_inlet, config.listen_solana_like.fail_on_preflight);
 
-    let rpc_solana_like = RpcServer::new(
+    let rpc_solana_like = SolanaLikeServer::new(
         config.listen_solana_like.bind[0],
-        RpcServerType::SolanaLike {
-            tx_handler: tx_handler.clone(),
-            log_invalid_txn: config.log_invalid_txn,
-        },
+        tx_handler.clone(),
+        config.log_invalid_txn,
     )
     .await;
 
     let mut sigint = signal(SignalKind::interrupt())?;
 
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         config.listen_admin.bind[0],
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(tpu_identity_updater.clone()))),
-            allowed_identity: config.identity.expected,
-            cluster_tpu_info: Arc::new(cluster_tpu_info),
-        },
+        tpu_identity_updater.clone(),
+        config.identity.expected,
+        Arc::new(cluster_tpu_info),
+        shared_tpu_activity_tracker,
     )
     .await;
 
@@ -544,7 +592,7 @@ async fn run_jet(
                     break;
                 }
             }
-            _ = tokio::time::sleep_until(shutdown_deadline) => {
+            _ = tokio::time::sleep_until(shutdown_deadline.into()) => {
                 warn!("some tasks did not shut down in time, aborting them");
                 break;
             }

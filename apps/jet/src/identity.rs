@@ -1,5 +1,5 @@
 use {
-    crate::rpc::rpc_admin::JetIdentityUpdater,
+    crate::rpc::admin::JetIdentityUpdater,
     solana_pubkey::Pubkey,
     yellowstone_jet_tpu_client::{
         core::TpuSenderIdentityUpdater,
