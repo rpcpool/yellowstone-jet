@@ -64,6 +64,11 @@ pub mod jet {
         std::{sync::Once, time::Duration},
     };
 
+    /// If jet has attempted to forward a transaction within this window and none of those
+    /// attempts succeeded, `/health` reports unhealthy so the load balancer takes it out of
+    /// rotation. An instance with nothing to forward is not affected.
+    const FORWARDING_STALL_THRESHOLD: Duration = Duration::from_secs(30);
+
     lazy_static::lazy_static! {
         static ref GRPC_SLOT_RECEIVED: IntGaugeVec = IntGaugeVec::new(
             Opts::new("grpc_slot_received", "Grpc slot by commitment"),
@@ -84,8 +89,6 @@ pub mod jet {
             Opts::new("cluster_identity_stake", "Jet identity stake information"),
             &["kind"]
         ).unwrap();
-
-        static ref ROOTED_TRANSACTIONS_POOL_SIZE: IntGauge = IntGauge::new("rooted_transactions_pool_size", "Total number of transactions in landed pool").unwrap();
 
         static ref STS_POOL_SIZE: IntGauge = IntGauge::new("sts_pool_size", "Number of transactions in the pool").unwrap();
         static ref STS_INFLIGHT_SIZE: IntGauge = IntGauge::new("sts_inflight_size", "Number of transactions sending right now").unwrap();
@@ -247,7 +250,6 @@ pub mod jet {
             register!(GATEWAY_CONNECTED);
             register!(GRPC_SLOT_RECEIVED);
 
-            register!(ROOTED_TRANSACTIONS_POOL_SIZE);
             register!(SEND_TRANSACTION_ATTEMPT);
             register!(SEND_TRANSACTION_ERROR);
             register!(SEND_TRANSACTION_SUCCESS);
@@ -349,8 +351,9 @@ pub mod jet {
         );
 
         anyhow::ensure!(
-            ROOTED_TRANSACTIONS_POOL_SIZE.get() > 0,
-            "no transactions in the landing pool"
+            !yellowstone_jet_tpu_client::prom::forwarding_is_stalled(FORWARDING_STALL_THRESHOLD),
+            "unable to forward any transaction in the last {:?}",
+            FORWARDING_STALL_THRESHOLD
         );
 
         Ok(())
@@ -411,10 +414,6 @@ pub mod jet {
             .get()
             .try_into()
             .expect("failed to convert to u64")
-    }
-
-    pub fn rooted_transactions_pool_set_size(size: usize) {
-        ROOTED_TRANSACTIONS_POOL_SIZE.set(size as i64)
     }
 
     pub fn sts_pool_set_size(size: usize) {
