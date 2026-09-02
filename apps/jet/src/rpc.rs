@@ -76,22 +76,25 @@ impl RpcServer {
                             service,
                             uri: "/health",
                             get_response: move || {
-                                if let Some(expected) = allowed_identity {
-                                    let current =
-                                        jet_identity_updater.blocking_lock().get_identity();
-                                    if expected != current {
-                                        return ready((
-                                            StatusCode::SERVICE_UNAVAILABLE,
-                                            "identity mismatch".to_owned(),
-                                        ));
+                                let jet_identity_updater = Arc::clone(&jet_identity_updater);
+                                async move {
+                                    if let Some(expected) = allowed_identity {
+                                        let current =
+                                            jet_identity_updater.lock().await.get_identity();
+                                        if expected != current {
+                                            return (
+                                                StatusCode::SERVICE_UNAVAILABLE,
+                                                "identity mismatch".to_owned(),
+                                            );
+                                        }
                                     }
-                                }
 
-                                // TODO: need to check TPUs for processed?
-                                match crate::metrics::jet::get_health_status() {
-                                    Ok(()) => ready((StatusCode::OK, "ok".to_owned())),
-                                    Err(error) => {
-                                        ready((StatusCode::SERVICE_UNAVAILABLE, error.to_string()))
+                                    // TODO: need to check TPUs for processed?
+                                    match crate::metrics::jet::get_health_status() {
+                                        Ok(()) => (StatusCode::OK, "ok".to_owned()),
+                                        Err(error) => {
+                                            (StatusCode::SERVICE_UNAVAILABLE, error.to_string())
+                                        }
                                     }
                                 }
                             },

@@ -90,8 +90,6 @@ pub mod jet {
             &["kind"]
         ).unwrap();
 
-        static ref ROOTED_TRANSACTIONS_POOL_SIZE: IntGauge = IntGauge::new("rooted_transactions_pool_size", "Total number of transactions in landed pool").unwrap();
-
         static ref STS_POOL_SIZE: IntGauge = IntGauge::new("sts_pool_size", "Number of transactions in the pool").unwrap();
         static ref STS_INFLIGHT_SIZE: IntGauge = IntGauge::new("sts_inflight_size", "Number of transactions sending right now").unwrap();
         static ref STS_RECEIVED_TOTAL: IntCounter = IntCounter::new("sts_received_total", "Total number of received transactions").unwrap();
@@ -252,7 +250,6 @@ pub mod jet {
             register!(GATEWAY_CONNECTED);
             register!(GRPC_SLOT_RECEIVED);
 
-            register!(ROOTED_TRANSACTIONS_POOL_SIZE);
             register!(SEND_TRANSACTION_ATTEMPT);
             register!(SEND_TRANSACTION_ERROR);
             register!(SEND_TRANSACTION_SUCCESS);
@@ -354,11 +351,6 @@ pub mod jet {
         );
 
         anyhow::ensure!(
-            ROOTED_TRANSACTIONS_POOL_SIZE.get() > 0,
-            "no transactions in the landing pool"
-        );
-
-        anyhow::ensure!(
             !yellowstone_jet_tpu_client::prom::forwarding_is_stalled(FORWARDING_STALL_THRESHOLD),
             "unable to forward any transaction in the last {:?}",
             FORWARDING_STALL_THRESHOLD
@@ -422,10 +414,6 @@ pub mod jet {
             .get()
             .try_into()
             .expect("failed to convert to u64")
-    }
-
-    pub fn rooted_transactions_pool_set_size(size: usize) {
-        ROOTED_TRANSACTIONS_POOL_SIZE.set(size as i64)
     }
 
     pub fn sts_pool_set_size(size: usize) {
