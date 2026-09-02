@@ -64,6 +64,11 @@ pub mod jet {
         std::{sync::Once, time::Duration},
     };
 
+    /// If jet has attempted to forward a transaction within this window and none of those
+    /// attempts succeeded, `/health` reports unhealthy so the load balancer takes it out of
+    /// rotation. An instance with nothing to forward is not affected.
+    const FORWARDING_STALL_THRESHOLD: Duration = Duration::from_secs(30);
+
     lazy_static::lazy_static! {
         static ref GRPC_SLOT_RECEIVED: IntGaugeVec = IntGaugeVec::new(
             Opts::new("grpc_slot_received", "Grpc slot by commitment"),
@@ -351,6 +356,12 @@ pub mod jet {
         anyhow::ensure!(
             ROOTED_TRANSACTIONS_POOL_SIZE.get() > 0,
             "no transactions in the landing pool"
+        );
+
+        anyhow::ensure!(
+            !yellowstone_jet_tpu_client::prom::forwarding_is_stalled(FORWARDING_STALL_THRESHOLD),
+            "unable to forward any transaction in the last {:?}",
+            FORWARDING_STALL_THRESHOLD
         );
 
         Ok(())

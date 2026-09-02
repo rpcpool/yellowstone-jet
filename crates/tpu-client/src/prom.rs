@@ -4,7 +4,11 @@ use {
         Opts, Registry,
     },
     solana_pubkey::Pubkey,
-    std::{net::SocketAddr, time::Duration},
+    std::{
+        net::SocketAddr,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    },
 };
 
 lazy_static::lazy_static! {
@@ -170,6 +174,33 @@ lazy_static::lazy_static! {
     ).unwrap();
 }
 
+/// Milliseconds since `UNIX_EPOCH` of the last finalized send attempt (success or error), 0 = never.
+static LAST_SEND_ATTEMPT_MS: AtomicU64 = AtomicU64::new(0);
+/// Milliseconds since `UNIX_EPOCH` of the last successful send, 0 = never.
+static LAST_SEND_SUCCESS_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// `true` when there have been send attempts within `stale_after` but none of them succeeded.
+/// An instance with no recent attempts (nothing to forward) is not considered stalled.
+pub fn forwarding_is_stalled(stale_after: Duration) -> bool {
+    let stale_after_ms = stale_after.as_millis() as u64;
+    let now = now_ms();
+
+    let last_attempt = LAST_SEND_ATTEMPT_MS.load(Ordering::Relaxed);
+    if last_attempt == 0 || now.saturating_sub(last_attempt) > stale_after_ms {
+        return false;
+    }
+
+    let last_success = LAST_SEND_SUCCESS_MS.load(Ordering::Relaxed);
+    last_success == 0 || now.saturating_sub(last_success) > stale_after_ms
+}
+
 pub fn incr_evicted_orphan_connections() {
     EVICTED_ORPHAN_CONNECTIONS.inc();
 }
@@ -212,6 +243,12 @@ pub fn incr_quic_gw_worker_tx_process_cnt(remote_peer: Pubkey, status: &str) {
     QUIC_GW_WORKER_TX_PROCESS_CNT
         .with_label_values(&[remote_peer.to_string().as_str(), status])
         .inc_by(1);
+
+    let now = now_ms();
+    LAST_SEND_ATTEMPT_MS.store(now, Ordering::Relaxed);
+    if status == "success" {
+        LAST_SEND_SUCCESS_MS.store(now, Ordering::Relaxed);
+    }
 }
 
 pub fn incr_quic_gw_drop_tx_cnt(leader: Pubkey, count: u64) {
