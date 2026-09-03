@@ -5,7 +5,13 @@ use {
     hyper::{Method, header::CONTENT_TYPE},
     serde::{Deserialize, Serialize},
     solana_pubkey::Pubkey,
-    std::{borrow::Cow, collections::VecDeque, net::SocketAddr, sync::Arc},
+    std::{
+        borrow::Cow,
+        collections::VecDeque,
+        net::SocketAddr,
+        sync::Arc,
+        time::{Duration, Instant},
+    },
     tokio::task::JoinSet,
     url::Url,
     uuid::Uuid,
@@ -78,6 +84,76 @@ impl From<NdjsonPayload> for reqwest::Body {
     }
 }
 
+///
+/// Accumulates send outcomes (lines sent, latency, failures) between periodic log lines instead
+/// of logging one line per send -- a busy drain sends many small payloads per second, and a log
+/// line per send drowns out everything else. [`SendMetricsSummary::maybe_report`] flushes (and
+/// resets) the accumulated counters as one summary line once `REPORT_INTERVAL` has elapsed,
+/// leaving genuine errors logged immediately (see the call site) since those are rare and worth
+/// seeing as they happen, not batched.
+///
+struct SendMetricsSummary {
+    lines_sent: u64,
+    successful_sends: u64,
+    failed_sends: u64,
+    total_latency: Duration,
+    last_report: Instant,
+}
+
+impl SendMetricsSummary {
+    const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self {
+            lines_sent: 0,
+            successful_sends: 0,
+            failed_sends: 0,
+            total_latency: Duration::ZERO,
+            last_report: Instant::now(),
+        }
+    }
+
+    fn record_success(&mut self, latency: Duration, lines_sent: usize) {
+        self.lines_sent += lines_sent as u64;
+        self.successful_sends += 1;
+        self.total_latency += latency;
+    }
+
+    const fn record_failure(&mut self) {
+        self.failed_sends += 1;
+    }
+
+    /// `total_latency` divided by however many *successful* sends contributed to it (failures
+    /// don't have a latency to average in), or `Duration::ZERO` if there haven't been any yet --
+    /// avoids a division by zero rather than producing a nonsensical average.
+    fn avg_latency(&self) -> Duration {
+        self.successful_sends
+            .try_into()
+            .ok()
+            .filter(|&n| n > 0)
+            .map_or(Duration::ZERO, |n: u32| self.total_latency / n)
+    }
+
+    /// Logs and resets the accumulated counters once `REPORT_INTERVAL` has elapsed since the
+    /// last report; a no-op (and does *not* reset anything) otherwise, so a burst of activity
+    /// within one interval isn't split across multiple partial reports.
+    fn maybe_report(&mut self) {
+        if self.last_report.elapsed() < Self::REPORT_INTERVAL {
+            return;
+        }
+        let avg_latency = self.avg_latency();
+        tracing::info!(
+            lines_sent = self.lines_sent,
+            successful_sends = self.successful_sends,
+            failed_sends = self.failed_sends,
+            avg_latency_ms = avg_latency.as_secs_f64() * 1_000.0,
+            "txn trace drain send summary (last {:?})",
+            Self::REPORT_INTERVAL,
+        );
+        *self = Self::new();
+    }
+}
+
 pub struct HttpTxnTraceDrain<St, SolanaClientResolverT> {
     url: Url,
     credentials: Option<Credentials>,
@@ -88,10 +164,11 @@ pub struct HttpTxnTraceDrain<St, SolanaClientResolverT> {
     ndjson_len: usize,
     max_ndjson_len: usize,
     pending_ndjson_payloads: VecDeque<NdjsonPayload>,
-    send_joinset: JoinSet<Result<usize, reqwest::Error>>,
+    send_joinset: JoinSet<Result<(Duration, usize), reqwest::Error>>,
     max_inflight_sends: usize,
     drain_id: Option<Arc<str>>,
     stop: bool,
+    send_metrics: SendMetricsSummary,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -413,6 +490,7 @@ where
             max_inflight_sends: config.max_inflight_sends,
             drain_id: config.drain_id.map(|id| Arc::from(id.into_boxed_str())),
             stop: false,
+            send_metrics: SendMetricsSummary::new(),
         }
     }
 
@@ -485,8 +563,12 @@ where
                 .build()?;
             let client = self.client.clone();
             let fut = client.execute(request);
-            self.send_joinset
-                .spawn(async move { fut.await?.error_for_status().map(|_resp| ndjson_lines_len) });
+            let started_at = Instant::now();
+            self.send_joinset.spawn(async move {
+                fut.await?
+                    .error_for_status()
+                    .map(|_resp| (started_at.elapsed(), ndjson_lines_len))
+            });
             prom::inc_total_requests();
         }
         Ok(())
@@ -539,6 +621,7 @@ where
     ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
         loop {
+            this.send_metrics.maybe_report();
             prom::set_inflight_requests(this.send_joinset.len());
             let mut is_drainable = false;
             match this.poll_drain_source(cx) {
@@ -569,16 +652,15 @@ where
             this.spawn_send_payload()?;
 
             match this.send_joinset.poll_join_next(cx) {
-                std::task::Poll::Ready(Some(Ok(Ok(lines_sent)))) => {
+                std::task::Poll::Ready(Some(Ok(Ok((latency, lines_sent))))) => {
                     // No waker registered.
-                    // Successfully sent the payload
-                    tracing::info!(
-                        "Successfully sent {} lines of txn trace payload",
-                        lines_sent
-                    );
+                    // Successfully sent the payload -- accumulated into the periodic summary
+                    // (see `SendMetricsSummary`) rather than logged here, one line per send.
+                    this.send_metrics.record_success(latency, lines_sent);
                 }
                 std::task::Poll::Ready(Some(Ok(Err(e)))) => {
                     if let Some(status) = e.status() {
+                        this.send_metrics.record_failure();
                         tracing::error!("Failed to send txn trace payload: HTTP status {}", status);
                     } else {
                         return std::task::Poll::Ready(Err(HttpTxnTraceDrainError::ReqwestError(
@@ -832,6 +914,7 @@ mod tests {
             max_inflight_sends: 1,
             drain_id: None,
             stop: false,
+            send_metrics: SendMetricsSummary::new(),
         }
     }
 
@@ -1008,9 +1091,9 @@ mod tests {
             // A send is in flight but hasn't completed, and nothing else is queued: the JoinSet
             // poll genuinely registers a waker here, but `poll()` must still return `Pending`
             // instead of looping forever waiting for it to fire.
-            drain
-                .send_joinset
-                .spawn(std::future::pending::<Result<usize, reqwest::Error>>());
+            drain.send_joinset.spawn(std::future::pending::<
+                Result<(Duration, usize), reqwest::Error>,
+            >());
             drain
         });
     }
@@ -1026,9 +1109,9 @@ mod tests {
                 data: Bytes::from_static(b"{}\n"),
                 len: 1,
             });
-            drain
-                .send_joinset
-                .spawn(std::future::pending::<Result<usize, reqwest::Error>>());
+            drain.send_joinset.spawn(std::future::pending::<
+                Result<(Duration, usize), reqwest::Error>,
+            >());
             drain
         });
     }
@@ -1171,5 +1254,61 @@ credentials:
         assert_eq!(credentials[0].value, "secret");
         assert_eq!(credentials[1].name, "X-Other-Header");
         assert_eq!(credentials[1].value, "other-secret");
+    }
+
+    #[test]
+    fn send_metrics_summary_does_not_report_before_the_interval_elapses() {
+        let mut metrics = SendMetricsSummary::new();
+        metrics.record_success(Duration::from_millis(10), 5);
+        metrics.record_failure();
+
+        // Nowhere near `REPORT_INTERVAL` (5s) yet.
+        metrics.maybe_report();
+
+        assert_eq!(
+            metrics.lines_sent, 5,
+            "a no-op report must not reset counters"
+        );
+        assert_eq!(metrics.successful_sends, 1);
+        assert_eq!(metrics.failed_sends, 1);
+    }
+
+    #[test]
+    fn send_metrics_summary_reports_and_resets_once_the_interval_elapses() {
+        let mut metrics = SendMetricsSummary::new();
+        metrics.record_success(Duration::from_millis(10), 5);
+        metrics.record_success(Duration::from_millis(30), 7);
+        metrics.record_failure();
+        // Backdate the last report instead of sleeping -- same module, so `last_report` (a
+        // private field) is directly visible here.
+        metrics.last_report = Instant::now() - SendMetricsSummary::REPORT_INTERVAL;
+
+        metrics.maybe_report();
+
+        assert_eq!(
+            metrics.lines_sent, 0,
+            "reporting resets the accumulated counters"
+        );
+        assert_eq!(metrics.successful_sends, 0);
+        assert_eq!(metrics.failed_sends, 0);
+    }
+
+    #[test]
+    fn send_metrics_summary_average_latency_divides_by_successful_sends_only() {
+        let mut metrics = SendMetricsSummary::new();
+        metrics.record_success(Duration::from_millis(10), 1);
+        metrics.record_success(Duration::from_millis(30), 1);
+        // A failure contributes no latency and must not dilute the average.
+        metrics.record_failure();
+
+        assert_eq!(metrics.avg_latency(), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn send_metrics_summary_average_latency_is_zero_with_no_successes_yet() {
+        let mut metrics = SendMetricsSummary::new();
+        metrics.record_failure();
+
+        assert_eq!(metrics.avg_latency(), Duration::ZERO);
     }
 }
