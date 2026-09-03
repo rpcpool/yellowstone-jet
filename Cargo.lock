@@ -1398,7 +1398,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2165,7 +2165,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jet-transaction-landing"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bs58",
@@ -2472,6 +2472,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "mach2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "maplit"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2587,7 +2596,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3227,7 +3236,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3415,6 +3424,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "region"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "430988f137a23121407b362bf10b09df302ed5092ffeb9af90a549edcc849115"
+dependencies = [
+ "bitflags",
+ "libc",
+ "mach2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3578,7 +3599,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3658,7 +3679,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs 1.0.8",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5979,7 +6000,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6836,7 +6857,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7146,9 +7167,9 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-fumarole-client"
-version = "0.6.1-rc2+solana.3"
+version = "0.7.1+solana.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9327bdd6c14b3a94deaa0362e4195b1cb819b19b33806a8858d9b2baa6b18db0"
+checksum = "9f1b3d402d2f388045076658cac9a6158c2dc1792c904aff5d2e0c994e3e76d9"
 dependencies = [
  "async-trait",
  "bytesize",
@@ -7204,9 +7225,9 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-grpc-proto"
-version = "12.5.0"
+version = "12.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c91071690a2b0a078a4712ecca7be37aa929b474a74f4f269c61582f8e2a6139"
+checksum = "bdceeb3f02e4b31ab481eb9fd714854d757e76d2eb7b4f9c00136ed19edf183f"
 dependencies = [
  "anyhow",
  "prost",
@@ -7222,7 +7243,7 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-jet"
-version = "16.3.0"
+version = "17.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7254,6 +7275,7 @@ dependencies = [
  "quinn",
  "quinn-proto",
  "rand 0.9.5",
+ "region",
  "reqwest 0.13.4",
  "retry",
  "rustls",
@@ -7310,12 +7332,14 @@ dependencies = [
  "yellowstone-grpc-proto",
  "yellowstone-jet-tpu-client",
  "yellowstone-shield-store",
+ "zeroize",
 ]
 
 [[package]]
 name = "yellowstone-jet-tpu-client"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "borsh",
@@ -7324,6 +7348,7 @@ dependencies = [
  "clap",
  "derive_more",
  "dotenvy",
+ "ed25519-dalek",
  "futures",
  "hostname",
  "http-body-util",
@@ -7336,6 +7361,7 @@ dependencies = [
  "quinn",
  "quinn-proto",
  "rand 0.9.5",
+ "region",
  "retry",
  "rustls",
  "semver",
@@ -7374,6 +7400,7 @@ dependencies = [
  "yellowstone-grpc-client",
  "yellowstone-grpc-proto",
  "yellowstone-shield-store",
+ "zeroize",
 ]
 
 [[package]]

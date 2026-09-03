@@ -3,6 +3,7 @@ mod testkit;
 use {
     jsonrpsee::http_client::HttpClientBuilder,
     solana_keypair::{Keypair, write_keypair_file},
+    solana_pubkey::Pubkey,
     solana_signer::Signer,
     std::{
         path::PathBuf,
@@ -10,11 +11,8 @@ use {
         time::Duration,
     },
     testkit::generate_random_local_addr,
-    tokio::sync::Mutex,
-    yellowstone_jet::{
-        identity::{JetIdentitySyncGroup, JetIdentitySyncMember},
-        rpc::{RpcServer, RpcServerType, rpc_admin::RpcClient},
-    },
+    yellowstone_jet::rpc::admin::{AdminServer, JetIdentityUpdater, RpcClient, TpuActivityTracker},
+    yellowstone_jet_tpu_client::identity::HardenedKeypair,
 };
 #[cfg(test)]
 use {solana_clock::Slot, yellowstone_jet::cluster_tpu_info::ClusterTpuInfoProvider};
@@ -39,26 +37,18 @@ fn clean_file(path: &PathBuf) {
     }
 }
 
-pub struct NullJetIdentitySyncMember {
-    new_identity: Arc<RwLock<Keypair>>,
+pub struct NullJetIdentityUpdater {
+    current: Arc<RwLock<Pubkey>>,
 }
 
 #[async_trait::async_trait]
-impl JetIdentitySyncMember for NullJetIdentitySyncMember {
-    async fn pause_for_identity_update(
-        &self,
-        new_identity: Keypair,
-        barrier: Arc<tokio::sync::Barrier>,
-    ) {
-        let shared = Arc::clone(&self.new_identity);
-        tokio::spawn(async move {
-            {
-                let mut guard = shared.write().unwrap();
-                *guard = new_identity;
-                drop(guard);
-            }
-            barrier.wait().await;
-        });
+impl JetIdentityUpdater for NullJetIdentityUpdater {
+    async fn update_identity(&mut self, new_identity: HardenedKeypair) {
+        *self.current.write().unwrap() = new_identity.pubkey();
+    }
+
+    fn get_identity(&self) -> Pubkey {
+        *self.current.read().unwrap()
     }
 }
 
@@ -68,22 +58,17 @@ pub async fn set_identity_if_expected() {
     let expected_identity = Keypair::new();
     let expected_identity_pubkey = expected_identity.pubkey();
     let initial_kp = Keypair::new();
-    let shared = Arc::new(RwLock::new(initial_kp.insecure_clone()));
-    let jet_identity_updater = NullJetIdentitySyncMember {
-        new_identity: Arc::clone(&shared),
+    let shared = Arc::new(RwLock::new(initial_kp.pubkey()));
+    let jet_identity_updater = NullJetIdentityUpdater {
+        current: Arc::clone(&shared),
     };
-    let jet_identity_group = JetIdentitySyncGroup::new(
-        initial_kp.insecure_clone(),
-        vec![Box::new(jet_identity_updater)],
-    );
     let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
-            allowed_identity: Some(expected_identity.pubkey()),
-            cluster_tpu_info: mock_cluster_info,
-        },
+        jet_identity_updater,
+        Some(expected_identity.pubkey()),
+        mock_cluster_info,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -105,7 +90,7 @@ pub async fn set_identity_if_expected() {
     let identity = client.get_identity().await.expect("Error getting identity");
     assert_eq!(identity, expected_identity_pubkey.to_string());
     let new_identity = shared.read().unwrap();
-    assert_eq!(new_identity.pubkey(), expected_identity_pubkey);
+    assert_eq!(*new_identity, expected_identity_pubkey);
 
     rpc_admin.shutdown();
 }
@@ -116,22 +101,17 @@ pub async fn set_identity_wrong_keypair() {
 
     let expected_identity = Keypair::new();
     let initial_kp = Keypair::new();
-    let shared = Arc::new(RwLock::new(initial_kp.insecure_clone()));
-    let jet_identity_updater = NullJetIdentitySyncMember {
-        new_identity: Arc::clone(&shared),
+    let shared = Arc::new(RwLock::new(initial_kp.pubkey()));
+    let jet_identity_updater = NullJetIdentityUpdater {
+        current: Arc::clone(&shared),
     };
-    let jet_identity_group = JetIdentitySyncGroup::new(
-        initial_kp.insecure_clone(),
-        vec![Box::new(jet_identity_updater)],
-    );
     let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
-            allowed_identity: Some(expected_identity.pubkey()),
-            cluster_tpu_info: mock_cluster_info,
-        },
+        jet_identity_updater,
+        Some(expected_identity.pubkey()),
+        mock_cluster_info,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -159,22 +139,17 @@ pub async fn set_identity_from_file() {
 
     let rpc_addr = generate_random_local_addr();
     let initial_kp = Keypair::new();
-    let shared = Arc::new(RwLock::new(initial_kp.insecure_clone()));
-    let jet_identity_updater = NullJetIdentitySyncMember {
-        new_identity: Arc::clone(&shared),
+    let shared = Arc::new(RwLock::new(initial_kp.pubkey()));
+    let jet_identity_updater = NullJetIdentityUpdater {
+        current: Arc::clone(&shared),
     };
-    let jet_identity_group = JetIdentitySyncGroup::new(
-        initial_kp.insecure_clone(),
-        vec![Box::new(jet_identity_updater)],
-    );
     let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
-            allowed_identity: Some(expected_identity.pubkey()),
-            cluster_tpu_info: mock_cluster_info,
-        },
+        jet_identity_updater,
+        Some(expected_identity.pubkey()),
+        mock_cluster_info,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -197,7 +172,7 @@ pub async fn set_identity_from_file() {
     let identity = client.get_identity().await.expect("Error getting identity");
     assert_eq!(identity, expected_identity.pubkey().to_string());
     let new_identity = shared.read().unwrap();
-    assert_eq!(new_identity.pubkey(), expected_identity.pubkey());
+    assert_eq!(*new_identity, expected_identity.pubkey());
     rpc_admin.shutdown();
 }
 
@@ -207,22 +182,17 @@ pub async fn reset_identity_to_random() {
 
     let expected_identity = Keypair::new();
     let initial_kp = Keypair::new();
-    let shared = Arc::new(RwLock::new(initial_kp.insecure_clone()));
-    let jet_identity_updater = NullJetIdentitySyncMember {
-        new_identity: Arc::clone(&shared),
+    let shared = Arc::new(RwLock::new(initial_kp.pubkey()));
+    let jet_identity_updater = NullJetIdentityUpdater {
+        current: Arc::clone(&shared),
     };
-    let jet_identity_group = JetIdentitySyncGroup::new(
-        initial_kp.insecure_clone(),
-        vec![Box::new(jet_identity_updater)],
-    );
     let mock_cluster_info = Arc::new(MockClusterTpuInfo::default());
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
-            allowed_identity: Some(expected_identity.pubkey()),
-            cluster_tpu_info: mock_cluster_info,
-        },
+        jet_identity_updater,
+        Some(expected_identity.pubkey()),
+        mock_cluster_info,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -245,10 +215,10 @@ pub async fn reset_identity_to_random() {
     let identity = client.get_identity().await.expect("Error getting identity");
     assert_ne!(identity, expected_identity.pubkey().to_string());
     let new_identity = shared.read().unwrap();
-    assert_ne!(new_identity.pubkey(), expected_identity.pubkey());
+    assert_ne!(*new_identity, expected_identity.pubkey());
 
     // Ensure the new identity is different from the initial one, since reset_identity generates a new random keypair
-    assert_ne!(new_identity.pubkey(), initial_kp.pubkey());
+    assert_ne!(*new_identity, initial_kp.pubkey());
     rpc_admin.shutdown();
 }
 
@@ -256,15 +226,11 @@ pub async fn reset_identity_to_random() {
 pub async fn test_get_latest_slot() {
     let rpc_addr = generate_random_local_addr();
     let initial_kp = Keypair::new();
-    let shared = Arc::new(RwLock::new(initial_kp.insecure_clone()));
+    let shared = Arc::new(RwLock::new(initial_kp.pubkey()));
 
-    let jet_identity_updater = NullJetIdentitySyncMember {
-        new_identity: Arc::clone(&shared),
+    let jet_identity_updater = NullJetIdentityUpdater {
+        current: Arc::clone(&shared),
     };
-    let jet_identity_group = JetIdentitySyncGroup::new(
-        initial_kp.insecure_clone(),
-        vec![Box::new(jet_identity_updater)],
-    );
 
     let expected_slot = 12345u64;
 
@@ -272,13 +238,12 @@ pub async fn test_get_latest_slot() {
         latest_slot: expected_slot,
     };
 
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
-            allowed_identity: None,
-            cluster_tpu_info: Arc::new(mock_cluster_info),
-        },
+        jet_identity_updater,
+        None,
+        Arc::new(mock_cluster_info),
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 
@@ -299,15 +264,11 @@ pub async fn test_get_latest_slot() {
 pub async fn test_get_latest_slot_updates() {
     let rpc_addr = generate_random_local_addr();
     let initial_kp = Keypair::new();
-    let shared = Arc::new(RwLock::new(initial_kp.insecure_clone()));
+    let shared = Arc::new(RwLock::new(initial_kp.pubkey()));
 
-    let jet_identity_updater = NullJetIdentitySyncMember {
-        new_identity: Arc::clone(&shared),
+    let jet_identity_updater = NullJetIdentityUpdater {
+        current: Arc::clone(&shared),
     };
-    let jet_identity_group = JetIdentitySyncGroup::new(
-        initial_kp.insecure_clone(),
-        vec![Box::new(jet_identity_updater)],
-    );
 
     let initial_slot = 1000u64;
     let mock_cluster_info = Arc::new(RwLock::new(MockClusterTpuInfo {
@@ -329,13 +290,12 @@ pub async fn test_get_latest_slot_updates() {
         inner: Arc::clone(&mock_cluster_info),
     });
 
-    let rpc_admin = RpcServer::new(
+    let rpc_admin = AdminServer::new(
         rpc_addr,
-        RpcServerType::Admin {
-            jet_identity_updater: Arc::new(Mutex::new(Box::new(jet_identity_group))),
-            allowed_identity: None,
-            cluster_tpu_info: updatable_mock,
-        },
+        jet_identity_updater,
+        None,
+        updatable_mock,
+        Arc::new(TpuActivityTracker::default()),
     )
     .await;
 

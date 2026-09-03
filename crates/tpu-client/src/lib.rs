@@ -59,6 +59,34 @@
 //! See [YellowstoneTpuSender](`crate::yellowstone_grpc::sender::YellowstoneTpuSender`) rustdoc
 //! for a complete end-to-end example covering `TxSent`, `TxFailed`, and `TxDrop`.
 //!
+//! ## `HardenedKeypair`: memory-hardened keypair loading
+//!
+//! [HardenedKeypair](`crate::identity::HardenedKeypair`) is a drop-in alternative to
+//! [`solana_keypair::read_keypair`]/[`solana_keypair::read_keypair_file`] whose private key
+//! bytes are `mlock`ed and zeroized on drop from the moment they first exist, instead of passing
+//! through an ordinary, unlocked `String`/[`solana_keypair::Keypair`] on the way in.
+//!
+//! Construct one via:
+//!
+//! - `HardenedKeypair::read_from_file(path)` / `read_from_reader(&mut reader)` -- same JSON
+//!   `[u8; 64]` keypair file format as `solana_keypair`.
+//! - `HardenedKeypair::new()` -- generate a fresh random one.
+//! - `HardenedKeypair::from_keypair(&keypair)` -- wrap an existing `Keypair`.
+//! - `HardenedKeypair::try_from(&bytes[..])` -- parse raw 64-byte keypair bytes, rejecting a
+//!   mismatched public/secret pair.
+//!
+//! It implements [TpuEd25519SigningKey](`crate::identity::TpuEd25519SigningKey`), so it can be
+//! handed directly to
+//! [TpuIdentity::from_ed25519_signing_key](`crate::identity::TpuIdentity::from_ed25519_signing_key`)
+//! to build the sender's identity without a plain `Keypair` ever existing:
+//!
+//! ```ignore
+//! use yellowstone_jet_tpu_client::identity::{HardenedKeypair, TpuIdentity};
+//!
+//! let hardened = HardenedKeypair::read_from_file("identity.json").expect("read keypair");
+//! let identity = TpuIdentity::from_ed25519_signing_key(&hardened);
+//! ```
+//!
 //! This sender implementation supports three different sending strategies:
 //!
 //! 1. Send transaction to one or more remote peers
@@ -85,6 +113,11 @@ pub mod config;
 /// module for the core tpu sending driver logic
 ///
 pub mod core;
+///
+/// module for the TPU sender's identity: a public key paired with its derived, memory-hardened
+/// QUIC client TLS credentials
+///
+pub mod identity;
 ///
 /// module for common tpu sender implementation
 ///

@@ -153,6 +153,7 @@ fn random_response(fail_ratio: f64) -> TpuSenderResponse {
     let mut rng = rand::rng();
 
     let signature = Signature::new_unique();
+    let signer = Pubkey::new_unique();
     let x_request_id = rng.random_bool(0.8).then(Uuid::new_v4);
     let x_subscription_id = rng.random_bool(0.8).then(Uuid::new_v4);
     let info = Some(TpuSenderTxnInfo::new(JetTxnInfo {
@@ -160,6 +161,7 @@ fn random_response(fail_ratio: f64) -> TpuSenderResponse {
         send_at_slot: rng.random_range(1..=u64::MAX),
         x_request_id,
         x_subscription_id,
+        signer,
     }));
     let remote_peer_identity = Pubkey::new_unique();
     let remote_peer_addr = SocketAddr::from(([127, 0, 0, 1], rng.random_range(9000..9999)));

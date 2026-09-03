@@ -8,8 +8,18 @@ use {
         sync::Arc,
     },
     tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt},
-    yellowstone_jet_tpu_client::core::{ALPN_TPU_PROTOCOL_ID, crypto_provider},
+    yellowstone_jet_tpu_client::{
+        core::{ALPN_TPU_PROTOCOL_ID, crypto_provider},
+        identity::TpuIdentity,
+    },
 };
+
+/// Builds the [`TpuIdentity`] a [`TpuSenderDriverSpawner`](yellowstone_jet_tpu_client::core::TpuSenderDriverSpawner)
+/// needs from a test [`Keypair`], for tests that only care about the resulting `Pubkey`.
+#[allow(dead_code)]
+pub fn tpu_identity(kp: &Keypair) -> TpuIdentity {
+    TpuIdentity::from_keypair(kp)
+}
 
 #[allow(dead_code)]
 pub fn find_available_port() -> Option<u16> {

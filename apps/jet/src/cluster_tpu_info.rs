@@ -410,15 +410,16 @@ impl ClusterTpuInfo {
         }
     }
 
-    pub fn get_leader_tpus(&self, leader_forward_count: usize) -> Vec<TpuInfo> {
+    pub fn get_leader_tpus(
+        &self,
+        leader_forward_count: usize,
+    ) -> impl IntoIterator<Item = TpuInfo> {
         let inner = &self.inner;
         let latest_seen_slot = *inner.latest_seen_slot.load().as_ref();
 
-        (0..=leader_forward_count as u64)
-            .filter_map(|i| {
-                let leader_slot = latest_seen_slot + i * NUM_CONSECUTIVE_LEADER_SLOTS;
-                inner.get_tpu_info(leader_slot)
-            })
-            .collect::<Vec<_>>()
+        (0..=leader_forward_count as u64).filter_map(move |i| {
+            let leader_slot = latest_seen_slot + i * NUM_CONSECUTIVE_LEADER_SLOTS;
+            inner.get_tpu_info(leader_slot)
+        })
     }
 }

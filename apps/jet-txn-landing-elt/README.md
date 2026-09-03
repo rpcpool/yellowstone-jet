@@ -123,8 +123,21 @@ before this is redeployed.)
   now-broken wait step yet.
 - `src/http_ndjson_drain.rs` -- generic `Stream<Item: IntoIterator<Item: Serialize>>` →
   batched NDJSON-over-HTTP drain, used by `clickhouse-sink.rs`.
-- `clickhouse/schema.sql` -- table/view/materialized-view DDL (see [Flow](#flow) above).
-- `clickhouse/purge_chain_transaction_staging.sql`, `clickhouse/purge_sent_transaction_pending.sql`
-  -- purge SQL, run via `clickhouse-purge-runner` (not executed by ClickHouse itself).
-- `clickhouse/drop_all.sql` -- dev/reset teardown: drops every object `schema.sql` creates.
-  Destructive (deletes data, not just schema) -- not for use against a real deployment.
+- `clickhouse/jet/schema.sql` (repo root) -- this pipeline's table/view/materialized-view DDL
+  (see [Flow](#flow) above).
+- `clickhouse/jet/txn_trace_schema.sql` (repo root) -- the `txn_trace` table this pipeline reads
+  from but doesn't create: it's written directly by `jet` (the sender app, apps/jet) itself, over
+  HTTP -- kept alongside this pipeline's own schema since a deployment needs both, but owned by
+  and versioned with `jet`, not this crate.
+- `purge_chain_transaction_staging.sql`, `purge_sent_transaction_pending.sql`
+  -- purge SQL, run via `clickhouse-purge-runner` (not executed by ClickHouse itself, and not
+  checked into this repo -- supplied at deploy time via `clickhouse-purge-runner`'s config).
+- `clickhouse/jet/drop_all.sql` (repo root) -- dev/reset teardown: drops every
+  object `schema.sql` creates. Destructive (deletes data, not just schema) -- not for use
+  against a real deployment.
+- `clickhouse/jet/permissions.sql` (repo root) -- role/grant DDL for the
+  `jet-clickhouse-sink` and `jet` roles.
+- `clickhouse/jet/migrations/` (repo root) -- incremental, idempotent `ALTER`
+  scripts to bring an existing deployment's schema up to date without dropping data.
+- `clickhouse/jet/schemas/` (repo root) -- full schema snapshots as of past
+  versions, for reference.

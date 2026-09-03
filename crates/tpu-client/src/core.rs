@@ -43,21 +43,22 @@ include!(concat!(env!("OUT_DIR"), "/txn_info_cap.rs"));
 #[cfg(feature = "prometheus")]
 use crate::prom;
 use {
-    crate::config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
+    crate::{
+        config::{TpuOverrideInfo, TpuPortKind, TpuSenderConfig},
+        identity::TpuIdentity,
+    },
+    arc_swap::ArcSwap,
     bytes::Bytes,
     core::fmt,
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
         ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
-        WriteError, crypto::rustls::QuicClientConfig,
+        WriteError,
     },
     rustls::{NamedGroup, crypto::CryptoProvider},
     solana_clock::DEFAULT_MS_PER_SLOT,
-    solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_signer::Signer,
-    solana_tls_utils::{QuicClientCertificate, SkipServerVerification, new_dummy_x509_certificate},
     std::{
         any::TypeId,
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -186,12 +187,12 @@ impl UpdateIdentityCallback {
 /// Inner part of the update identity command.
 ///
 struct UpdateIdentityCommand {
-    new_identity: Keypair,
+    new_identity: TpuIdentity,
     callback: UpdateIdentityCallback,
 }
 
 struct MultiStepIdentitySynchronizationCommand {
-    new_identity: Keypair,
+    new_identity: TpuIdentity,
     barrier: Arc<Barrier>,
 }
 
@@ -333,14 +334,16 @@ pub(crate) struct TpuSenderDriver<CB> {
     config: TpuSenderConfig,
 
     ///
-    /// Current certificate set
+    /// Current driver identity: public key plus its derived QUIC client TLS credentials.
     ///
-    client_certificate: Arc<QuicClientCertificate>,
+    identity: TpuIdentity,
 
     ///
-    /// Current set driver identity
+    /// The driver is the only writer of this cell; it's shared with [`TpuSenderIdentityUpdater`]
+    /// so callers can cheaply read the current identity's public key without round-tripping
+    /// through the command-and-control channel.
     ///
-    identity: Keypair,
+    current_identity_pubkey: Arc<ArcSwap<Pubkey>>,
 
     ///
     /// Transaction inlet channel : where transaction comes from.
@@ -427,6 +430,7 @@ struct OrphanConnectionSet {
 }
 
 impl OrphanConnectionSet {
+    #[allow(dead_code)]
     const fn len(&self) -> usize {
         self.curr_len
     }
@@ -901,7 +905,7 @@ pub enum TpuSenderResponse {
 ///
 struct ConnectingTask {
     remote_peer_identity: Pubkey,
-    cert: Arc<QuicClientCertificate>,
+    identity: TpuIdentity,
     max_idle_timeout: Duration,
     connection_timeout: Duration,
     wait_for_eviction: Option<Arc<Notify>>,
@@ -942,19 +946,6 @@ impl ConnectingTask {
             );
         }
 
-        let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("Failed to set QUIC client protocol versions")
-            .dangerous()
-            .with_custom_certificate_verifier(SkipServerVerification::new())
-            .with_client_auth_cert(
-                vec![self.cert.certificate.clone()],
-                self.cert.key.clone_key(),
-            )
-            .expect("Failed to set QUIC client certificates");
-        crypto.enable_early_data = true;
-        crypto.alpn_protocols = vec![ALPN_TPU_PROTOCOL_ID.to_vec()];
-
         let transport_config = {
             let mut res = TransportConfig::default();
 
@@ -970,7 +961,7 @@ impl ConnectingTask {
             res
         };
 
-        let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto).unwrap()));
+        let mut config = ClientConfig::new(Arc::new(self.identity.insecure_clone()));
         config.transport_config(Arc::new(transport_config));
 
         let server_name = socket_addr_to_quic_server_name(remote_peer_addr);
@@ -1898,11 +1889,11 @@ where
             None => {
                 // No existing connecting task for the remote peer address, spawn a new one.
                 let endpoint_idx = self.next_endpoint_idx();
-                let cert = Arc::clone(&self.client_certificate);
+                let identity = self.identity.insecure_clone();
                 let max_idle_timeout = self.config.max_idle_timeout;
                 let fut = ConnectingTask {
                     remote_peer_identity,
-                    cert,
+                    identity,
                     max_idle_timeout,
                     connection_timeout: self.config.connecting_timeout,
                     wait_for_eviction: maybe_wait_for_eviction,
@@ -2768,7 +2759,7 @@ where
     /// 8. Replay all connecting tasks with the new identity and connecting meta stored at step #3.
     ///  
     ///
-    async fn update_identity(&mut self, new_identity: Keypair, barrier_like: impl Future) {
+    async fn update_identity(&mut self, new_identity: TpuIdentity, barrier_like: impl Future) {
         self.schedule_graceful_drop_all_worker();
         self.connection_map.clear();
         self.orphan_connection_set.clear();
@@ -2784,15 +2775,9 @@ where
 
         let connecting_meta = std::mem::take(&mut self.connecting_meta);
 
-        // Update identity
-        let (certificate, privkey) = new_dummy_x509_certificate(&new_identity);
-        let cert = Arc::new(QuicClientCertificate {
-            certificate,
-            key: privkey,
-        });
-
-        self.client_certificate = cert;
         self.identity = new_identity;
+        self.current_identity_pubkey
+            .store(Arc::new(self.identity.pubkey()));
         #[cfg(feature = "prometheus")]
         {
             prom::quic_set_identity(self.identity.pubkey());
@@ -3042,6 +3027,7 @@ where
         }
     }
 
+    #[allow(unused_variables)]
     pub async fn run(mut self) {
         #[cfg(feature = "prometheus")]
         {
@@ -3332,6 +3318,17 @@ pub trait TpuSenderResponseCallback: Clone + Send + Sync + 'static {
     fn call(&self, response: TpuSenderResponse);
 }
 
+impl<T> TpuSenderResponseCallback for Option<T>
+where
+    T: TpuSenderResponseCallback,
+{
+    fn call(&self, response: TpuSenderResponse) {
+        if let Some(callback) = self {
+            callback.call(response);
+        }
+    }
+}
+
 ///
 /// A no-op implementation of [`TpuSenderResponseCallback`].
 ///
@@ -3359,7 +3356,7 @@ pub struct TpuSenderDriverSpawner {
 impl TpuSenderDriverSpawner {
     pub fn spawn_default_with_callback<CB>(
         &self,
-        identity: Keypair,
+        identity: TpuIdentity,
         callback_sink: CB,
     ) -> TpuSenderSessionContext
     where
@@ -3374,7 +3371,7 @@ impl TpuSenderDriverSpawner {
         )
     }
 
-    pub fn spawn_with_default(&self, identity: Keypair) -> TpuSenderSessionContext {
+    pub fn spawn_with_default(&self, identity: TpuIdentity) -> TpuSenderSessionContext {
         self.spawn::<Nothing>(
             identity,
             Default::default(),
@@ -3386,7 +3383,7 @@ impl TpuSenderDriverSpawner {
 
     pub fn spawn<CB>(
         &self,
-        identity: Keypair,
+        identity: TpuIdentity,
         config: TpuSenderConfig,
         eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
         leader_schedule: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
@@ -3407,7 +3404,7 @@ impl TpuSenderDriverSpawner {
 
     pub fn spawn_on<CB>(
         &self,
-        identity: Keypair,
+        identity: TpuIdentity,
         config: TpuSenderConfig,
         eviction_strategy: Arc<dyn ConnectionEvictionStrategy + Send + Sync + 'static>,
         leader_predictor: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
@@ -3434,12 +3431,6 @@ impl TpuSenderDriverSpawner {
 
         let (tx_inlet, tx_outlet) = mpsc::channel(self.driver_tx_channel_capacity);
         let (driver_cnc_tx, driver_cnc_rx) = mpsc::channel(10);
-
-        let (certificate, private_key) = new_dummy_x509_certificate(&identity);
-        let cert = Arc::new(QuicClientCertificate {
-            certificate,
-            key: private_key,
-        });
 
         let bind_addr = config.endpoint_bind_addr;
         let mut endpoints = vec![];
@@ -3475,6 +3466,7 @@ impl TpuSenderDriverSpawner {
             config.tpu_port,
             Arc::clone(&self.leader_tpu_info_service),
         );
+        let current_identity_pubkey = Arc::new(ArcSwap::new(Arc::new(identity.pubkey())));
         let driver = TpuSenderDriver {
             stake_info_map: Arc::clone(&self.stake_info_map),
             tx_worker_handle_map: Default::default(),
@@ -3483,12 +3475,12 @@ impl TpuSenderDriverSpawner {
             active_staked_sorted_remote_peer: Default::default(),
             tx_queues: Default::default(),
             identity,
+            current_identity_pubkey: Arc::clone(&current_identity_pubkey),
             connecting_tasks: JoinSet::new(),
             connecting_meta: Default::default(),
             connecting_remote_peers: Default::default(),
             leader_tpu_info_service: Arc::clone(&self.leader_tpu_info_service),
             config,
-            client_certificate: cert,
             tx_inlet: tx_outlet,
             response_outlet: response_callback.clone(),
             cnc_rx: driver_cnc_rx,
@@ -3517,6 +3509,7 @@ impl TpuSenderDriverSpawner {
             driver_tx_sink: tx_inlet,
             identity_updater: TpuSenderIdentityUpdater {
                 cnc_tx: PollSender::new(driver_cnc_tx),
+                current_identity_pubkey,
             },
             driver_join_handle: jh,
         }
@@ -3530,8 +3523,14 @@ impl TpuSenderDriverSpawner {
 pub struct TpuSenderIdentityUpdater {
     ///
     /// Command-and-control channel to send command to the QUIC driver
-    ///  
+    ///
     cnc_tx: PollSender<DriverCommand>,
+
+    ///
+    /// Read-only handle onto the driver's current identity public key. The driver is the only
+    /// writer; see [`TpuSenderIdentityUpdater::current_identity`].
+    ///
+    current_identity_pubkey: Arc<ArcSwap<Pubkey>>,
 }
 
 ///
@@ -3539,9 +3538,21 @@ pub struct TpuSenderIdentityUpdater {
 ///
 impl TpuSenderIdentityUpdater {
     ///
+    /// Returns the driver's current identity public key.
+    ///
+    /// This reads a shared, lock-free cell the driver updates whenever its identity changes --
+    /// it does not round-trip through the command-and-control channel, so it reflects whatever
+    /// the driver has *applied* so far, not necessarily an in-flight [`Self::update_identity`]
+    /// that hasn't completed yet.
+    ///
+    pub fn current_identity(&self) -> Pubkey {
+        *self.current_identity_pubkey.load_full()
+    }
+
+    ///
     /// Changes the configured identity in the QUIC driver
     ///
-    pub fn update_identity(&mut self, identity: Keypair) -> UpdateIdentity {
+    pub fn update_identity(&mut self, identity: TpuIdentity) -> UpdateIdentity {
         let shared = UpdateIdentityInner {
             state: AtomicU8::new(UpdateIdentityInner::FALSE),
             waker: AtomicWaker::new(),
@@ -3574,7 +3585,7 @@ impl TpuSenderIdentityUpdater {
     ///
     pub async fn update_identity_with_confirmation_barrier(
         &self,
-        identity: Keypair,
+        identity: TpuIdentity,
         barrier: Arc<Barrier>,
     ) {
         let cmd = MultiStepIdentitySynchronizationCommand {
@@ -3600,6 +3611,7 @@ impl TpuSenderIdentityUpdater {
         let (cnc_tx, _cnc_rx) = tokio::sync::mpsc::channel(1);
         Self {
             cnc_tx: PollSender::new(cnc_tx),
+            current_identity_pubkey: Arc::new(ArcSwap::new(Arc::new(Pubkey::default()))),
         }
     }
 }
@@ -3723,9 +3735,11 @@ mod test {
         super::{
             DriverCommand, StakeSortedPeerSet, TpuSenderIdentityUpdater, UpdateIdentityCommand,
         },
+        crate::identity::TpuIdentity,
+        arc_swap::ArcSwap,
         solana_keypair::Keypair,
         solana_pubkey::Pubkey,
-        std::time::Duration,
+        std::{sync::Arc, time::Duration},
         tokio::sync::mpsc,
         tokio_util::sync::PollSender,
     };
@@ -3735,9 +3749,10 @@ mod test {
         let (cnc_tx, cnc_rx) = mpsc::channel(10);
         let mut updater: TpuSenderIdentityUpdater = TpuSenderIdentityUpdater {
             cnc_tx: PollSender::new(cnc_tx),
+            current_identity_pubkey: Arc::new(ArcSwap::new(Arc::new(Pubkey::default()))),
         };
 
-        let identity = Keypair::new();
+        let identity = TpuIdentity::from_keypair(&Keypair::new());
         let mut update_fut = updater.update_identity(identity.insecure_clone());
         let xs = futures::poll!(&mut update_fut);
         assert!(xs.is_pending());
@@ -3752,6 +3767,7 @@ mod test {
         let (cnc_tx, mut cnc_rx) = mpsc::channel(10);
         let mut updater = TpuSenderIdentityUpdater {
             cnc_tx: PollSender::new(cnc_tx),
+            current_identity_pubkey: Arc::new(ArcSwap::new(Arc::new(Pubkey::default()))),
         };
 
         let jh = tokio::spawn(async move {
@@ -3768,14 +3784,14 @@ mod test {
             new_identity
         });
 
-        let identity = Keypair::new();
+        let identity = TpuIdentity::from_keypair(&Keypair::new());
         updater
             .update_identity(identity.insecure_clone())
             .await
             .unwrap();
 
         let actual = jh.await.unwrap();
-        assert_eq!(actual, identity)
+        assert_eq!(actual.pubkey(), identity.pubkey())
     }
 
     #[test]

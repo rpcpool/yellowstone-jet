@@ -15,10 +15,12 @@ CREATE TABLE IF NOT EXISTS txn_trace
     drop_reason Nullable(String),
     send_at_slot Nullable(UInt64),
     drain_id Nullable(String),
+    signer Nullable(String),
     ts DateTime64(3) DEFAULT now64(3),
     INDEX bf_signature signature TYPE bloom_filter(0.01) GRANULARITY 64,
     INDEX bf_x_request_id x_request_id TYPE bloom_filter(0.01) GRANULARITY 64,
     INDEX bf_x_subscription_id x_subscription_id TYPE bloom_filter(0.01) GRANULARITY 64,
+    INDEX bf_signer signer TYPE bloom_filter(0.01) GRANULARITY 64,
     INDEX set_remote_peer remote_peer_identity TYPE set(2048) GRANULARITY 64
 )
 ENGINE = MergeTree

@@ -215,6 +215,45 @@ async fn main() {
 }
 ```
 
+## `HardenedKeypair`: memory-hardened keypair loading
+
+The `Usage` example above loads the identity with `solana_keypair::read_keypair_file`, which reads
+the whole keypair file into an ordinary, unlocked `String` before parsing it -- the private key
+exists, at least transiently, in memory that can be swapped to disk and isn't wiped on drop.
+
+`HardenedKeypair` (in the `identity` module) is a drop-in alternative that keeps the private key
+`mlock`ed and zeroized on drop from the moment it first exists, and never copies it into an
+unlocked allocation on the way in.
+
+Construct one via:
+
+- `HardenedKeypair::read_from_file(path)` / `read_from_reader(&mut reader)` -- parses the same
+  JSON `[u8; 64]` keypair file format as `solana_keypair`, without ever putting the file's text
+  (which spells the secret out in ASCII) into an unlocked buffer.
+- `HardenedKeypair::new()` -- generates a fresh random one.
+- `HardenedKeypair::from_keypair(&keypair)` -- wraps an existing `solana_keypair::Keypair`.
+- `HardenedKeypair::try_from(&bytes[..])` -- parses raw 64-byte keypair bytes, rejecting the
+  pair if the public half doesn't actually correspond to the secret half.
+
+It implements `TpuEd25519SigningKey`, so it plugs directly into
+`TpuIdentity::from_ed25519_signing_key`, which builds the QUIC client TLS identity used by the
+sender -- a plain `Keypair` never needs to exist on the way there:
+
+```rust
+use yellowstone_jet_tpu_client::identity::{HardenedKeypair, TpuIdentity};
+
+let hardened = HardenedKeypair::read_from_file("/path/to/identity.json")
+    .expect("read identity keypair file");
+
+println!("identity pubkey: {}", hardened.pubkey());
+
+let identity = TpuIdentity::from_ed25519_signing_key(&hardened);
+```
+
+The resulting `identity` is what you pass to `create_yellowstone_tpu_sender`/
+`YellowstoneTpuSender`, exactly as a `TpuIdentity::from_keypair(&keypair)` would be in the
+`Usage` example above -- the rest of the sender setup is unchanged.
+
 ## `TpuSenderTxnInfo` detailed usage
 
 `TpuSenderTxnInfo` is an optional typed metadata envelope attached to each `TpuSenderTxn`.

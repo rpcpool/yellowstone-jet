@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "16.3.0"
+version = "17.0.0"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
@@ -48,6 +48,7 @@ prost-types = { workspace = true }
 quinn = { workspace = true }
 quinn-proto = { workspace = true }
 rand = { workspace = true }
+region = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 retry = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
@@ -68,6 +69,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "json"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 url = { workspace = true, features = ["serde"] }
+zeroize = { workspace = true }
 
 # Agave Monorepo
 solana-bincode = { workspace = true }
@@ -105,7 +107,7 @@ wincode = { workspace = true }
 # Yellowstone
 yellowstone-grpc-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
-yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yellowstone-grpc", "shield", "txn-info-cap-128"] }
+yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yellowstone-grpc", "shield", "txn-info-cap-192"] }
 yellowstone-shield-store = { workspace = true }
 
 [build-dependencies]
