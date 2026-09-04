@@ -37,6 +37,7 @@ use {
         config::{ConfigJet, RpcErrorStrategy, load_config},
         grpc_geyser::{GeyserStreams, GeyserSubscriber},
         grpc_lewis::create_lewis_pipeline,
+        http_ndjson_drain::HttpNdjsonDrain,
         metrics::{REGISTRY, jet as metrics},
         rpc::{
             admin::{AdminServer, RpcClient, TpuActivityTracker},
@@ -50,7 +51,7 @@ use {
             DropExpiredTransactions, FanoutConfig, SendTransactionRequest, TransactionFanout,
             TransactionPolicyStore,
         },
-        txn_trace_drain::HttpTxnTraceDrain,
+        txn_trace_drain::TxnTraceShaper,
         util::WaitShutdown,
     },
     yellowstone_jet_tpu_client::{
@@ -406,13 +407,20 @@ async fn run_jet(
             tg_name_map.insert(ah.id(), "lewis_client".to_string());
             Some(tpu_client_callback_tx)
         }
-        (Some(http_txn_drain_config), None) => {
+        (Some(txn_trace_drain_config), None) => {
             let (tpu_client_callback_tx, tpu_client_callback_rx) =
                 tokio::sync::mpsc::unbounded_channel();
-            let drain = HttpTxnTraceDrain::with_config(
+            let txn_trace_entries = TxnTraceShaper::new(
                 UnboundedReceiverStream::new(tpu_client_callback_rx),
                 cluster_tpu_info.clone(),
-                http_txn_drain_config,
+                // TODO: no config field carries a drain identifier since the http_ndjson_drain
+                // split -- wire one back in (e.g. a `drain_id` on `ConfigJet`) if downstream
+                // consumers still need to tell this jet instance's entries apart from others'.
+                txn_trace_drain_config.drain_id.clone(),
+            );
+            let drain = HttpNdjsonDrain::with_config(
+                txn_trace_entries,
+                txn_trace_drain_config.http_txn_trace_drain,
             );
             let ah = tg.spawn(async move {
                 let _ = drain.await.inspect_err(|e| {

@@ -1,5 +1,5 @@
 use {
-    crate::txn_trace_drain::HttpTxnTraceDrainConfig,
+    crate::http_ndjson_drain::HttpNdjsonDrainConfig,
     anyhow::Context,
     reqwest::Url,
     serde::{
@@ -92,11 +92,18 @@ pub struct ConfigJet {
 
     /// If `url` fails to parse, this is treated as absent (`None`, with a warning logged)
     /// rather than failing config load entirely -- see `ConfigJet::deserialize_http_txn_trace_drain`.
-    #[serde(
-        default,
-        deserialize_with = "ConfigJet::deserialize_http_txn_trace_drain"
-    )]
-    pub http_txn_trace_drain: Option<HttpTxnTraceDrainConfig>,
+    #[serde(default, deserialize_with = "ConfigJet::deserialize_txn_trace_drain")]
+    pub http_txn_trace_drain: Option<TxnTraceDrainConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TxnTraceDrainConfig {
+    /// Drain identifier
+    #[serde(default)]
+    pub drain_id: Option<String>,
+
+    #[serde(flatten)]
+    pub http_txn_trace_drain: HttpNdjsonDrainConfig,
 }
 
 const fn default_true() -> bool {
@@ -118,20 +125,20 @@ impl ConfigJet {
 
     ///
     /// Deserializes `http_txn_trace_drain` leniently: if the value present fails to deserialize
-    /// into `HttpTxnTraceDrainConfig` for *any* reason (a bad `url`, a malformed `credentials`
+    /// into `HttpNdjsonDrainConfig` for *any* reason (a bad `url`, a malformed `credentials`
     /// block, a wrong type, ...), that's treated the same as the field being absent (`None`,
     /// with a warning logged) instead of failing config load for the whole process.
     ///
     /// This has to go through an intermediate, format-native [`serde_yaml::Value`] rather than
-    /// deserializing `HttpTxnTraceDrainConfig` from `deserializer` directly: a `Deserializer` is
+    /// deserializing `HttpNdjsonDrainConfig` from `deserializer` directly: a `Deserializer` is
     /// generally single-use (many formats can't rewind and try again), so attempting the real
     /// type first and falling back on failure isn't an option -- there'd be nothing left to
     /// deserialize a fallback from. Buffering into a `Value` first (self-describing, freely
     /// re-deserializable) is what makes "try it, and turn a failure into `None`" possible at all.
     ///
-    fn deserialize_http_txn_trace_drain<'de, D>(
+    fn deserialize_txn_trace_drain<'de, D>(
         deserializer: D,
-    ) -> Result<Option<HttpTxnTraceDrainConfig>, D::Error>
+    ) -> Result<Option<TxnTraceDrainConfig>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -139,7 +146,7 @@ impl ConfigJet {
             return Ok(None);
         };
 
-        match HttpTxnTraceDrainConfig::deserialize(value) {
+        match TxnTraceDrainConfig::deserialize(value) {
             Ok(config) => Ok(Some(config)),
             Err(error) => {
                 tracing::warn!(
@@ -602,11 +609,8 @@ mod tests {
     /// filled in just to reach this one.
     #[derive(Debug, Deserialize)]
     struct Wrapper {
-        #[serde(
-            default,
-            deserialize_with = "ConfigJet::deserialize_http_txn_trace_drain"
-        )]
-        http_txn_trace_drain: Option<HttpTxnTraceDrainConfig>,
+        #[serde(default, deserialize_with = "ConfigJet::deserialize_txn_trace_drain")]
+        http_txn_trace_drain: Option<TxnTraceDrainConfig>,
     }
 
     #[test]
@@ -623,7 +627,10 @@ http_txn_trace_drain:
         let drain = wrapper
             .http_txn_trace_drain
             .expect("a valid url should deserialize to Some");
-        assert_eq!(drain.url.as_str(), "http://localhost:8123/");
+        assert_eq!(
+            drain.http_txn_trace_drain.url.as_str(),
+            "http://localhost:8123/"
+        );
     }
 
     #[test]
