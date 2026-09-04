@@ -90,7 +90,12 @@ pub struct ConfigJet {
     #[serde(default)]
     pub log_invalid_txn: bool,
 
-    #[serde(default)]
+    /// If `url` fails to parse, this is treated as absent (`None`, with a warning logged)
+    /// rather than failing config load entirely -- see `ConfigJet::deserialize_http_txn_trace_drain`.
+    #[serde(
+        default,
+        deserialize_with = "ConfigJet::deserialize_http_txn_trace_drain"
+    )]
     pub http_txn_trace_drain: Option<HttpTxnTraceDrainConfig>,
 }
 
@@ -108,6 +113,41 @@ impl ConfigJet {
                 .map(Some)
                 .map_err(de::Error::custom),
             None => Ok(None),
+        }
+    }
+
+    ///
+    /// Deserializes `http_txn_trace_drain` leniently: if the value present fails to deserialize
+    /// into `HttpTxnTraceDrainConfig` for *any* reason (a bad `url`, a malformed `credentials`
+    /// block, a wrong type, ...), that's treated the same as the field being absent (`None`,
+    /// with a warning logged) instead of failing config load for the whole process.
+    ///
+    /// This has to go through an intermediate, format-native [`serde_yaml::Value`] rather than
+    /// deserializing `HttpTxnTraceDrainConfig` from `deserializer` directly: a `Deserializer` is
+    /// generally single-use (many formats can't rewind and try again), so attempting the real
+    /// type first and falling back on failure isn't an option -- there'd be nothing left to
+    /// deserialize a fallback from. Buffering into a `Value` first (self-describing, freely
+    /// re-deserializable) is what makes "try it, and turn a failure into `None`" possible at all.
+    ///
+    fn deserialize_http_txn_trace_drain<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<HttpTxnTraceDrainConfig>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(value) = Option::<serde_yaml::Value>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+
+        match HttpTxnTraceDrainConfig::deserialize(value) {
+            Ok(config) => Ok(Some(config)),
+            Err(error) => {
+                tracing::warn!(
+                    "failed to deserialize http_txn_trace_drain ({error}); \
+                     disabling http_txn_trace_drain"
+                );
+                Ok(None)
+            }
         }
     }
 }
@@ -550,5 +590,84 @@ pub struct PrometheusConfig {
 impl PrometheusConfig {
     const fn default_push_interval() -> Duration {
         Duration::from_secs(10)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Isolates `ConfigJet::deserialize_http_txn_trace_drain` behind a minimal wrapper instead
+    /// of exercising it through a full `ConfigJet`, which would need every other required field
+    /// filled in just to reach this one.
+    #[derive(Debug, Deserialize)]
+    struct Wrapper {
+        #[serde(
+            default,
+            deserialize_with = "ConfigJet::deserialize_http_txn_trace_drain"
+        )]
+        http_txn_trace_drain: Option<HttpTxnTraceDrainConfig>,
+    }
+
+    #[test]
+    fn http_txn_trace_drain_parses_a_valid_url() {
+        let wrapper: Wrapper = serde_yaml::from_str(
+            r#"
+http_txn_trace_drain:
+  url: http://localhost:8123
+  credentials: null
+"#,
+        )
+        .expect("deserialization should succeed");
+
+        let drain = wrapper
+            .http_txn_trace_drain
+            .expect("a valid url should deserialize to Some");
+        assert_eq!(drain.url.as_str(), "http://localhost:8123/");
+    }
+
+    #[test]
+    fn http_txn_trace_drain_becomes_none_on_an_unparseable_url() {
+        let wrapper: Wrapper = serde_yaml::from_str(
+            r#"
+http_txn_trace_drain:
+  url: "not a url"
+  credentials: null
+"#,
+        )
+        .expect("an unparseable url must not fail deserialization of the whole config");
+
+        assert!(
+            wrapper.http_txn_trace_drain.is_none(),
+            "an unparseable url should downgrade the field to None instead of erroring"
+        );
+    }
+
+    #[test]
+    fn http_txn_trace_drain_defaults_to_none_when_absent() {
+        let wrapper: Wrapper = serde_yaml::from_str("{}").expect("deserialization should succeed");
+        assert!(wrapper.http_txn_trace_drain.is_none());
+    }
+
+    #[test]
+    fn http_txn_trace_drain_becomes_none_on_a_malformed_field_other_than_url() {
+        // `max_ndjson_len` is a `usize`; a string here is a type error unrelated to `url`, and
+        // must still degrade to `None` rather than fail the whole config -- this is what
+        // distinguishes the current (deserialize-anything-leniently) behavior from an earlier
+        // version of this function that only special-cased `url` specifically.
+        let wrapper: Wrapper = serde_yaml::from_str(
+            r#"
+http_txn_trace_drain:
+  url: http://localhost:8123
+  credentials: null
+  max_ndjson_len: "not a number"
+"#,
+        )
+        .expect("a malformed sub-field must not fail deserialization of the whole config");
+
+        assert!(
+            wrapper.http_txn_trace_drain.is_none(),
+            "a malformed field anywhere in http_txn_trace_drain should downgrade it to None"
+        );
     }
 }
