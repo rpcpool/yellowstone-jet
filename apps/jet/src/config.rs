@@ -92,7 +92,10 @@ pub struct ConfigJet {
 
     /// If `url` fails to parse, this is treated as absent (`None`, with a warning logged)
     /// rather than failing config load entirely -- see `ConfigJet::deserialize_http_txn_trace_drain`.
-    #[serde(default, deserialize_with = "ConfigJet::deserialize_http_txn_trace_drain")]
+    #[serde(
+        default,
+        deserialize_with = "ConfigJet::deserialize_http_txn_trace_drain"
+    )]
     pub http_txn_trace_drain: Option<HttpTxnTraceDrainConfig>,
 }
 
@@ -599,7 +602,10 @@ mod tests {
     /// filled in just to reach this one.
     #[derive(Debug, Deserialize)]
     struct Wrapper {
-        #[serde(default, deserialize_with = "ConfigJet::deserialize_http_txn_trace_drain")]
+        #[serde(
+            default,
+            deserialize_with = "ConfigJet::deserialize_http_txn_trace_drain"
+        )]
         http_txn_trace_drain: Option<HttpTxnTraceDrainConfig>,
     }
 
