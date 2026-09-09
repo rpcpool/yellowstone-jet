@@ -21,6 +21,19 @@ builds:
           - --package=yellowstone-jet
           - --bin=jet
 
+    - id: jet-simd-0296
+      builder: rust
+      # Same as `jet`, but with the SIMD-0296 packet size enabled.
+      command: build
+      binary: jet
+      targets:
+          - x86_64-unknown-linux-gnu
+      flags:
+          - --release
+          - --package=yellowstone-jet
+          - --bin=jet
+          - --features=simd-0296
+
     - id: clickhouse-sink
       builder: rust
       command: build
@@ -38,6 +51,12 @@ archives:
       formats: [binary]
       ids:
           - jet
+
+    - id: jet-simd-0296
+      name_template: jet-simd-0296-linux-amd64
+      formats: [binary]
+      ids:
+          - jet-simd-0296
 
     - id: clickhouse-sink
       name_template: clickhouse-sink-linux-amd64
