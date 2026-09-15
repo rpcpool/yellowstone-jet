@@ -113,3 +113,13 @@ curl -X POST '/api/v1/transactions?encoding=base64&response=signature' \
 Created by the greybeards at [Triton One](https://triton.one)
 
 Copyright (C) 2024 Triton One Ltd
+
+## TPU forwarding health metric
+
+`jet_tpu_forwarding_stalled` is an unlabelled gauge with one series per Jet. It is 1 when the TPU forwarding stall condition holds and 0 otherwise. Each metrics scrape evaluates the activity window, so the gauge updates even when no new callbacks arrive.
+
+The condition uses the rc6 logic: no successful sends in the trailing 300 buckets of 100 ms, at least one qualifying failure, and failures in at least one fifth of the buckets. A single burst does not satisfy the spread requirement. Startup has no additional grace period. A successful send or expiring failure evidence can clear the condition. Idle expiry allows traffic to retry; it does not prove recovery.
+
+Success counts TPU `TxSent` callbacks. Failure counts other callbacks except drops for remote peer unreachable, invalid packet size, or driver identity changes. The timer wheel and callback classification are unchanged. These measure send outcomes, not transaction landing.
+
+`/health` ignores the forwarding stall condition. It still checks the allowed identity and initialization of gRPC, cluster nodes, and the leader schedule. The HAProxy agent can stop traffic when `jet_tpu_forwarding_stalled == 1` and restore the normal weight decision when it returns to 0.

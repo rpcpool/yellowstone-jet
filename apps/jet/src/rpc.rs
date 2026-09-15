@@ -36,6 +36,23 @@ pub mod admin {
         pub failed_activity: ActivityWindow,
     }
 
+    impl TpuActivityTracker {
+        pub(crate) fn is_stalled(&self, now: Instant) -> bool {
+            let sent_cnt = self.sent_activity.count_in_window(now);
+            let failed_cnt = self.failed_activity.count_in_window(now);
+            let total_cnt = sent_cnt + failed_cnt;
+            if total_cnt > 0 {
+                let failure_are_minimally_spread = self
+                    .failed_activity
+                    .active_slot_fraction_at_least(now, 1, 5);
+                if sent_cnt == 0 && failed_cnt > 0 && failure_are_minimally_spread {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
     #[rpc(server, client)]
     pub trait Rpc {
         #[method(name = "getLatestSlot")]
@@ -215,7 +232,6 @@ pub mod admin {
         service: S,
         jet_identity_updater: Arc<Mutex<JetIdentityUpdateT>>,
         allowed_identity: Option<Pubkey>,
-        tpu_activity_tracker: Arc<TpuActivityTracker>,
     }
 
     // Not `#[derive(Clone)]`: that would also require `JetIdentityUpdateT: Clone`, but it only
@@ -226,7 +242,6 @@ pub mod admin {
                 service: self.service.clone(),
                 jet_identity_updater: Arc::clone(&self.jet_identity_updater),
                 allowed_identity: self.allowed_identity,
-                tpu_activity_tracker: Arc::clone(&self.tpu_activity_tracker),
             }
         }
     }
@@ -238,13 +253,11 @@ pub mod admin {
             service: S,
             jet_identity_updater: Arc<Mutex<JetIdentityUpdateT>>,
             allowed_identity: Option<Pubkey>,
-            tpu_activity_tracker: Arc<TpuActivityTracker>,
         ) -> Self {
             Self {
                 service,
                 jet_identity_updater,
                 allowed_identity,
-                tpu_activity_tracker,
             }
         }
     }
@@ -259,31 +272,13 @@ pub mod admin {
         async fn health_check(
             jet_identity_updater: &Arc<Mutex<JetIdentityUpdateT>>,
             allowed_identity: Option<Pubkey>,
-            tpu_activity_tracker: Arc<TpuActivityTracker>,
         ) -> (StatusCode, String) {
-            let now = Instant::now();
             let current_identity = jet_identity_updater.lock().await.get_identity();
             if let Some(expected) = allowed_identity {
                 if expected != current_identity {
                     return (
                         StatusCode::SERVICE_UNAVAILABLE,
                         "identity mismatch".to_owned(),
-                    );
-                }
-            }
-
-            let sent_cnt = tpu_activity_tracker.sent_activity.count_in_window(now);
-            let failed_cnt = tpu_activity_tracker.failed_activity.count_in_window(now);
-            let total_cnt = sent_cnt + failed_cnt;
-            if total_cnt > 0 {
-                // Make sure at lesat 1/5 of the slot of the time wheel has been used in case of only failure.
-                let failure_are_minimally_spread = tpu_activity_tracker
-                    .failed_activity
-                    .active_slot_fraction_at_least(now, 1, 5);
-                if sent_cnt == 0 && failed_cnt > 0 && failure_are_minimally_spread {
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "tpu sender has stalled".to_owned(),
                     );
                 }
             }
@@ -317,14 +312,9 @@ pub mod admin {
                 let jet_identity_updater = Arc::clone(&self.jet_identity_updater);
                 let allowed_identity = self.allowed_identity;
                 let ts = Instant::now();
-                let tpu_activity_tracker = Arc::clone(&self.tpu_activity_tracker);
                 async move {
-                    let (status, body) = Self::health_check(
-                        &jet_identity_updater,
-                        allowed_identity,
-                        tpu_activity_tracker,
-                    )
-                    .await;
+                    let (status, body) =
+                        Self::health_check(&jet_identity_updater, allowed_identity).await;
                     let response = Response::builder()
                         .status(status)
                         .body(Body::new(body))
@@ -359,7 +349,6 @@ pub mod admin {
             jet_identity_updater: IU,
             allowed_identity: Option<Pubkey>,
             cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
-            tpu_activity_tracker: Arc<TpuActivityTracker>,
         ) -> Self
         where
             IU: JetIdentityUpdater + Send + 'static,
@@ -368,12 +357,10 @@ pub mod admin {
             let health_jet_identity_updater = Arc::clone(&jet_identity_updater);
             let server_middleware = tower::ServiceBuilder::new()
                 .layer_fn(move |service| {
-                    let tpu_activity_tracker = Arc::clone(&tpu_activity_tracker);
                     HealthService::new(
                         service,
                         Arc::clone(&health_jet_identity_updater),
                         allowed_identity,
-                        tpu_activity_tracker,
                     )
                 })
                 .layer_fn(|service| UriRequestMiddleware {
@@ -409,6 +396,62 @@ pub mod admin {
             if let Some(server_handle) = self.server_handle.take() {
                 let _ = server_handle.stop();
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod health_tests {
+        use super::*;
+
+        struct Identity(Pubkey);
+
+        #[async_trait::async_trait]
+        impl JetIdentityUpdater for Identity {
+            async fn update_identity(&mut self, identity: HardenedKeypair) {
+                self.0 = identity.pubkey();
+            }
+
+            fn get_identity(&self) -> Pubkey {
+                self.0
+            }
+        }
+
+        #[tokio::test]
+        async fn forwarding_failures_do_not_override_other_health_checks() {
+            use crate::{metrics::jet, util::SlotStatus};
+
+            jet::init();
+            let identity = Pubkey::new_unique();
+            let updater = Arc::new(Mutex::new(Identity(identity)));
+            let check = || HealthService::<(), Identity>::health_check(&updater, Some(identity));
+            assert_eq!(check().await.0, StatusCode::SERVICE_UNAVAILABLE);
+            jet::grpc_slot_set(SlotStatus::SlotProcessed, 1);
+            jet::cluster_nodes_set_size(1);
+            jet::cluster_leaders_schedule_set_size(1);
+            let tracker = TpuActivityTracker::default();
+            let start = Instant::now();
+            for tick in 0..60 {
+                tracker
+                    .failed_activity
+                    .increment(start + Duration::from_millis(tick * 100));
+            }
+            assert!(tracker.is_stalled(start + Duration::from_millis(5900)));
+            assert_eq!(check().await, (StatusCode::OK, "ok".to_owned()));
+            let mismatch =
+                HealthService::<(), Identity>::health_check(&updater, Some(Pubkey::new_unique()))
+                    .await;
+            assert_eq!(
+                mismatch,
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "identity mismatch".to_owned()
+                )
+            );
+            jet::cluster_nodes_set_size(0);
+            assert_eq!(check().await.1, "no information about cluster nodes");
+            jet::cluster_nodes_set_size(1);
+            jet::cluster_leaders_schedule_set_size(0);
+            assert_eq!(check().await.1, "no information about leaders");
         }
     }
 }
