@@ -12,7 +12,6 @@ pub mod blockhash_queue;
 pub mod cluster_tpu_info;
 pub mod config;
 pub mod crypto_provider;
-mod forwarding_metrics;
 pub mod grpc_geyser;
 pub mod grpc_lewis;
 pub mod http_tx_handler;
