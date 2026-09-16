@@ -293,6 +293,16 @@ pub mod jet {
             .inc();
     }
 
+    pub fn register_tpu_activity_tracker(
+        tracker: std::sync::Arc<crate::rpc::admin::TpuActivityTracker>,
+    ) {
+        REGISTRY
+            .register(Box::new(crate::forwarding_metrics::ForwardingMetrics::new(
+                tracker,
+            )))
+            .expect("forwarding metric is registered once");
+    }
+
     pub fn increment_send_transaction_error() {
         SEND_TRANSACTION_ERROR.inc();
     }

@@ -428,6 +428,7 @@ async fn run_jet(
     };
 
     let shared_tpu_activity_tracker = Arc::new(TpuActivityTracker::default());
+    metrics::register_tpu_activity_tracker(Arc::clone(&shared_tpu_activity_tracker));
     let jet_callback = JetTpuCallback {
         tpu_activity_tracker: Arc::clone(&shared_tpu_activity_tracker),
         other: maybe_callback_sink,
@@ -494,7 +495,6 @@ async fn run_jet(
         tpu_identity_updater.clone(),
         config.identity.expected,
         Arc::new(cluster_tpu_info),
-        shared_tpu_activity_tracker,
     )
     .await;
 
