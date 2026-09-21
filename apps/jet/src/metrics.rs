@@ -229,6 +229,11 @@ pub mod jet {
             HistogramOpts::new("http_tx_request_duration_seconds", "HTTP transaction endpoint request duration in seconds")
                 .buckets(vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0])
         ).unwrap();
+
+        static ref STALLED_TPU_ACTIVITY: IntGauge = IntGauge::new(
+            "jet_tpu_forwarding_stalled", "Whether TPU forwarding meets the stall condition in the trailing 30-second activity window (1 stalled, 0 otherwise)"
+        ).unwrap();
+
     }
 
     pub fn init() {
@@ -275,10 +280,19 @@ pub mod jet {
             register!(VERSIONED_TXN_HANDLE_ERROR);
             register!(HTTP_TX_REQUESTS);
             register!(HTTP_TX_REQUEST_DURATION);
+            register!(STALLED_TPU_ACTIVITY);
 
             yellowstone_jet_tpu_client::prom::register_metrics(&REGISTRY);
             grpc_lewis::prom::register_metrics(&REGISTRY);
         });
+    }
+
+    pub fn set_stalled_tpu_activity(stalled: bool) {
+        if stalled {
+            STALLED_TPU_ACTIVITY.set(1);
+        } else {
+            STALLED_TPU_ACTIVITY.set(0);
+        }
     }
 
     pub fn incr_versioned_txn_handler_error(error_type: &str) {
@@ -291,16 +305,6 @@ pub mod jet {
         SEND_TRANSACTION_ATTEMPT
             .with_label_values(&[&leader.to_string()])
             .inc();
-    }
-
-    pub fn register_tpu_activity_tracker(
-        tracker: std::sync::Arc<crate::rpc::admin::TpuActivityTracker>,
-    ) {
-        REGISTRY
-            .register(Box::new(crate::forwarding_metrics::ForwardingMetrics::new(
-                tracker,
-            )))
-            .expect("forwarding metric is registered once");
     }
 
     pub fn increment_send_transaction_error() {
