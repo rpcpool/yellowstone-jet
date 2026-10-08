@@ -44,6 +44,12 @@ const QUEUE_SIZE_SLOT_UPDATE: usize = 10_000;
 const QUEUE_SIZE_BLOCKMETA_UPDATE: usize = 1_000;
 const QUEUE_SIZE_TRANSACTIONS: usize = 1_000_000;
 
+/// The server sends a ping every 10s, so a stream this quiet is dead and must reconnect.
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// HTTP/2 keepalive finds a peer that vanished without closing the connection.
+const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, thiserror::Error)]
 pub enum GeyserError {
     #[error("gRPC connection failed: {0}")]
@@ -54,6 +60,9 @@ pub enum GeyserError {
 
     #[error("gRPC stream ended unexpectedly")]
     StreamEnded,
+
+    #[error("gRPC stream received no message for {0:?}")]
+    StreamIdle(Duration),
 
     #[error("Channel send failed: {channel}")]
     ChannelSendFailed { channel: &'static str },
@@ -297,7 +306,10 @@ impl GeyserSubscriber {
                 }
 
                 // Prioritize stream processing
-                message = stream.next() => {
+                message = time::timeout(STREAM_IDLE_TIMEOUT, stream.next()) => {
+                    let Ok(message) = message else {
+                        return Err(GeyserError::StreamIdle(STREAM_IDLE_TIMEOUT));
+                    };
                     match message {
                         Some(Ok(msg)) => {
                             Self::handle_grpc_message(
@@ -627,6 +639,9 @@ impl GeyserSubscriber {
                 .max_decoding_message_size(128 * 1024 * 1024) // 128MiB
                 .connect_timeout(Duration::from_secs(3))
                 .timeout(Duration::from_secs(3))
+                .http2_keep_alive_interval(HTTP2_KEEP_ALIVE_INTERVAL)
+                .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT)
+                .keep_alive_while_idle(true)
                 .tls_config(ClientTlsConfig::new().with_native_roots())
                 .expect("tls_config"); // if tls_config is invalid, fail fast
 

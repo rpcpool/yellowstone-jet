@@ -1,19 +1,23 @@
 use {
-    futures::stream,
+    futures::{StreamExt, stream},
     solana_clock::Slot,
     solana_hash::Hash,
     solana_signature::Signature,
+    std::time::Duration,
     tokio::sync::{broadcast, mpsc},
     tokio_util::sync::CancellationToken,
     yellowstone_grpc_proto::{
         prelude::{
-            BlockHeight, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot,
-            SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
+            BlockHeight, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdatePing,
+            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
         },
         tonic::Status,
     },
     yellowstone_jet::{
-        grpc_geyser::{GeyserSubscriber, GrpcUpdateMessage, TransactionReceived},
+        grpc_geyser::{
+            GeyserError, GeyserSubscriber, GrpcUpdateMessage, STREAM_IDLE_TIMEOUT,
+            TransactionReceived,
+        },
         util::{CommitmentLevel, SlotStatus},
     },
 };
@@ -47,6 +51,14 @@ fn create_block_meta(slot: Slot, block_height: Option<u64>) -> SubscribeUpdate {
             executed_transaction_count: 0,
             entries_count: 0,
         })),
+        filters: vec![],
+        created_at: None,
+    }
+}
+
+const fn create_ping() -> SubscribeUpdate {
+    SubscribeUpdate {
+        update_oneof: Some(UpdateOneof::Ping(SubscribeUpdatePing {})),
         filters: vec![],
         created_at: None,
     }
@@ -350,5 +362,61 @@ async fn test_invalid_block_meta() {
     match result.unwrap_err() {
         yellowstone_jet::grpc_geyser::GeyserError::MissingBlockHeight => {}
         e => panic!("Expected MissingBlockHeight, got {e:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_idle_stream_returns_error() {
+    let (slots_tx, _) = broadcast::channel(100);
+    let (block_meta_tx, _) = broadcast::channel(100);
+    let (transactions_tx, _) = mpsc::channel(100);
+
+    // A stream that never yields models a peer that vanished without closing the connection.
+    let stream = stream::pending::<Result<SubscribeUpdate, Status>>();
+
+    let result = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &transactions_tx,
+        true,
+        CancellationToken::new(),
+    )
+    .await;
+
+    match result.unwrap_err() {
+        GeyserError::StreamIdle(timeout) => assert_eq!(timeout, STREAM_IDLE_TIMEOUT),
+        e => panic!("Expected StreamIdle, got {e:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_message_resets_idle_timeout() {
+    let (slots_tx, _) = broadcast::channel(100);
+    let (block_meta_tx, _) = broadcast::channel(100);
+    let (transactions_tx, _) = mpsc::channel(100);
+
+    // Two pings, each just inside the idle timeout, then the stream ends.
+    let gap = STREAM_IDLE_TIMEOUT - Duration::from_secs(1);
+    let stream = stream::iter(0..2)
+        .then(move |_| async move {
+            tokio::time::sleep(gap).await;
+            Ok(create_ping())
+        })
+        .boxed();
+
+    let result = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &transactions_tx,
+        true,
+        CancellationToken::new(),
+    )
+    .await;
+
+    match result.unwrap_err() {
+        GeyserError::StreamEnded => {}
+        e => panic!("Expected StreamEnded, got {e:?}"),
     }
 }

@@ -112,6 +112,9 @@ yellowstone-grpc-proto = { workspace = true }
 yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yellowstone-grpc", "shield", "txn-info-cap-192"] }
 yellowstone-shield-store = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [build-dependencies]
 anyhow = { workspace = true }
 cargo-lock = { workspace = true }
