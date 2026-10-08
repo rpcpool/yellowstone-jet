@@ -17,11 +17,10 @@ use {
     std::{
         collections::{BTreeMap, HashSet},
         future::Future,
-        sync::Arc,
         time::{Duration, Instant},
     },
     tokio::{
-        sync::{Mutex, broadcast, mpsc},
+        sync::broadcast,
         task::{JoinError, JoinHandle},
         time,
     },
@@ -33,8 +32,8 @@ use {
         prelude::{
             BlockHeight as GrpcBlockHeight, CommitmentLevel as GrpcCommitmentLevel,
             SubscribeRequest, SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots,
-            SubscribeRequestFilterTransactions, SubscribeUpdate, SubscribeUpdateBlockMeta,
-            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
+            SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdateSlot,
+            subscribe_update::UpdateOneof,
         },
         tonic::Status,
     },
@@ -42,11 +41,12 @@ use {
 
 const QUEUE_SIZE_SLOT_UPDATE: usize = 10_000;
 const QUEUE_SIZE_BLOCKMETA_UPDATE: usize = 1_000;
-const QUEUE_SIZE_TRANSACTIONS: usize = 1_000_000;
 
 /// HTTP/2 keepalive finds a peer that vanished without closing the connection.
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Consecutive failed connection attempts before `grpc_subscribe` gives up.
+const MAX_CONNECT_ATTEMPTS: usize = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GeyserError {
@@ -216,6 +216,7 @@ impl GeyserSubscriber {
         let endpoint = primary_grpc.endpoint;
         let x_token = primary_grpc.x_token;
         let slot_idle_timeout = primary_grpc.slot_idle_timeout;
+        let mut failed_attempts = 0;
 
         loop {
             Self::reset_slot_metrics();
@@ -223,6 +224,15 @@ impl GeyserSubscriber {
             // Check for shutdown before attempting connection
             if cancellation_token.is_cancelled() {
                 return Ok(());
+            }
+
+            if failed_attempts >= MAX_CONNECT_ATTEMPTS {
+                error!(
+                    "Giving up on gRPC connection ({endpoint}) after {failed_attempts} attempts"
+                );
+                return Err(GeyserError::ConnectionFailed(format!(
+                    "{endpoint}: gave up after {failed_attempts} attempts"
+                )));
             }
 
             let stream = tokio::select! {
@@ -234,16 +244,23 @@ impl GeyserSubscriber {
                     result
                 }
                 _ = time::sleep(Duration::from_secs(30)) => {
-                    warn!("Timeout opening gRPC connection ({endpoint})");
+                    failed_attempts += 1;
+                    warn!("Timeout opening gRPC connection ({endpoint}), attempt {failed_attempts}/{MAX_CONNECT_ATTEMPTS}");
                     continue;
                 }
             };
 
             let stream = match stream {
-                Ok(stream) => stream,
+                Ok(stream) => {
+                    failed_attempts = 0;
+                    stream
+                }
                 Err(e) => {
-                    error!("Failed to open gRPC connection ({endpoint}): {e:?}");
-                    // TODO: we probably need to backoff + maximum retries here
+                    failed_attempts += 1;
+                    error!(
+                        "Failed to open gRPC connection ({endpoint}), attempt {failed_attempts}/{MAX_CONNECT_ATTEMPTS}: {e:?}"
+                    );
+                    // TODO: we probably need to backoff here
                     time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
