@@ -44,11 +44,12 @@ const QUEUE_SIZE_SLOT_UPDATE: usize = 10_000;
 const QUEUE_SIZE_BLOCKMETA_UPDATE: usize = 1_000;
 const QUEUE_SIZE_TRANSACTIONS: usize = 1_000_000;
 
-/// The server sends a ping every 10s, so a stream this quiet is dead and must reconnect.
-pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Slots arrive every ~400ms. A stream with no slot update for this long reconnects,
+/// even if server pings still arrive.
+pub const SLOT_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 /// HTTP/2 keepalive finds a peer that vanished without closing the connection.
-const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
-const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, thiserror::Error)]
 pub enum GeyserError {
@@ -61,8 +62,8 @@ pub enum GeyserError {
     #[error("gRPC stream ended unexpectedly")]
     StreamEnded,
 
-    #[error("gRPC stream received no message for {0:?}")]
-    StreamIdle(Duration),
+    #[error("gRPC stream received no slot update for {0:?}")]
+    SlotIdle(Duration),
 
     #[error("Channel send failed: {channel}")]
     ChannelSendFailed { channel: &'static str },
@@ -297,21 +298,25 @@ impl GeyserSubscriber {
         S: Stream<Item = std::result::Result<SubscribeUpdate, Status>> + Unpin,
     {
         let mut slot_tracking = BTreeMap::<Slot, SlotTrackingInfo>::new();
+        let slot_idle = time::sleep(SLOT_IDLE_TIMEOUT);
+        tokio::pin!(slot_idle);
 
         loop {
             tokio::select! {
+                biased;
+
                 _ = cancellation_token.cancelled() => {
                     info!("gRPC stream processing: cancellation token triggered, shutting down...");
                     return Ok(());
                 }
 
                 // Prioritize stream processing
-                message = time::timeout(STREAM_IDLE_TIMEOUT, stream.next()) => {
-                    let Ok(message) = message else {
-                        return Err(GeyserError::StreamIdle(STREAM_IDLE_TIMEOUT));
-                    };
+                message = stream.next() => {
                     match message {
                         Some(Ok(msg)) => {
+                            if matches!(msg.update_oneof, Some(UpdateOneof::Slot(_))) {
+                                slot_idle.as_mut().reset(time::Instant::now() + SLOT_IDLE_TIMEOUT);
+                            }
                             Self::handle_grpc_message(
                                 msg,
                                 &mut slot_tracking,
@@ -331,6 +336,10 @@ impl GeyserSubscriber {
                             return Err(GeyserError::StreamEnded);
                         }
                     }
+                }
+
+                () = &mut slot_idle => {
+                    return Err(GeyserError::SlotIdle(SLOT_IDLE_TIMEOUT));
                 }
             }
         }

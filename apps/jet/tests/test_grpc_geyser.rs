@@ -15,7 +15,7 @@ use {
     },
     yellowstone_jet::{
         grpc_geyser::{
-            GeyserError, GeyserSubscriber, GrpcUpdateMessage, STREAM_IDLE_TIMEOUT,
+            GeyserError, GeyserSubscriber, GrpcUpdateMessage, SLOT_IDLE_TIMEOUT,
             TransactionReceived,
         },
         util::{CommitmentLevel, SlotStatus},
@@ -385,23 +385,54 @@ async fn test_idle_stream_returns_error() {
     .await;
 
     match result.unwrap_err() {
-        GeyserError::StreamIdle(timeout) => assert_eq!(timeout, STREAM_IDLE_TIMEOUT),
-        e => panic!("Expected StreamIdle, got {e:?}"),
+        GeyserError::SlotIdle(timeout) => assert_eq!(timeout, SLOT_IDLE_TIMEOUT),
+        e => panic!("Expected SlotIdle, got {e:?}"),
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn test_message_resets_idle_timeout() {
+async fn test_pings_do_not_reset_slot_idle_timeout() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, _) = broadcast::channel(100);
     let (transactions_tx, _) = mpsc::channel(100);
 
-    // Two pings, each just inside the idle timeout, then the stream ends.
-    let gap = STREAM_IDLE_TIMEOUT - Duration::from_secs(1);
-    let stream = stream::iter(0..2)
+    // A live server that sends pings but no slots.
+    let gap = SLOT_IDLE_TIMEOUT - Duration::from_secs(1);
+    let stream = stream::iter(0..)
         .then(move |_| async move {
             tokio::time::sleep(gap).await;
             Ok(create_ping())
+        })
+        .boxed();
+
+    let result = GeyserSubscriber::process_grpc_stream(
+        stream,
+        &slots_tx,
+        &block_meta_tx,
+        &transactions_tx,
+        true,
+        CancellationToken::new(),
+    )
+    .await;
+
+    match result.unwrap_err() {
+        GeyserError::SlotIdle(timeout) => assert_eq!(timeout, SLOT_IDLE_TIMEOUT),
+        e => panic!("Expected SlotIdle, got {e:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_slot_update_resets_idle_timeout() {
+    let (slots_tx, _) = broadcast::channel(100);
+    let (block_meta_tx, _) = broadcast::channel(100);
+    let (transactions_tx, _) = mpsc::channel(100);
+
+    // Two slot updates, each just inside the idle timeout, then the stream ends.
+    let gap = SLOT_IDLE_TIMEOUT - Duration::from_secs(1);
+    let stream = stream::iter(1..=2)
+        .then(move |slot| async move {
+            tokio::time::sleep(gap).await;
+            Ok(create_slot_update(slot, SlotStatus::SlotProcessed as i32))
         })
         .boxed();
 
