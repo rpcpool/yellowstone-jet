@@ -85,15 +85,9 @@ use {
 /// This has been copy-pasted from `solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID`
 pub const ALPN_TPU_PROTOCOL_ID: &[u8] = b"solana-tpu";
 
-/// Solana's max transaction wire size. `1232` bytes per the original packet-size limit;
-/// `4096` under the `simd-0296` feature, once a target cluster has activated that SIMD
-/// raising the limit. See `accept_tx`'s size check, which rejects anything larger than
-/// this (unless `unsafe_allow_arbitrary_txn_size` is set).
-#[cfg(not(feature = "simd-0296"))]
-pub const PACKET_DATA_SIZE: usize = 1232;
-
-/// See the `simd-0296`-disabled definition of `PACKET_DATA_SIZE` above.
-#[cfg(feature = "simd-0296")]
+/// Solana's max transaction wire size, as raised to `4096` bytes by SIMD-0296. See
+/// `accept_tx`'s size check, which rejects anything larger than this (unless
+/// `unsafe_allow_arbitrary_txn_size` is set).
 pub const PACKET_DATA_SIZE: usize = 4096;
 
 pub const QUIC_SEND_FAIRNESS: bool = false;

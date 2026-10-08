@@ -259,11 +259,22 @@ pub struct ConfigUpstreamGrpc {
 
     /// Optional token for access to gRPC
     pub x_token: Option<String>,
+
+    /// Reconnect if the stream receives no slot update for this long, even if server pings still arrive
+    #[serde(
+        default = "ConfigUpstreamGrpc::default_slot_idle_timeout",
+        with = "humantime_serde"
+    )]
+    pub slot_idle_timeout: Duration,
 }
 
 impl ConfigUpstreamGrpc {
     fn default_endpoint() -> Url {
         Url::parse("http://127.0.0.1:10000").unwrap()
+    }
+
+    const fn default_slot_idle_timeout() -> Duration {
+        Duration::from_secs(5)
     }
 }
 
@@ -271,7 +282,9 @@ impl From<ConfigUpstream> for PolicyStoreConfig {
     fn from(config: ConfigUpstream) -> Self {
         let ConfigUpstream {
             rpc,
-            grpc: ConfigUpstreamGrpc { endpoint, x_token },
+            grpc: ConfigUpstreamGrpc {
+                endpoint, x_token, ..
+            },
             ..
         } = config;
 

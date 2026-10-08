@@ -813,11 +813,11 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
 }
 
 #[tokio::test]
-async fn it_should_refuse_txn_bigger_than_1232_bytes() {
+async fn it_should_refuse_txn_bigger_than_packet_data_size() {
     let rx_server_addr = generate_random_local_addr();
     let rx_server_identity = Keypair::new();
 
-    let huge_payload = Bytes::from(vec![0u8; PACKET_DATA_SIZE + 1]); // 100MB payload
+    let huge_payload = Bytes::from(vec![0u8; PACKET_DATA_SIZE + 1]);
     let gateway_kp = Keypair::new();
     let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
     let fake_tpu_info_service =

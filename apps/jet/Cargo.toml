@@ -1,6 +1,6 @@
 [package]
 name = "yellowstone-jet"
-version = "17.0.0"
+version = "18.0.0"
 description = "Yellowstone Jet"
 edition.workspace = true
 authors.workspace = true
@@ -9,18 +9,6 @@ homepage.workspace = true
 repository.workspace = true
 publish = false
 rust-version.workspace = true
-
-[features]
-default = ["simd-0296"]
-###
-### SIMD-0296 raises Solana's max transaction size from 1232 to 4096 bytes. Forwards to
-### tpu-client's own `simd-0296` feature, which is what actually resizes `PACKET_DATA_SIZE`;
-### jet's own base58/base64 max-encoded-length checks in `solana.rs` read that same
-### constant, so this one switch keeps both in sync. On by default now that the clusters
-### jet targets have activated SIMD-0296; disable with `--no-default-features` for a
-### cluster that has not.
-###
-simd-0296 = ["yellowstone-jet-tpu-client/simd-0296"]
 
 [dependencies]
 arc-swap = { workspace = true }
@@ -102,7 +90,7 @@ solana-quic-definitions = { workspace = true }
 solana-sdk-ids = { workspace = true }
 solana-signature = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
-solana-transaction = { workspace = true }
+solana-transaction = { workspace = true, features = ["wincode"] }
 solana-transaction-error = { workspace = true }
 wincode = { workspace = true }
 
@@ -111,6 +99,9 @@ yellowstone-grpc-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
 yellowstone-jet-tpu-client = { workspace = true, features = ["prometheus", "yellowstone-grpc", "shield", "txn-info-cap-192"] }
 yellowstone-shield-store = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [build-dependencies]
 anyhow = { workspace = true }

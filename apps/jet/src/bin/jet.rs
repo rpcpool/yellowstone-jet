@@ -354,7 +354,6 @@ async fn run_jet(
 
     let (geyser, geyser_handle) = GeyserSubscriber::new(
         config.upstream.grpc.clone(),
-        false,
         jet_cancellation_token.child_token(),
     );
     let blockhash_queue = BlockhashQueue::new(geyser.subscribe_block_meta());

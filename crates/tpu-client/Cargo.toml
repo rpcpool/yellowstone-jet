@@ -34,7 +34,7 @@ path = "src/bin/test-slot-tracker.rs"
 required-features = ["examples"]
 
 [features]
-default = ["yellowstone-grpc", "txn-info-cap-64", "simd-0296"]
+default = ["yellowstone-grpc", "txn-info-cap-64"]
 ###
 ### `TXN_INFO_CAP` capacity tuning -- enable exactly one. See build.rs.
 ###
@@ -65,12 +65,6 @@ yellowstone-grpc = [
 ]
 shield = ["dep:yellowstone-shield-store"]
 intg-testing = []
-###
-### SIMD-0296 raises Solana's max transaction size from 1232 to 4096 bytes, sizing
-### `PACKET_DATA_SIZE` (and the `accept_tx` size check that uses it) accordingly. On by
-### default; disable with `--no-default-features` for a cluster that has not activated it.
-###
-simd-0296 = []
 
 [dependencies]
 arc-swap = { workspace = true }
