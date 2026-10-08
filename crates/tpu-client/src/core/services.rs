@@ -2,6 +2,7 @@
 
 use {
     crate::config::{TpuOverrideInfo, TpuPortKind},
+    humantime_serde::re::humantime::Duration,
     solana_pubkey::Pubkey,
     std::net::SocketAddr,
 };

@@ -6,6 +6,7 @@ use {
         response::{TpuSenderResponse, TpuSenderResponseCallback, TxDrop, TxDropReason},
         worker::{QuicTxSenderWorker, TxWorkerMeta, TxWorkerSenderHandle},
     },
+    arc_swap::ArcSwap,
     solana_pubkey::Pubkey,
     std::{collections::VecDeque, net::SocketAddr, sync::Arc},
     tokio::sync::{
@@ -53,7 +54,7 @@ where
 
         let output_tx = self.response_outlet.clone();
         let cancel_notify = Arc::new(Notify::new());
-
+        let rtt = Arc::new(ArcSwap::from_pointee(connection.stats().path.rtt));
         let worker = QuicTxSenderWorker {
             remote_peer: remote_peer_identity,
             remote_peer_addr,
@@ -68,6 +69,7 @@ where
             cancel_notify: Arc::clone(&cancel_notify),
             max_tx_attempt: self.config.max_send_attempt,
             txn_sent: 0,
+            rtt,
         };
 
         let worker_fut = worker.run();

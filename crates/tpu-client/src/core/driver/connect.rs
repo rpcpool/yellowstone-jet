@@ -285,6 +285,7 @@ where
                         {
                             prom::incr_quic_gw_connection_success_cnt();
                         }
+                        let rtt = conn.stats().path.rtt;
                         let conn = Arc::new(conn);
                         let active_connection = ActiveConnection {
                             remote_peer_addr: remote_peer_address,

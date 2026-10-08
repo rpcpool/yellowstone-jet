@@ -7,6 +7,7 @@ use {
         response::{SendTxError, TpuSenderResponse, TpuSenderResponseCallback, TxFailed, TxSent},
         txn::TpuSenderTxn,
     },
+    arc_swap::ArcSwap,
     quinn::{Connection, WriteError},
     solana_pubkey::Pubkey,
     std::{
@@ -37,6 +38,11 @@ pub(crate) struct TxWorkerMeta {
     pub(crate) remote_peer_identity: Pubkey,
 }
 
+pub(crate) struct WorkerTxnSender {
+    pub(crate) tx: mpsc::Sender<TpuSenderTxn>,
+    pub rtt: Arc<ArcSwap<Duration>>,
+}
+
 /// A transaction sender worker tied to a specific remote peer via a single connection.
 ///
 /// To optimize performance for a [`quinn::Connection`], adhere to the following guidelines:
@@ -63,6 +69,7 @@ pub(crate) struct QuicTxSenderWorker<CB> {
     pub(crate) cancel_notify: Arc<Notify>,
     pub(crate) max_tx_attempt: NonZeroUsize,
     pub(crate) txn_sent: usize,
+    pub(crate) rtt: Arc<ArcSwap<Duration>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -125,13 +132,9 @@ where
                 }
                 #[cfg(feature = "prometheus")]
                 {
-                    let path_stats = self.connection.stats().path;
-                    let current_mut = path_stats.current_mtu;
                     prom::quic_send_attempts_inc(self.remote_peer, remote_addr, "success");
                     prom::incr_quic_gw_worker_tx_process_cnt(self.remote_peer, "success");
                     prom::observe_send_transaction_e2e_latency(self.remote_peer, sent_ok.e2e_time);
-                    prom::set_leader_mtu(self.remote_peer, current_mut);
-                    prom::observe_leader_rtt(self.remote_peer, path_stats.rtt);
                 }
                 None
             }
@@ -202,12 +205,29 @@ where
         None
     }
 
+    fn fetch_conn_stats(&mut self) {
+        // stats acquire a mutex lock under the hood, so maybe not wisest thing to call this too frequently.
+        // this function should be called sparingly to avoid performance overhead.
+        let stats = self.connection.stats();
+        let rtt = Arc::new(stats.path.rtt);
+        self.rtt.store(rtt);
+
+        #[cfg(feature = "prometheus")]
+        {
+            let current_mtu = stats.path.current_mtu;
+            let path_stats = stats.path;
+            prom::set_leader_mtu(self.remote_peer, current_mtu);
+            prom::observe_leader_rtt(self.remote_peer, path_stats.rtt);
+        }
+    }
+
     pub(crate) async fn run(mut self) -> TxSenderWorkerCompleted {
         let mut canceled = false;
         let mut last_activity = Instant::now();
         let mut burst_timer = Box::pin(tokio::time::sleep_until(
             (last_activity + Duration::from_secs(10)).into(),
         ));
+        let mut txn_recv_count = 0;
         const MAX_IDLE_DURATION: Duration = Duration::from_secs(10);
         let maybe_err = loop {
             tracing::trace!(
@@ -226,6 +246,12 @@ where
                     match maybe {
                         Some(tx) => {
                             last_activity = Instant::now();
+                            txn_recv_count += 1;
+
+                            if txn_recv_count % 128 == 0 {
+                                self.fetch_conn_stats();
+                            }
+
                             self.tx_queue.push_back((tx, 1));
                         }
                         None => {
@@ -235,6 +261,7 @@ where
                     }
                 }
                 _ = &mut burst_timer => {
+                    self.fetch_conn_stats();
                     let idle_duration = Instant::now().duration_since(last_activity);
                     tracing::debug!(
                         "Transaction sender worker for remote peer: {:?} idle for {:?}, shutting down",
