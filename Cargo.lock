@@ -91,7 +91,7 @@ dependencies = [
  "solana-short-vec",
  "solana-signer-store",
  "thiserror 2.0.21",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -990,6 +990,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1157,10 +1163,26 @@ dependencies = [
  "cpufeatures 0.2.17",
  "curve25519-dalek-derive",
  "digest 0.10.7",
- "fiat-crypto",
+ "fiat-crypto 0.2.9",
  "rand_core 0.6.4",
  "rustc_version",
  "serde",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "curve25519-dalek-derive",
+ "digest 0.11.3",
+ "fiat-crypto 0.3.0",
+ "rustc_version",
  "subtle",
  "zeroize",
 ]
@@ -1335,7 +1357,17 @@ version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
- "const-oid",
+ "const-oid 0.9.6",
+ "zeroize",
+]
+
+[[package]]
+name = "der"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
+dependencies = [
+ "const-oid 0.10.2",
  "zeroize",
 ]
 
@@ -1479,8 +1511,18 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
- "pkcs8",
- "signature",
+ "pkcs8 0.10.2",
+ "signature 2.2.0",
+]
+
+[[package]]
+name = "ed25519"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a"
+dependencies = [
+ "pkcs8 0.11.0",
+ "signature 3.0.0",
 ]
 
 [[package]]
@@ -1489,11 +1531,26 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
- "curve25519-dalek",
- "ed25519",
+ "curve25519-dalek 4.1.3",
+ "ed25519 2.2.3",
  "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
+dependencies = [
+ "curve25519-dalek 5.0.0",
+ "ed25519 3.0.0",
+ "serde",
+ "sha2 0.11.0",
+ "signature 3.0.0",
  "subtle",
  "zeroize",
 ]
@@ -1620,6 +1677,12 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "fiat-crypto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
@@ -2369,7 +2432,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "yellowstone-fumarole-client",
- "yellowstone-grpc-proto",
+ "yellowstone-grpc-proto 14.0.1",
 ]
 
 [[package]]
@@ -3078,8 +3141,18 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
- "der",
- "spki",
+ "der 0.7.10",
+ "spki 0.7.3",
+]
+
+[[package]]
+name = "pkcs8"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
+dependencies = [
+ "der 0.8.2",
+ "spki 0.8.1",
 ]
 
 [[package]]
@@ -4185,6 +4258,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "signature"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4264,7 +4343,7 @@ dependencies = [
  "solana-instruction-error",
  "solana-pubkey 4.4.0",
  "solana-sdk-ids",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -4308,7 +4387,7 @@ dependencies = [
  "spl-token-interface",
  "spl-token-metadata-interface",
  "thiserror 2.0.21",
- "wincode 0.6.2",
+ "wincode",
  "zstd",
 ]
 
@@ -4356,7 +4435,7 @@ dependencies = [
  "borsh",
  "bytemuck",
  "bytemuck_derive",
- "curve25519-dalek",
+ "curve25519-dalek 4.1.3",
  "five8",
  "five8_const",
  "rand 0.9.5",
@@ -4369,7 +4448,7 @@ dependencies = [
  "solana-program-error",
  "solana-sanitize",
  "solana-sha256-hasher",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -4432,7 +4511,7 @@ dependencies = [
  "solana-signer",
  "subtle",
  "thiserror 2.0.21",
- "wincode 0.6.2",
+ "wincode",
  "zeroize",
 ]
 
@@ -4537,7 +4616,7 @@ dependencies = [
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-sysvar-id",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -4656,7 +4735,7 @@ checksum = "14b4d2a4bf0d0b0a86c22111917e86e8bd39a7b31420fb2c7d73eb83761fc7af"
 dependencies = [
  "bytemuck",
  "bytemuck_derive",
- "curve25519-dalek",
+ "curve25519-dalek 4.1.3",
  "solana-define-syscall 5.2.0",
  "subtle",
  "thiserror 2.0.21",
@@ -4684,7 +4763,7 @@ dependencies = [
  "cpufeatures 0.3.1",
  "curve25519-dalek-derive",
  "digest 0.11.3",
- "ed25519",
+ "ed25519 2.2.3",
  "hashbrown 0.15.5",
  "rand 0.10.3",
  "rand_core 0.10.1",
@@ -4717,7 +4796,7 @@ dependencies = [
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-sysvar-id",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -4733,7 +4812,7 @@ dependencies = [
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-sysvar-id",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -4758,7 +4837,7 @@ dependencies = [
  "log",
  "serde",
  "serde_derive",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -4791,7 +4870,7 @@ dependencies = [
  "serde_derive",
  "solana-atomic-u64",
  "solana-sanitize",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -4821,7 +4900,7 @@ dependencies = [
  "serde_derive",
  "solana-define-syscall 5.2.0",
  "solana-pubkey 4.4.0",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -4876,7 +4955,7 @@ version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "263d614c12aa267a3278703175fd6440552ca61bc960b5a02a4482720c53438b"
 dependencies = [
- "ed25519-dalek",
+ "ed25519-dalek 2.2.0",
  "five8",
  "five8_core",
  "rand 0.9.5",
@@ -4898,7 +4977,7 @@ dependencies = [
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-sysvar-id",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -4951,7 +5030,7 @@ dependencies = [
  "solana-sdk-ids",
  "solana-short-vec",
  "solana-transaction-error",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5021,7 +5100,7 @@ dependencies = [
  "solana-hash",
  "solana-pubkey 4.4.0",
  "solana-sha256-hasher",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5079,7 +5158,7 @@ dependencies = [
  "solana-signature",
  "solana-time-utils",
  "solana-transaction-context",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5179,7 +5258,7 @@ dependencies = [
  "solana-sysvar-id",
  "solana-transaction-context",
  "thiserror 2.0.21",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5281,7 +5360,7 @@ dependencies = [
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-sysvar-id",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5292,7 +5371,7 @@ checksum = "0d20f0760fe5f41208593d5111a13dff725a0b1af9986924c4a4ce5461520d0d"
 dependencies = [
  "serde",
  "serde_derive",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5335,7 +5414,7 @@ dependencies = [
  "solana-version",
  "solana-vote-interface",
  "tokio",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5373,7 +5452,7 @@ dependencies = [
  "solana-rpc-client",
  "solana-sdk-ids",
  "thiserror 2.0.21",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5421,7 +5500,7 @@ dependencies = [
  "solana-transaction",
  "solana-transaction-context",
  "solana-transaction-error",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5526,7 +5605,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c75782529cc4521114c1ecd71c7e2cdebd41a6fe9844b5d088fd36ef08c57c36"
 dependencies = [
  "serde_core",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5542,7 +5621,7 @@ dependencies = [
  "serde_derive",
  "solana-ed25519",
  "solana-sanitize",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5579,7 +5658,7 @@ dependencies = [
  "solana-hash",
  "solana-sdk-ids",
  "solana-sysvar-id",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5594,7 +5673,7 @@ dependencies = [
  "solana-get-sysvar",
  "solana-sdk-ids",
  "solana-sysvar-id",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5619,7 +5698,7 @@ dependencies = [
  "solana-get-sysvar",
  "solana-sdk-ids",
  "solana-sysvar-id",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5757,7 +5836,7 @@ dependencies = [
  "solana-instruction 3.5.1",
  "solana-msg",
  "solana-program-error",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5791,7 +5870,7 @@ dependencies = [
  "solana-slot-history",
  "solana-stake-history",
  "solana-sysvar-id",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5851,7 +5930,7 @@ dependencies = [
  "solana-transaction-error",
  "thiserror 2.0.21",
  "tokio",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5904,7 +5983,7 @@ dependencies = [
  "solana-signature",
  "solana-signer",
  "solana-transaction-error",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5957,7 +6036,7 @@ dependencies = [
  "solana-transaction-context",
  "solana-transaction-error",
  "thiserror 2.0.21",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -5987,7 +6066,7 @@ dependencies = [
  "solana-sanitize",
  "solana-serde-varint",
  "solana-wincode-varint",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -6014,7 +6093,7 @@ dependencies = [
  "solana-transaction",
  "solana-vote-interface",
  "thiserror 2.0.21",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -6042,7 +6121,7 @@ dependencies = [
  "solana-short-vec",
  "solana-system-interface",
  "solana-wincode-varint",
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -6051,7 +6130,7 @@ version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d15737770cec70afc784649526db191289e2b7ca988a878ed2d171f2cdd60b66"
 dependencies = [
- "wincode 0.6.2",
+ "wincode",
 ]
 
 [[package]]
@@ -6100,7 +6179,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
- "der",
+ "der 0.7.10",
+]
+
+[[package]]
+name = "spki"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef958a98b9d5da290cfc78946e9f3e61e1e62a18db0d92cac0b83cc161491a9"
+dependencies = [
+ "base64ct",
+ "der 0.8.2",
 ]
 
 [[package]]
@@ -7242,18 +7331,6 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "wincode"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66d967db7705dc29120bb6e8ce5b5a2e27734ed5976d1c904e95bd238d1c3c5a"
-dependencies = [
- "pastey",
- "proc-macro2",
- "quote",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "wincode"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d4abae4bfc30e59d97d3ea4924e5c5e7fede946390bffbd52c076c081b87a6c"
@@ -7563,9 +7640,9 @@ dependencies = [
 
 [[package]]
 name = "yellowstone-fumarole-client"
-version = "0.7.1+solana.3"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f1b3d402d2f388045076658cac9a6158c2dc1792c904aff5d2e0c994e3e76d9"
+checksum = "ecb58e7578c66c639035515f50ad5110c4463064d2675ed06b3ab2f17cfca03b"
 dependencies = [
  "async-trait",
  "bytesize",
@@ -7583,7 +7660,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serde_yaml",
- "solana-clock 3.2.1",
+ "solana-clock 4.0.0",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
@@ -7595,7 +7672,7 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
- "yellowstone-grpc-proto",
+ "yellowstone-grpc-proto 14.0.1",
 ]
 
 [[package]]
@@ -7616,7 +7693,28 @@ dependencies = [
  "tonic",
  "tonic-health",
  "tower",
- "yellowstone-grpc-proto",
+ "yellowstone-grpc-proto 12.7.0",
+]
+
+[[package]]
+name = "yellowstone-grpc-client"
+version = "15.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14d2f909d0f39eff9f03fca11c60115660defcf85c3eee5511ebb13c0ebc91d4"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "futures",
+ "hyper",
+ "hyper-util",
+ "log",
+ "pin-project",
+ "thiserror 2.0.21",
+ "tokio",
+ "tonic",
+ "tonic-health",
+ "tower",
+ "yellowstone-grpc-proto 14.0.1",
 ]
 
 [[package]]
@@ -7638,13 +7736,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "yellowstone-grpc-proto"
+version = "14.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f913b2244559b96aa636abf53188a7df450e14a3f8cb5b3e5d3202822759ff4"
+dependencies = [
+ "anyhow",
+ "prost",
+ "prost-types",
+ "protoc-bin-vendored",
+ "siphasher",
+ "solana-pubkey 4.4.0",
+ "thiserror 2.0.21",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "yellowstone-jet"
 version = "18.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "borsh",
  "bs58",
  "bytes",
@@ -7723,9 +7839,9 @@ dependencies = [
  "url",
  "uuid",
  "vergen",
- "wincode 0.5.5",
- "yellowstone-grpc-client",
- "yellowstone-grpc-proto",
+ "wincode",
+ "yellowstone-grpc-client 15.0.0",
+ "yellowstone-grpc-proto 14.0.1",
  "yellowstone-jet-tpu-client",
  "yellowstone-shield-store",
  "zeroize",
@@ -7737,14 +7853,14 @@ version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "borsh",
  "bs58",
  "bytes",
  "clap",
  "derive_more",
  "dotenvy",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0",
  "futures",
  "hostname",
  "http-body-util",
@@ -7791,10 +7907,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
- "wincode 0.5.5",
+ "wincode",
  "x509-parser",
- "yellowstone-grpc-client",
- "yellowstone-grpc-proto",
+ "yellowstone-grpc-client 15.0.0",
+ "yellowstone-grpc-proto 14.0.1",
  "yellowstone-shield-store",
  "zeroize",
 ]
@@ -7855,8 +7971,8 @@ dependencies = [
  "solana-pubkey 4.4.0",
  "thiserror 2.0.21",
  "tokio",
- "yellowstone-grpc-client",
- "yellowstone-grpc-proto",
+ "yellowstone-grpc-client 13.5.1",
+ "yellowstone-grpc-proto 12.7.0",
  "yellowstone-shield-parser",
 ]
 
