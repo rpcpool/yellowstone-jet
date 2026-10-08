@@ -140,6 +140,11 @@ pub mod rpc;
 pub mod slot;
 
 ///
+/// module for TLS settings shared by TPU QUIC clients and test servers
+///
+mod tls;
+
+///
 /// module to host utility that utilize Yellowstone gRPC services
 ///
 #[cfg(feature = "yellowstone-grpc")]

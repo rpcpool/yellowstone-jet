@@ -1,5 +1,4 @@
 use {
-    crate::core::{DEFAULT_UNUSED_CONNECTION_TTL, QUIC_MAX_TIMEOUT},
     serde::{Deserialize, Deserializer, de},
     solana_net_utils::{PortRange, VALIDATOR_PORT_RANGE},
     solana_pubkey::Pubkey,
@@ -10,6 +9,15 @@ use {
         time::Duration,
     },
 };
+
+///
+/// MAX TIMEOUT is not consistent across solana clients, firedancer has much lower timeout than agave.a
+/// 10 seconds the least common timeout.
+///
+pub const QUIC_MAX_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default duration after which an unused connection is evicted.
+pub const DEFAULT_UNUSED_CONNECTION_TTL: Duration = Duration::from_secs(10);
 
 ///
 /// Specifies which TPU port to use for QUIC connections.

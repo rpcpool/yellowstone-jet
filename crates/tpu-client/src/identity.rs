@@ -4,7 +4,7 @@
 //!
 
 use {
-    crate::core::{ALPN_TPU_PROTOCOL_ID, crypto_provider},
+    crate::tls::{ALPN_TPU_PROTOCOL_ID, crypto_provider},
     bytes::BufMut,
     ed25519_dalek::{SignatureError, Signer as DalekSigner},
     quinn::{
