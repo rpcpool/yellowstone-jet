@@ -2,9 +2,11 @@ use {
     clap::Parser,
     solana_client::nonblocking::rpc_client::RpcClient,
     solana_commitment_config::CommitmentConfig,
+    solana_pubkey::Pubkey,
     std::{
         env,
         io::{self, IsTerminal as _},
+        mem::MaybeUninit,
         path::PathBuf,
         sync::Arc,
     },
@@ -138,11 +140,18 @@ async fn main() {
             .expect("poisoned")
             .expect("unknow slot");
 
-        let upcoming_leaders = leader_predictor.try_predict_next_n_leaders(3);
+        let mut upcoming_leaders_buf = [MaybeUninit::<Pubkey>::uninit(); 3];
+        let num_predicted =
+            leader_predictor.try_predict_next_n_leader_inclusive(&mut upcoming_leaders_buf);
+        let upcoming_leaders = upcoming_leaders_buf[..num_predicted]
+            .iter()
+            // SAFETY: `try_predict_next_n_leader_inclusive` initializes the first `num_predicted` elements.
+            .map(|leader| unsafe { leader.assume_init() })
+            .collect::<Vec<_>>();
 
         writeln!(
             &mut out,
-            "current_slot: {current_slot}, leader: {leader}, upcoming leaders: {upcoming_leaders:?}"
+            "current_slot: {current_slot}, leader: {leader}, predicted leaders (current first): {upcoming_leaders:?}"
         )
         .expect("writeln");
     }

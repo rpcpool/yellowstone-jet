@@ -42,6 +42,8 @@ mod constants;
 mod driver;
 mod eviction;
 mod identity_update;
+mod inlet;
+mod leader_fast_path;
 mod peer_addr_watcher;
 mod quic;
 mod response;
@@ -67,6 +69,7 @@ pub use {
         },
     },
     identity_update::{TpuSenderIdentityUpdater, UpdateIdentity, UpdateIdentityError},
+    inlet::{TpuSenderDriverInlet, TpuSenderDriverInletError},
     quic::socket_addr_to_quic_server_name,
     response::{
         Nothing, SendTxError, TpuSenderResponse, TpuSenderResponseCallback, TxDrop, TxDropReason,

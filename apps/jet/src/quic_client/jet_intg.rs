@@ -1,7 +1,7 @@
 use {
     crate::{cluster_tpu_info::ClusterTpuInfo, stake::StakeInfoMap},
     solana_pubkey::Pubkey,
-    std::net::SocketAddr,
+    std::{mem::MaybeUninit, net::SocketAddr},
     yellowstone_jet_tpu_client::core::{
         LeaderTpuInfoService, UpcomingLeaderPredictor, ValidatorStakeInfoService,
     },
@@ -19,11 +19,18 @@ impl LeaderTpuInfoService for ClusterTpuInfo {
 }
 
 impl UpcomingLeaderPredictor for ClusterTpuInfo {
-    fn try_predict_next_n_leaders(&self, n: usize) -> Vec<Pubkey> {
-        self.get_leader_tpus(n)
+    fn try_predict_next_n_leader_inclusive(&self, out: &mut [MaybeUninit<Pubkey>]) -> usize {
+        // `get_leader_tpus(k)` yields the current leader plus `k` upcoming ones.
+        let leaders = self
+            .get_leader_tpus(out.len().saturating_sub(1))
             .into_iter()
-            .map(|info| info.leader)
-            .collect()
+            .map(|info| info.leader);
+        let mut written = 0;
+        for (dst, leader) in out.iter_mut().zip(leaders) {
+            dst.write(leader);
+            written += 1;
+        }
+        written
     }
 }
 

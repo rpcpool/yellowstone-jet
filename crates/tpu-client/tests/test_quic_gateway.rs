@@ -11,6 +11,7 @@ use {
     std::{
         array,
         collections::{HashMap, HashSet},
+        mem::MaybeUninit,
         net::SocketAddr,
         num::{NonZero, NonZeroUsize},
         str::FromStr,
@@ -262,7 +263,7 @@ async fn send_buffer_should_land_properly() {
     let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: _,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn_default_with_callback(tpu_identity(&gateway_kp), callback_tx);
 
@@ -317,7 +318,7 @@ async fn sending_multiple_tx_to_the_same_peer_should_reuse_the_same_connection()
 
     let TpuSenderSessionContext {
         identity_updater: _,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn_default_with_callback(tpu_identity(&gateway_kp), callback_tx);
     const MAX_TX: u64 = 5;
@@ -393,7 +394,7 @@ async fn gateway_should_handle_connection_refused_by_peer() {
     let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: _,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         tpu_identity(&gateway_kp),
@@ -464,7 +465,7 @@ async fn it_should_update_gatway_identity() {
 
     let TpuSenderSessionContext {
         mut identity_updater,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         tpu_identity(&gateway_kp),
@@ -536,7 +537,7 @@ async fn it_should_support_concurrent_remote_peer_connection() {
 
     let TpuSenderSessionContext {
         identity_updater: _,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         tpu_identity(&gateway_kp),
@@ -632,7 +633,7 @@ async fn it_should_evict_connection() {
 
     let TpuSenderSessionContext {
         identity_updater: _,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         tpu_identity(&gateway_kp),
@@ -769,7 +770,7 @@ async fn it_should_retry_tx_failed_to_be_sent_due_to_connection_lost() {
     let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: _,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         tpu_identity(&gateway_kp),
@@ -839,7 +840,7 @@ async fn it_should_refuse_txn_bigger_than_packet_data_size() {
     let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: _,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         tpu_identity(&gateway_kp),
@@ -910,7 +911,7 @@ async fn it_should_detect_remote_peer_address_change() {
     let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
     let TpuSenderSessionContext {
         identity_updater: _,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = gateway_spawner.spawn(
         tpu_identity(&gateway_kp),
@@ -1041,17 +1042,17 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
     }
 
     impl UpcomingLeaderPredictor for FakeLeaderPredictor {
-        fn try_predict_next_n_leaders(&self, n: usize) -> Vec<Pubkey> {
+        fn try_predict_next_n_leader_inclusive(&self, out: &mut [MaybeUninit<Pubkey>]) -> usize {
             {
                 let mut calls = self.calls.write().expect("write lock");
                 *calls += 1;
             }
-            self.validators
-                .iter()
-                .cycle()
-                .take(n)
-                .cloned()
-                .collect::<Vec<_>>()
+            let mut written = 0;
+            for (dst, leader) in out.iter_mut().zip(self.validators.iter().cycle()) {
+                dst.write(*leader);
+                written += 1;
+            }
+            written
         }
     }
 
@@ -1069,7 +1070,7 @@ async fn it_should_preemptively_connect_to_upcoming_leader_using_leader_predicti
 
     let TpuSenderSessionContext {
         identity_updater: _,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = driver_spawner.spawn(
         tpu_identity(&gateway_kp),
@@ -1194,7 +1195,7 @@ async fn it_should_support_multiplexed_connection() {
     let spy_eviction_strategy = SpyEvictionStrategy::default();
     let TpuSenderSessionContext {
         mut identity_updater,
-        driver_tx_sink: transaction_sink,
+        driver_tx_sink: mut transaction_sink,
         driver_join_handle: _,
     } = tpu_sender_spawner.spawn(
         tpu_identity(&tpu_sender_identity),

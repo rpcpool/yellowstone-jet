@@ -2,9 +2,8 @@
 
 use {
     crate::config::{TpuOverrideInfo, TpuPortKind},
-    humantime_serde::re::humantime::Duration,
     solana_pubkey::Pubkey,
-    std::net::SocketAddr,
+    std::{mem::MaybeUninit, net::SocketAddr},
 };
 
 ///
@@ -12,9 +11,31 @@ use {
 ///
 pub trait UpcomingLeaderPredictor {
     ///
-    /// Tries to predict the next `n` leaders based on the current leader.
+    /// Predicts the leaders of the next `out.len()` leader windows, starting with the current
+    /// one, and writes them into a caller-owned buffer.
     ///
-    fn try_predict_next_n_leaders(&self, n: usize) -> Vec<Pubkey>;
+    /// The prediction is inclusive: `out[0]` is the leader of the current slot, `out[1]` the
+    /// leader of the following leader window, and so on. A buffer of length `k` therefore holds
+    /// the current leader plus up to `k - 1` upcoming ones.
+    ///
+    /// The buffer lets callers reuse one allocation across predictions instead of receiving a
+    /// new [`Vec`] each time.
+    ///
+    /// Implementations must initialize `out[..n]` and return `n`, where `n <= out.len()`.
+    /// Callers may read `out[..n]` as initialized; everything after `n` is left untouched.
+    ///
+    /// # Arguments
+    ///
+    /// * `out` - Buffer to fill with leaders in schedule order, current leader first. Its
+    ///   length is the maximum number of leaders to predict, including the current one.
+    ///
+    /// # Returns
+    ///
+    /// The number of leaders written at the start of `out`. It can be less than `out.len()`
+    /// when the schedule doesn't cover enough slots; windows with an unknown leader are
+    /// skipped rather than left as gaps.
+    ///
+    fn try_predict_next_n_leader_inclusive(&self, out: &mut [MaybeUninit<Pubkey>]) -> usize;
 }
 
 ///
@@ -24,8 +45,8 @@ pub trait UpcomingLeaderPredictor {
 pub struct IgnorantLeaderPredictor;
 
 impl UpcomingLeaderPredictor for IgnorantLeaderPredictor {
-    fn try_predict_next_n_leaders(&self, _n: usize) -> Vec<Pubkey> {
-        Vec::new()
+    fn try_predict_next_n_leader_inclusive(&self, _out: &mut [MaybeUninit<Pubkey>]) -> usize {
+        0
     }
 }
 

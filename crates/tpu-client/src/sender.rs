@@ -2,14 +2,14 @@ use {
     crate::{
         config::TpuSenderConfig,
         core::{
-            ConnectionEvictionStrategy, LeaderTpuInfoService, TpuSenderDriverSpawner,
-            TpuSenderIdentityUpdater, TpuSenderResponse, TpuSenderResponseCallback,
-            TpuSenderSessionContext, TpuSenderTxn, UpcomingLeaderPredictor, UpdateIdentity,
-            ValidatorStakeInfoService,
+            ConnectionEvictionStrategy, LeaderTpuInfoService, TpuSenderDriverInlet,
+            TpuSenderDriverSpawner, TpuSenderIdentityUpdater, TpuSenderResponse,
+            TpuSenderResponseCallback, TpuSenderSessionContext, TpuSenderTxn,
+            UpcomingLeaderPredictor, UpdateIdentity, ValidatorStakeInfoService,
         },
         identity::TpuIdentity,
     },
-    futures::{Sink, SinkExt},
+    futures::Sink,
     std::{
         panic::{AssertUnwindSafe, catch_unwind},
         pin::Pin,
@@ -17,7 +17,6 @@ use {
         task::{Context, Poll, ready},
     },
     tokio::sync::{broadcast, mpsc::UnboundedSender},
-    tokio_util::sync::PollSender,
 };
 
 ///
@@ -32,7 +31,7 @@ pub struct TpuSender {
     // The [`TpuSenderIdentityUpdater`] cannot be cloned or called concurrently, so we wrap it in a Mutex.
     // We do this pre-cautionarily to avoid potential issues with miss-managed identity updates.
     identity_updater: TpuSenderIdentityUpdater,
-    txn_tx: PollSender<TpuSenderTxn>,
+    txn_tx: TpuSenderDriverInlet,
 }
 
 impl From<TpuSender> for PollTpuSender {
@@ -74,7 +73,7 @@ impl TpuSender {
         self.txn_tx
             .send(txn)
             .await
-            .map_err(|e| TpuSenderError(e.into_inner()))
+            .map_err(|e| TpuSenderError(e.into_txn()))
     }
 
     ///
@@ -100,7 +99,7 @@ impl TpuSender {
         let (tx, rx) = tokio::sync::mpsc::channel(channel_capacity);
         let sender = Self {
             identity_updater: TpuSenderIdentityUpdater::new_test_disconnected(),
-            txn_tx: PollSender::new(tx),
+            txn_tx: TpuSenderDriverInlet::new_without_fast_path(tx),
         };
         (sender, rx)
     }
@@ -163,7 +162,7 @@ where
 
     TpuSender {
         identity_updater,
-        txn_tx: PollSender::new(driver_tx_sink),
+        txn_tx: driver_tx_sink,
     }
 }
 
@@ -243,7 +242,7 @@ impl PollTpuSender {
     /// [`poll_reserve`]: PollTpuSender::poll_reserve
     ///
     pub fn poll_reserve(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TpuSenderError>> {
-        let result = ready!(self.inner.txn_tx.poll_reserve(cx));
+        let result = ready!(Pin::new(&mut self.inner.txn_tx).poll_ready(cx));
         match result {
             Ok(()) => Poll::Ready(Ok(())),
             Err(_err) => Poll::Ready(Err(TpuSenderError(None))),
@@ -271,10 +270,9 @@ impl PollTpuSender {
     ///
     pub fn send_item(&mut self, txn: TpuSenderTxn) -> Result<(), TpuSenderError> {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            self.inner
-                .txn_tx
-                .send_item(txn)
-                .map_err(|e| TpuSenderError(e.into_inner()))
+            Pin::new(&mut self.inner.txn_tx)
+                .start_send(txn)
+                .map_err(|e| TpuSenderError(e.into_txn()))
         }));
         match result {
             Ok(result) => result,
@@ -323,12 +321,10 @@ impl Sink<TpuSenderTxn> for PollTpuSender {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
-        self.inner.txn_tx.close();
-        Poll::Ready(Ok(()))
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner.txn_tx)
+            .poll_close(cx)
+            .map_err(|e| TpuSenderError(e.into_txn()))
     }
 }
 
@@ -383,30 +379,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_ready_is_pending_until_capacity_frees_up() {
+    async fn poll_ready_is_pending_while_buffered_txn_cannot_be_delivered() {
         let (mut sender, mut rx) = test_sender(1);
-        let remote_peer = Pubkey::new_unique();
+        let first_peer = Pubkey::new_unique();
+        let second_peer = Pubkey::new_unique();
 
         futures::future::poll_fn(|cx| sender.poll_reserve(cx))
             .await
             .expect("poll_ready");
         sender
-            .send_item(sample_txn(remote_peer))
+            .send_item(sample_txn(first_peer))
             .expect("start_send");
 
-        // The channel's only slot is occupied by the unreceived item above, so a second
-        // reservation must not resolve until the receiver drains it.
+        // The channel's only slot is taken, so the second transaction is buffered in the
+        // inlet instead of making `poll_ready` wait.
+        futures::future::poll_fn(|cx| sender.poll_reserve(cx))
+            .await
+            .expect("poll_ready");
+        sender
+            .send_item(sample_txn(second_peer))
+            .expect("start_send");
+
+        // A third `poll_ready` must wait until the buffered transaction is delivered.
         let mut pending = futures::future::poll_fn(|cx| sender.poll_reserve(cx));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), &mut pending)
                 .await
                 .is_err(),
-            "poll_ready should still be Pending while the channel is full"
+            "poll_ready should still be Pending while the buffered txn can't be delivered"
         );
 
-        rx.recv().await.expect("recv");
+        assert_eq!(rx.recv().await.expect("recv").remote_peer, first_peer);
         pending
             .await
-            .expect("poll_ready should resolve once capacity frees up");
+            .expect("poll_ready should resolve once the buffered txn is delivered");
+        assert_eq!(rx.recv().await.expect("recv").remote_peer, second_peer);
     }
 }

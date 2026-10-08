@@ -54,7 +54,14 @@ where
         #[allow(unused_mut, dead_code)]
         let mut last_metric_update = Instant::now();
         let mut sleep_timer: Option<Pin<Box<Sleep>>> = None;
+        // Fast-path sends skip this loop, so it can't rely on incoming transactions to wake it
+        // up in time for the next leader prediction.
+        let prediction_enabled = self.config.leader_prediction_lookahead.is_some();
+        let mut prediction_timer = Box::pin(tokio::time::sleep_until(
+            self.next_leader_prediction_deadline.into(),
+        ));
         loop {
+            let now = Instant::now();
             self.do_eviction_if_required();
             #[cfg(feature = "prometheus")]
             {
@@ -63,12 +70,18 @@ where
                     last_metric_update = Instant::now();
                 }
             }
-            self.try_predict_upcoming_leaders_if_necessary();
+
+            if prediction_enabled {
+                self.try_predict_upcoming_leaders_if_necessary(now);
+                let deadline = self.next_leader_prediction_deadline.into();
+                if prediction_timer.deadline() != deadline {
+                    prediction_timer.as_mut().reset(deadline);
+                }
+            }
 
             let next_connection_expiration = self.next_orphan_connection_expiration();
             match next_connection_expiration {
                 Some(expiration_instant) => {
-                    let now = Instant::now();
                     if sleep_timer.is_none() {
                         let sleep_dur = expiration_instant.saturating_duration_since(now);
                         // If I understand tokio correclty, the first time you poll a timer it must acquire a mutex lock.
@@ -97,6 +110,8 @@ where
                 _ = async { sleep_timer.as_mut().unwrap().await }, if sleep_timer.is_some() => {
                     self.try_evict_orphan_connections();
                 }
+                // The prediction itself runs at the top of the loop.
+                _ = &mut prediction_timer, if prediction_enabled => {}
                 // If cnc_rx returns None, we don't care as clients can safely drop cnc sender and the runtime should keep function.
                 Some(command) = self.cnc_rx.recv() => {
                     self.handle_cnc(command).await;

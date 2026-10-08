@@ -121,6 +121,8 @@ where
         self.orphan_connection_set
             .remove(&remote_peer_addr, connection_version);
 
+        self.refresh_fast_path_if_leader(&remote_peer_identity);
+
         tracing::debug!("Installed tx worker for remote peer: {remote_peer_identity}");
     }
 
@@ -133,6 +135,9 @@ where
     ///
     pub(super) fn schedule_graceful_drop_all_worker(&mut self) {
         tracing::trace!("Scheduling graceful drop of all transaction workers");
+        // Drop the fast path's senders first: workers below only stop once every sender to
+        // them is gone, and inlets let go of the old table as soon as their current send ends.
+        self.fast_path.disable();
         let mut tx_worker_meta = std::mem::take(&mut self.tx_worker_task_meta_map);
         // Make sure to update the endpoint usage
         let tx_worker_sender_map = std::mem::take(&mut self.tx_worker_handle_map);
@@ -154,6 +159,9 @@ where
                 let inflight_txn = match result {
                     Ok((_, mut worker_completed)) => {
                         let mut canceled_txn = VecDeque::new();
+                        // Close before draining: any send that races with the drain then fails
+                        // with `Closed` instead of landing in a channel that is about to be dropped.
+                        worker_completed.rx.close();
                         while let Ok(tx) = worker_completed.rx.try_recv() {
                             canceled_txn.push_back((tx, 1));
                         }

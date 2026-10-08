@@ -44,8 +44,9 @@
 //! 1. `event_loop`: the `select!` loop that dispatches every event.
 //! 2. `workers`, `identity`, `prediction`: event handlers.
 //! 3. `connect`: connection attempts and their results.
-//! 4. `install`, `eviction`, `tx_queue`: building blocks that call no other child's methods.
-//! 5. `connection_set`: bookkeeping sets used by the layers above.
+//! 4. `install`, `eviction`, `tx_queue`: building blocks.
+//! 5. `fast_path`, `connection_set`: bookkeeping used by the layers above; they call no other
+//!    child's methods.
 //!
 //! `spawner` builds the driver and starts `event_loop`; nothing calls into it.
 
@@ -53,6 +54,7 @@ mod connect;
 mod connection_set;
 mod event_loop;
 mod eviction;
+mod fast_path;
 mod identity;
 mod install;
 mod prediction;
@@ -70,6 +72,7 @@ use {
                 strategy::{ActiveConnection, ConnectionEvictionStrategy},
             },
             identity_update::DriverCommand,
+            leader_fast_path::LeaderFastPath,
             peer_addr_watcher::RemotePeerAddrWatcher,
             quic::ConnectingError,
             services::{LeaderTpuInfoService, UpcomingLeaderPredictor, ValidatorStakeInfoService},
@@ -83,6 +86,7 @@ use {
     solana_pubkey::Pubkey,
     std::{
         collections::{HashMap, HashSet, VecDeque},
+        mem::MaybeUninit,
         net::SocketAddr,
         sync::Arc,
         time::Instant,
@@ -232,6 +236,27 @@ pub(crate) struct TpuSenderDriver<CB> {
     /// Upcoming leader predictor to use.
     ///
     leader_predictor: Arc<dyn UpcomingLeaderPredictor + Send + Sync + 'static>,
+
+    ///
+    /// Output buffer reused by every call to
+    /// [`UpcomingLeaderPredictor::try_predict_next_n_leader_inclusive`]. It holds the current
+    /// leader plus [`TpuSenderConfig::leader_prediction_lookahead`] upcoming ones, and is empty
+    /// when prediction is disabled.
+    ///
+    /// Every element is initialized when the driver is built, so a predictor that overreports
+    /// how many leaders it wrote yields stale keys rather than uninitialized memory.
+    ///
+    upcoming_leaders_buf: Box<[MaybeUninit<Pubkey>]>,
+
+    ///
+    /// Table of leader workers shared with every inlet, so their transactions skip the driver.
+    ///
+    fast_path: LeaderFastPath,
+
+    ///
+    /// Leaders from the latest prediction that the fast path tracks, current leader first.
+    ///
+    fast_path_leaders: Vec<Pubkey>,
 
     ///
     /// Next leader prediction deadline.

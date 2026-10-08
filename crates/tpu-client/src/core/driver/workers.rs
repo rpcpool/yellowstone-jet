@@ -156,6 +156,7 @@ where
                 }
                 self.last_peer_activity.remove(&remote_peer_identity);
                 drop(worker_tx);
+                self.refresh_fast_path_if_leader(&remote_peer_identity);
 
                 tracing::trace!(
                     "Tx worker for remote peer: {:?} completed, err: {:?}, canceled: {}, evicted: {}",
@@ -169,6 +170,9 @@ where
                 // We need to "rescue" those transactions if any and if the worker didn't fail due to fatal errors.
 
                 let tx_to_rescue = self.tx_queues.entry(remote_peer_identity).or_default();
+                // Close before draining: any send that races with the drain then fails with
+                // `Closed` instead of landing in a channel that is about to be dropped.
+                worker_completed.rx.close();
                 while let Ok(tx) = worker_completed.rx.try_recv() {
                     tx_to_rescue.push_back((tx, 1));
                 }

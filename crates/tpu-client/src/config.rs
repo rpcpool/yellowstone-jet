@@ -208,7 +208,8 @@ pub struct TpuSenderConfig {
     pub send_timeout: Duration,
 
     ///
-    /// Maximum number of leaders to predict
+    /// Number of upcoming leaders to pre-connect to, not counting the current leader.
+    /// `None` disables leader prediction.
     ///
     #[serde(
         default = "TpuSenderConfig::default_leader_prediction_lookahead",

@@ -45,6 +45,7 @@ where
             "Eviction required for {} connections",
             eviction_count_required
         );
+        self.merge_fast_path_activity();
         let connection_map = ConnectionMap::Quinn(&self.connection_map);
         let addr_map = RemotePeerAddrMap {
             connection_map,

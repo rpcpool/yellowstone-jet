@@ -18,6 +18,7 @@ use {
         core::UpcomingLeaderPredictor, rpc::schedule::ManagedLeaderSchedule, slot::SlotTracker,
     },
     solana_pubkey::Pubkey,
+    std::mem::MaybeUninit,
 };
 
 ///
@@ -34,14 +35,19 @@ pub struct YellowstoneUpcomingLeader {
 }
 
 impl UpcomingLeaderPredictor for YellowstoneUpcomingLeader {
-    fn try_predict_next_n_leaders(&self, n: usize) -> Vec<Pubkey> {
+    fn try_predict_next_n_leader_inclusive(&self, out: &mut [MaybeUninit<Pubkey>]) -> usize {
         let slot = self.slot_tracker.load().expect("load");
-        let reminder = slot % 4;
 
-        let next_leader_boundary = slot + (4 - reminder);
-        (0..n)
-            .map(|i| next_leader_boundary + (i * 4) as u64)
-            .flat_map(|s| self.managed_schedule.get_leader(s).expect("get_leader"))
-            .collect()
+        // Every slot of a 4-slot leader window has the same leader, so `slot + 4 * i` lands in
+        // the i-th window from now, with i = 0 being the current one.
+        let leaders = (0..out.len())
+            .map(|i| slot + (i * 4) as u64)
+            .flat_map(|s| self.managed_schedule.get_leader(s).expect("get_leader"));
+        let mut written = 0;
+        for (dst, leader) in out.iter_mut().zip(leaders) {
+            dst.write(leader);
+            written += 1;
+        }
+        written
     }
 }

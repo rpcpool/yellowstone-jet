@@ -99,6 +99,18 @@ lazy_static::lazy_static! {
         "Number of times the leader prediction was uselessly used to proactively connect to a remote peer"
     ).unwrap();
 
+    static ref QUIC_GW_INLET_TXN_PATH: IntCounterVec = IntCounterVec::new(
+        Opts::new(
+            "quic_gw_inlet_txn_path",
+            "Transactions accepted by the driver inlet, by path: fast = straight to a leader's worker, slow = through the driver"
+        ),
+        &["path"]
+    ).unwrap();
+
+    // Resolved once: `with_label_values` hashes and locks on every call, too slow per transaction.
+    static ref QUIC_GW_INLET_TXN_FAST_PATH: IntCounter = QUIC_GW_INLET_TXN_PATH.with_label_values(&["fast"]);
+    static ref QUIC_GW_INLET_TXN_SLOW_PATH: IntCounter = QUIC_GW_INLET_TXN_PATH.with_label_values(&["slow"]);
+
     static ref QUIC_GW_DROP_TX_CNT: IntCounterVec = IntCounterVec::new(
         Opts::new(
             "quic_gw_drop_tx_cnt",
@@ -228,6 +240,14 @@ pub fn incr_quic_gw_leader_prediction_miss() {
     QUIC_GW_LEADER_PREDICTION_MISS.inc();
 }
 
+pub fn incr_inlet_txn_fast_path() {
+    QUIC_GW_INLET_TXN_FAST_PATH.inc();
+}
+
+pub fn incr_inlet_txn_slow_path() {
+    QUIC_GW_INLET_TXN_SLOW_PATH.inc();
+}
+
 pub fn incr_quic_gw_remote_peer_addr_changes_detected() {
     QUIC_GW_REMOTE_PEER_ADDR_CHANGES_DETECTED.inc();
 }
@@ -307,6 +327,8 @@ pub fn register_metrics(reg: &Registry) {
     reg.register(Box::new(QUIC_GW_LEADER_PREDICTION_HIT.clone()))
         .unwrap();
     reg.register(Box::new(QUIC_GW_LEADER_PREDICTION_MISS.clone()))
+        .unwrap();
+    reg.register(Box::new(QUIC_GW_INLET_TXN_PATH.clone()))
         .unwrap();
     reg.register(Box::new(QUIC_GW_UNREACHABLE_PEER_CNT.clone()))
         .unwrap();

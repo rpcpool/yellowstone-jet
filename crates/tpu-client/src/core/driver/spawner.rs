@@ -9,19 +9,21 @@ use {
                 stake_based::StakeBasedEvictionStrategy, strategy::ConnectionEvictionStrategy,
             },
             identity_update::TpuSenderIdentityUpdater,
+            inlet::TpuSenderDriverInlet,
+            leader_fast_path::{LeaderFastPath, MAX_FAST_PATH_LEADERS},
             peer_addr_watcher::RemotePeerAddrWatcher,
             response::{Nothing, TpuSenderResponseCallback},
             services::{
                 IgnorantLeaderPredictor, LeaderTpuInfoService, UpcomingLeaderPredictor,
                 ValidatorStakeInfoService,
             },
-            txn::TpuSenderTxn,
         },
         identity::TpuIdentity,
     },
     arc_swap::ArcSwap,
     quinn::Endpoint,
-    std::{sync::Arc, time::Instant},
+    solana_pubkey::Pubkey,
+    std::{mem::MaybeUninit, sync::Arc, time::Instant},
     tokio::{
         runtime::Handle,
         sync::mpsc::{self},
@@ -40,10 +42,10 @@ pub struct TpuSenderSessionContext {
     pub identity_updater: TpuSenderIdentityUpdater,
 
     ///
-    /// Sink to send transaction to.
-    /// If all reference to the sink are dropped, the underlying driver runtime will stop too.
+    /// Sink to send transactions to.
+    /// If every clone of the inlet is dropped or closed, the underlying driver runtime stops too.
     ///
-    pub driver_tx_sink: mpsc::Sender<TpuSenderTxn>,
+    pub driver_tx_sink: TpuSenderDriverInlet,
 
     ///
     /// Handle to tokio-based QUIC driver runtime.
@@ -178,6 +180,13 @@ impl TpuSenderDriverSpawner {
             Arc::clone(&self.leader_tpu_info_service),
         );
         let current_identity_pubkey = Arc::new(ArcSwap::new(Arc::new(identity.pubkey())));
+        // One extra slot because the prediction includes the current leader.
+        let upcoming_leaders_buf_len = config
+            .leader_prediction_lookahead
+            .map_or(0, |lookahead| lookahead.get() + 1);
+        let upcoming_leaders_buf =
+            vec![MaybeUninit::new(Pubkey::default()); upcoming_leaders_buf_len].into_boxed_slice();
+        let fast_path = LeaderFastPath::new();
         let driver = TpuSenderDriver {
             stake_info_map: Arc::clone(&self.stake_info_map),
             tx_worker_handle_map: Default::default(),
@@ -204,6 +213,9 @@ impl TpuSenderDriverSpawner {
             endpoints,
             remote_peer_addr_watcher,
             leader_predictor,
+            upcoming_leaders_buf,
+            fast_path: fast_path.clone(),
+            fast_path_leaders: Vec::with_capacity(MAX_FAST_PATH_LEADERS),
             next_leader_prediction_deadline: Instant::now(),
             connecting_remote_peers_addr: Default::default(),
             connection_map: Default::default(),
@@ -217,7 +229,7 @@ impl TpuSenderDriverSpawner {
         let jh = driver_rt.spawn(driver.run());
 
         TpuSenderSessionContext {
-            driver_tx_sink: tx_inlet,
+            driver_tx_sink: TpuSenderDriverInlet::new(tx_inlet, fast_path),
             identity_updater: TpuSenderIdentityUpdater {
                 cnc_tx: PollSender::new(driver_cnc_tx),
                 current_identity_pubkey,
