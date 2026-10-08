@@ -17,6 +17,8 @@ upstream:
     endpoint: http://127.0.0.1:10000
     # Optional token for access to gRPC
     x_token: null
+    # Reconnect if no slot update is received for this long (default: 5s)
+    slot_idle_timeout: 5s
   # RPC endpoint
   rpc: http://127.0.0.1:8899
   # Cluster nodes information update interval in milliseconds

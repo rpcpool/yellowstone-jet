@@ -44,9 +44,6 @@ const QUEUE_SIZE_SLOT_UPDATE: usize = 10_000;
 const QUEUE_SIZE_BLOCKMETA_UPDATE: usize = 1_000;
 const QUEUE_SIZE_TRANSACTIONS: usize = 1_000_000;
 
-/// Slots arrive every ~400ms. A stream with no slot update for this long reconnects,
-/// even if server pings still arrive.
-pub const SLOT_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 /// HTTP/2 keepalive finds a peer that vanished without closing the connection.
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -167,7 +164,6 @@ impl Future for GeyserHandle {
 pub struct GeyserSubscriber {
     block_meta_rx: broadcast::Receiver<BlockMetaWithCommitment>,
     slots_rx: broadcast::Receiver<SlotUpdateWithStatus>,
-    transactions_rx: Arc<Mutex<Option<mpsc::Receiver<GrpcUpdateMessage>>>>,
 }
 
 impl GeyserSubscriber {
@@ -188,23 +184,15 @@ impl GeyserSubscriber {
 
     pub fn new(
         primary_grpc: ConfigUpstreamGrpc,
-        include_transactions: bool,
         cancellation_token: CancellationToken,
     ) -> (Self, GeyserHandle) {
         let (slots_tx, slots_rx) = broadcast::channel(QUEUE_SIZE_SLOT_UPDATE);
         let (block_meta_tx, block_meta_rx) = broadcast::channel(QUEUE_SIZE_BLOCKMETA_UPDATE);
 
-        let (transactions_tx, transactions_rx) = mpsc::channel(QUEUE_SIZE_TRANSACTIONS);
-        if !include_transactions {
-            info!("Transactions disabled, skipping transaction subscription in gRPC Geyser");
-        }
-
         let geyser_handle = tokio::spawn(Self::grpc_subscribe(
             primary_grpc,
             slots_tx.clone(),
             block_meta_tx.clone(),
-            transactions_tx,
-            include_transactions,
             cancellation_token,
         ));
         let geyser_handle = GeyserHandle {
@@ -214,7 +202,6 @@ impl GeyserSubscriber {
         let geyser = Self {
             slots_rx,
             block_meta_rx,
-            transactions_rx: Arc::new(Mutex::new(Some(transactions_rx))),
         };
 
         (geyser, geyser_handle)
@@ -224,12 +211,11 @@ impl GeyserSubscriber {
         primary_grpc: ConfigUpstreamGrpc,
         slots_tx: broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
-        include_transactions: bool,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         let endpoint = primary_grpc.endpoint;
         let x_token = primary_grpc.x_token;
+        let slot_idle_timeout = primary_grpc.slot_idle_timeout;
 
         loop {
             Self::reset_slot_metrics();
@@ -244,7 +230,7 @@ impl GeyserSubscriber {
                     info!("gRPC subscriber: cancellation token triggered, shutting down...");
                     return Ok(());
                 },
-                result = Self::grpc_open(endpoint.as_str(), x_token.as_deref(), true, include_transactions) => {
+                result = Self::grpc_open(endpoint.as_str(), x_token.as_deref(), true) => {
                     result
                 }
                 _ = time::sleep(Duration::from_secs(30)) => {
@@ -268,12 +254,17 @@ impl GeyserSubscriber {
                 stream,
                 &slots_tx,
                 &block_meta_tx,
-                &transactions_tx,
-                include_transactions,
+                slot_idle_timeout,
                 cancellation_token.clone(),
             )
             .await
             {
+                if matches!(e, GeyserError::SlotIdle(_)) {
+                    error!(
+                        "Slot idle timeout reached ({endpoint}), will abort geyser stream, most likely an issue in the RPC node"
+                    );
+                    return Err(e);
+                }
                 error!("gRPC stream processing error ({endpoint}): {e:?}");
             }
 
@@ -285,26 +276,25 @@ impl GeyserSubscriber {
     /*
      * Core stream processing logic - processes until stream ends.
      * Shutdown is handled in the outer loop between reconnections.
+     * Returns `SlotIdle` if no slot update arrives within `slot_idle_timeout`,
+     * even if server pings still arrive (slots normally arrive every ~400ms).
      */
     pub async fn process_grpc_stream<S>(
         mut stream: S,
         slots_tx: &broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
-        include_transactions: bool,
+        slot_idle_timeout: Duration,
         cancellation_token: CancellationToken,
     ) -> Result<()>
     where
         S: Stream<Item = std::result::Result<SubscribeUpdate, Status>> + Unpin,
     {
         let mut slot_tracking = BTreeMap::<Slot, SlotTrackingInfo>::new();
-        let slot_idle = time::sleep(SLOT_IDLE_TIMEOUT);
+        let slot_idle = time::sleep(slot_idle_timeout);
         tokio::pin!(slot_idle);
 
         loop {
             tokio::select! {
-                biased;
-
                 _ = cancellation_token.cancelled() => {
                     info!("gRPC stream processing: cancellation token triggered, shutting down...");
                     return Ok(());
@@ -315,19 +305,15 @@ impl GeyserSubscriber {
                     match message {
                         Some(Ok(msg)) => {
                             if matches!(msg.update_oneof, Some(UpdateOneof::Slot(_))) {
-                                slot_idle.as_mut().reset(time::Instant::now() + SLOT_IDLE_TIMEOUT);
+                                slot_idle.as_mut().reset(time::Instant::now() + slot_idle_timeout);
                             }
                             Self::handle_grpc_message(
                                 msg,
                                 &mut slot_tracking,
                                 slots_tx,
                                 block_meta_tx,
-                                transactions_tx,
-                                include_transactions,
                             )
                             .await?;
-
-                            metrics::set_slot_tracking_btreemap_size(slot_tracking.len());
                         }
                         Some(Err(error)) => {
                             return Err(GeyserError::StreamError(error));
@@ -339,7 +325,7 @@ impl GeyserSubscriber {
                 }
 
                 () = &mut slot_idle => {
-                    return Err(GeyserError::SlotIdle(SLOT_IDLE_TIMEOUT));
+                    return Err(GeyserError::SlotIdle(slot_idle_timeout));
                 }
             }
         }
@@ -350,54 +336,35 @@ impl GeyserSubscriber {
         slot_tracking: &mut BTreeMap<Slot, SlotTrackingInfo>,
         slots_tx: &broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
-        include_transactions: bool,
     ) -> Result<()> {
         let msg_start = Instant::now();
         let msg_type = match &msg.update_oneof {
             Some(UpdateOneof::Slot(_)) => "slot",
-            Some(UpdateOneof::TransactionStatus(_)) => "transaction",
             Some(UpdateOneof::BlockMeta(_)) => "block_meta",
             Some(UpdateOneof::Ping(_)) => "ping",
+            Some(UpdateOneof::TransactionStatus(_)) => "transaction",
+            Some(UpdateOneof::Account(_)) => "account",
+            Some(UpdateOneof::Block(_)) => "block",
+            Some(UpdateOneof::Transaction(_)) => "transaction",
+            Some(UpdateOneof::Pong(_)) => "pong",
+            None => return Ok(()),
             _ => "unknown",
         };
 
         let result = match msg.update_oneof {
             Some(UpdateOneof::Slot(slot_update)) => {
-                Self::handle_slot_update(
-                    slot_update,
-                    slot_tracking,
-                    slots_tx,
-                    block_meta_tx,
-                    transactions_tx,
-                    include_transactions,
-                )
-                .await
-            }
-            Some(UpdateOneof::TransactionStatus(tx_status)) => {
-                if include_transactions {
-                    Self::handle_transaction_status(tx_status, transactions_tx).await
-                } else {
-                    // Skip transaction processing when transactions are disabled
-                    Ok(())
-                }
+                Self::handle_slot_update(slot_update, slot_tracking, slots_tx, block_meta_tx).await
             }
             Some(UpdateOneof::BlockMeta(block_meta)) => {
-                Self::handle_block_meta(
-                    block_meta,
-                    slot_tracking,
-                    block_meta_tx,
-                    transactions_tx,
-                    include_transactions,
-                )
-                .await
+                Self::handle_block_meta(block_meta, slot_tracking, block_meta_tx).await
             }
             Some(UpdateOneof::Ping(_)) => {
                 debug!("ping received");
                 Ok(())
             }
             _ => {
-                return Err(GeyserError::UnexpectedMessage(format!("{msg:?}")));
+                warn!("unsupported message received: {:?}", msg);
+                Ok(())
             }
         };
 
@@ -412,8 +379,6 @@ impl GeyserSubscriber {
         slot_tracking: &mut BTreeMap<Slot, SlotTrackingInfo>,
         slots_tx: &broadcast::Sender<SlotUpdateWithStatus>,
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
-        include_transactions: bool,
     ) -> Result<()> {
         let handle_start = Instant::now();
         let SubscribeUpdateSlot { slot, status, .. } = slot_update;
@@ -455,28 +420,6 @@ impl GeyserSubscriber {
                         metrics::incr_grpc_channel_send_failures("block_meta");
                     }
                 }
-
-                // Only send to transactions channel if transactions are included
-                if include_transactions {
-                    let send_start = Instant::now();
-                    match transactions_tx
-                        .send(GrpcUpdateMessage::BlockMeta(block_meta))
-                        .await
-                    {
-                        Ok(_) => {
-                            metrics::observe_grpc_channel_send_time(
-                                "transactions",
-                                send_start.elapsed(),
-                            );
-                        }
-                        Err(_) => {
-                            metrics::incr_grpc_channel_send_failures("transactions");
-                            return Err(GeyserError::ChannelSendFailed {
-                                channel: "transactions",
-                            });
-                        }
-                    }
-                }
             }
         }
 
@@ -496,50 +439,16 @@ impl GeyserSubscriber {
                 before_size - after_size,
                 slot
             );
-
-            metrics::set_slot_tracking_btreemap_size(slot_tracking.len());
         }
 
         metrics::observe_grpc_slot_update_handle_time(handle_start.elapsed());
         Ok(())
     }
 
-    async fn handle_transaction_status(
-        tx_status: SubscribeUpdateTransactionStatus,
-        transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
-    ) -> Result<()> {
-        let SubscribeUpdateTransactionStatus {
-            slot, signature, ..
-        } = tx_status;
-        let signature = Signature::try_from(signature).expect("Invalid signature format");
-
-        let send_start = Instant::now();
-        match transactions_tx
-            .send(GrpcUpdateMessage::Transaction(TransactionReceived {
-                slot,
-                signature,
-            }))
-            .await
-        {
-            Ok(_) => {
-                metrics::observe_grpc_channel_send_time("transactions", send_start.elapsed());
-                Ok(())
-            }
-            Err(_) => {
-                metrics::incr_grpc_channel_send_failures("transactions");
-                Err(GeyserError::ChannelSendFailed {
-                    channel: "transactions",
-                })
-            }
-        }
-    }
-
     async fn handle_block_meta(
         block_meta_update: SubscribeUpdateBlockMeta,
         slot_tracking: &mut BTreeMap<Slot, SlotTrackingInfo>,
         block_meta_tx: &broadcast::Sender<BlockMetaWithCommitment>,
-        transactions_tx: &mpsc::Sender<GrpcUpdateMessage>,
-        include_transactions: bool,
     ) -> Result<()> {
         let SubscribeUpdateBlockMeta {
             slot,
@@ -587,28 +496,6 @@ impl GeyserSubscriber {
                             metrics::incr_grpc_channel_send_failures("block_meta");
                         }
                     }
-
-                    // Only send to transactions channel if transactions are included
-                    if include_transactions {
-                        let send_start = Instant::now();
-                        match transactions_tx
-                            .send(GrpcUpdateMessage::BlockMeta(block_meta))
-                            .await
-                        {
-                            Ok(_) => {
-                                metrics::observe_grpc_channel_send_time(
-                                    "transactions",
-                                    send_start.elapsed(),
-                                );
-                            }
-                            Err(_) => {
-                                metrics::incr_grpc_channel_send_failures("transactions");
-                                return Err(GeyserError::ChannelSendFailed {
-                                    channel: "transactions",
-                                });
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -633,7 +520,6 @@ impl GeyserSubscriber {
         endpoint: &str,
         x_token: Option<&str>,
         full: bool,
-        include_transactions: bool,
     ) -> Result<impl Stream<Item = std::result::Result<SubscribeUpdate, Status>> + use<>> {
         let mut backoff = IncrementalBackoff::default();
         loop {
@@ -682,44 +568,19 @@ impl GeyserSubscriber {
                 (hashmap! {}, hashmap! {})
             };
 
-            let mut request = SubscribeRequest {
+            let request = SubscribeRequest {
                 slots,
                 blocks_meta,
                 commitment: Some(GrpcCommitmentLevel::Processed as i32),
                 ..SubscribeRequest::default()
             };
 
-            // Only add transaction subscription if transactions are included
-            if include_transactions {
-                request.transactions_status =
-                    hashmap! { "".to_owned() => SubscribeRequestFilterTransactions::default() };
-            }
-
             match client.subscribe_once(request).await {
                 Ok(stream) => {
-                    let mode_suffix = if !include_transactions {
-                        " (no transactions)"
-                    } else {
-                        ""
-                    };
                     if full {
-                        info!(
-                            "subscribed on slot (all statuses){} and blocks meta ({endpoint}){mode_suffix}",
-                            if include_transactions {
-                                ", transactions statuses"
-                            } else {
-                                ""
-                            }
-                        );
+                        info!("subscribed on slot (all statuses) and blocks meta ({endpoint})",);
                     } else {
-                        info!(
-                            "subscribed{} ({endpoint}){mode_suffix}",
-                            if include_transactions {
-                                " on transactions statuses"
-                            } else {
-                                ""
-                            }
-                        );
+                        info!("subscribed ({endpoint})",);
                     }
                     return Ok(stream);
                 }
@@ -784,7 +645,6 @@ const fn slot_status_to_commitment(status: SlotStatus) -> Option<CommitmentLevel
 pub trait GeyserStreams {
     fn subscribe_slots(&self) -> broadcast::Receiver<SlotUpdateWithStatus>;
     fn subscribe_block_meta(&self) -> broadcast::Receiver<BlockMetaWithCommitment>;
-    async fn subscribe_transactions(&self) -> Option<mpsc::Receiver<GrpcUpdateMessage>>;
 }
 
 #[async_trait::async_trait]
@@ -795,10 +655,6 @@ impl GeyserStreams for GeyserSubscriber {
 
     fn subscribe_block_meta(&self) -> broadcast::Receiver<BlockMetaWithCommitment> {
         self.block_meta_rx.resubscribe()
-    }
-
-    async fn subscribe_transactions(&self) -> Option<mpsc::Receiver<GrpcUpdateMessage>> {
-        self.transactions_rx.lock().await.take()
     }
 }
 

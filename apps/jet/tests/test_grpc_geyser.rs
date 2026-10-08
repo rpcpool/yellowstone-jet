@@ -2,25 +2,23 @@ use {
     futures::{StreamExt, stream},
     solana_clock::Slot,
     solana_hash::Hash,
-    solana_signature::Signature,
     std::time::Duration,
-    tokio::sync::{broadcast, mpsc},
+    tokio::sync::broadcast,
     tokio_util::sync::CancellationToken,
     yellowstone_grpc_proto::{
         prelude::{
             BlockHeight, SubscribeUpdate, SubscribeUpdateBlockMeta, SubscribeUpdatePing,
-            SubscribeUpdateSlot, SubscribeUpdateTransactionStatus, subscribe_update::UpdateOneof,
+            SubscribeUpdateSlot, subscribe_update::UpdateOneof,
         },
         tonic::Status,
     },
     yellowstone_jet::{
-        grpc_geyser::{
-            GeyserError, GeyserSubscriber, GrpcUpdateMessage, SLOT_IDLE_TIMEOUT,
-            TransactionReceived,
-        },
+        grpc_geyser::{GeyserError, GeyserSubscriber},
         util::{CommitmentLevel, SlotStatus},
     },
 };
+
+const SLOT_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /*
  * Test helpers to create gRPC messages
@@ -64,27 +62,10 @@ const fn create_ping() -> SubscribeUpdate {
     }
 }
 
-fn create_transaction_status(slot: Slot, signature: &Signature) -> SubscribeUpdate {
-    SubscribeUpdate {
-        update_oneof: Some(UpdateOneof::TransactionStatus(
-            SubscribeUpdateTransactionStatus {
-                slot,
-                signature: signature.as_ref().to_vec(),
-                is_vote: false,
-                index: 0,
-                err: None,
-            },
-        )),
-        filters: vec![],
-        created_at: None,
-    }
-}
-
 #[tokio::test]
 async fn test_block_meta_before_slot_update() {
     let (slots_tx, mut slots_rx) = broadcast::channel(100);
     let (block_meta_tx, mut block_meta_rx) = broadcast::channel(100);
-    let (transactions_tx, _) = mpsc::channel(100);
 
     // Block meta arrives before slot update
     let messages = vec![
@@ -97,8 +78,7 @@ async fn test_block_meta_before_slot_update() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &transactions_tx,
-        true,
+        SLOT_IDLE_TIMEOUT,
         cancellation_token.clone(),
     )
     .await;
@@ -119,7 +99,6 @@ async fn test_block_meta_before_slot_update() {
 async fn test_non_commitment_status_no_block_meta() {
     let (slots_tx, mut slots_rx) = broadcast::channel(100);
     let (block_meta_tx, mut block_meta_rx) = broadcast::channel(100);
-    let (transactions_tx, _) = mpsc::channel(100);
 
     // Non-commitment statuses should not emit block meta
     let messages = vec![
@@ -139,8 +118,7 @@ async fn test_non_commitment_status_no_block_meta() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &transactions_tx,
-        true,
+        SLOT_IDLE_TIMEOUT,
         cancellation_token.clone(),
     )
     .await;
@@ -171,7 +149,6 @@ async fn test_non_commitment_status_no_block_meta() {
 async fn test_multiple_commitment_statuses() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, mut block_meta_rx) = broadcast::channel(100);
-    let (transactions_tx, _transaction_rx) = mpsc::channel(100);
 
     // All commitment statuses should emit block meta
     let messages = vec![
@@ -187,8 +164,7 @@ async fn test_multiple_commitment_statuses() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &transactions_tx,
-        true,
+        SLOT_IDLE_TIMEOUT,
         cancellation_token.clone(),
     )
     .await;
@@ -212,7 +188,6 @@ async fn test_multiple_commitment_statuses() {
 async fn test_slot_tracking_cleanup_on_finalized() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, mut block_meta_rx) = broadcast::channel(100);
-    let (transactions_tx, _transactions_rx) = mpsc::channel(100);
 
     /*
      * Test that slots before finalized are cleaned up from tracking
@@ -243,8 +218,7 @@ async fn test_slot_tracking_cleanup_on_finalized() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &transactions_tx,
-        true,
+        SLOT_IDLE_TIMEOUT,
         cancellation_token.clone(),
     )
     .await;
@@ -266,51 +240,9 @@ async fn test_slot_tracking_cleanup_on_finalized() {
 }
 
 #[tokio::test]
-async fn test_transaction_status_handling() {
-    let (slots_tx, _) = broadcast::channel(100);
-    let (block_meta_tx, _) = broadcast::channel(100);
-    let (transactions_tx, mut transactions_rx) = mpsc::channel(100);
-
-    let sig = Signature::new_unique();
-    let messages = vec![
-        Ok(create_transaction_status(100, &sig)),
-        Ok(create_transaction_status(101, &sig)),
-    ];
-    let stream = stream::iter(messages);
-    let cancellation_token = CancellationToken::new();
-    let _ = GeyserSubscriber::process_grpc_stream(
-        stream,
-        &slots_tx,
-        &block_meta_tx,
-        &transactions_tx,
-        true,
-        cancellation_token.clone(),
-    )
-    .await;
-
-    // Verify transactions were sent
-    match transactions_rx.recv().await.unwrap() {
-        GrpcUpdateMessage::Transaction(TransactionReceived { slot, signature }) => {
-            assert_eq!(slot, 100);
-            assert_eq!(signature, sig);
-        }
-        _ => panic!("Expected transaction message"),
-    }
-
-    match transactions_rx.recv().await.unwrap() {
-        GrpcUpdateMessage::Transaction(TransactionReceived { slot, signature }) => {
-            assert_eq!(slot, 101);
-            assert_eq!(signature, sig);
-        }
-        _ => panic!("Expected transaction message"),
-    }
-}
-
-#[tokio::test]
 async fn test_stream_error_handling() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, _) = broadcast::channel(100);
-    let (transactions_tx, _transactions_rx) = mpsc::channel(100);
 
     let messages = vec![
         Ok(create_slot_update(100, SlotStatus::SlotProcessed as i32)),
@@ -322,8 +254,7 @@ async fn test_stream_error_handling() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &transactions_tx,
-        true,
+        SLOT_IDLE_TIMEOUT,
         cancellation_token.clone(),
     )
     .await;
@@ -340,7 +271,6 @@ async fn test_stream_error_handling() {
 async fn test_invalid_block_meta() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, _) = broadcast::channel(100);
-    let (transactions_tx, _transactions_rx) = mpsc::channel(100);
 
     let invalid_meta = create_block_meta(100, None);
 
@@ -351,8 +281,7 @@ async fn test_invalid_block_meta() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &transactions_tx,
-        true,
+        SLOT_IDLE_TIMEOUT,
         cancellation_token.clone(),
     )
     .await;
@@ -369,7 +298,6 @@ async fn test_invalid_block_meta() {
 async fn test_idle_stream_returns_error() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, _) = broadcast::channel(100);
-    let (transactions_tx, _) = mpsc::channel(100);
 
     // A stream that never yields models a peer that vanished without closing the connection.
     let stream = stream::pending::<Result<SubscribeUpdate, Status>>();
@@ -378,8 +306,7 @@ async fn test_idle_stream_returns_error() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &transactions_tx,
-        true,
+        SLOT_IDLE_TIMEOUT,
         CancellationToken::new(),
     )
     .await;
@@ -394,7 +321,6 @@ async fn test_idle_stream_returns_error() {
 async fn test_pings_do_not_reset_slot_idle_timeout() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, _) = broadcast::channel(100);
-    let (transactions_tx, _) = mpsc::channel(100);
 
     // A live server that sends pings but no slots.
     let gap = SLOT_IDLE_TIMEOUT - Duration::from_secs(1);
@@ -409,8 +335,7 @@ async fn test_pings_do_not_reset_slot_idle_timeout() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &transactions_tx,
-        true,
+        SLOT_IDLE_TIMEOUT,
         CancellationToken::new(),
     )
     .await;
@@ -425,7 +350,6 @@ async fn test_pings_do_not_reset_slot_idle_timeout() {
 async fn test_slot_update_resets_idle_timeout() {
     let (slots_tx, _) = broadcast::channel(100);
     let (block_meta_tx, _) = broadcast::channel(100);
-    let (transactions_tx, _) = mpsc::channel(100);
 
     // Two slot updates, each just inside the idle timeout, then the stream ends.
     let gap = SLOT_IDLE_TIMEOUT - Duration::from_secs(1);
@@ -440,8 +364,7 @@ async fn test_slot_update_resets_idle_timeout() {
         stream,
         &slots_tx,
         &block_meta_tx,
-        &transactions_tx,
-        true,
+        SLOT_IDLE_TIMEOUT,
         CancellationToken::new(),
     )
     .await;

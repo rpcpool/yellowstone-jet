@@ -8,13 +8,11 @@ use {
     solana_epoch_schedule::EpochSchedule,
     solana_pubkey::Pubkey,
     std::{collections::HashMap, sync::Arc, time::Duration},
-    tokio::sync::{Mutex, RwLock, broadcast, mpsc},
+    tokio::sync::{RwLock, broadcast},
     tokio_util::sync::CancellationToken,
     yellowstone_jet::{
         cluster_tpu_info::{ClusterTpuInfo, ClusterTpuRpcClient},
-        grpc_geyser::{
-            BlockMetaWithCommitment, GeyserStreams, GrpcUpdateMessage, SlotUpdateWithStatus,
-        },
+        grpc_geyser::{BlockMetaWithCommitment, GeyserStreams, SlotUpdateWithStatus},
         util::SlotStatus,
     },
 };
@@ -375,21 +373,16 @@ impl ClusterTpuRpcClient for MockRpc {
 struct MockGrpc {
     slots_tx: broadcast::Sender<SlotUpdateWithStatus>,
     block_meta_tx: broadcast::Sender<BlockMetaWithCommitment>,
-    transactions_rx: Arc<Mutex<Option<mpsc::Receiver<GrpcUpdateMessage>>>>,
-    _transactions_tx: mpsc::Sender<GrpcUpdateMessage>,
 }
 
 impl MockGrpc {
     fn new() -> Self {
         let (slots_tx, _) = broadcast::channel(1);
         let (block_meta_tx, _) = broadcast::channel(1);
-        let (_transactions_tx, transactions_rx) = mpsc::channel(10);
 
         Self {
             slots_tx,
             block_meta_tx,
-            transactions_rx: Arc::new(Mutex::new(Some(transactions_rx))),
-            _transactions_tx,
         }
     }
 }
@@ -398,10 +391,6 @@ impl MockGrpc {
 impl GeyserStreams for MockGrpc {
     fn subscribe_slots(&self) -> broadcast::Receiver<SlotUpdateWithStatus> {
         self.slots_tx.subscribe()
-    }
-
-    async fn subscribe_transactions(&self) -> Option<mpsc::Receiver<GrpcUpdateMessage>> {
-        self.transactions_rx.lock().await.take()
     }
 
     fn subscribe_block_meta(&self) -> broadcast::Receiver<BlockMetaWithCommitment> {

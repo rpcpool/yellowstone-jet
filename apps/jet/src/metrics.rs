@@ -189,11 +189,6 @@ pub mod jet {
             &["channel"]
         ).unwrap();
 
-        // Tracks cleanup effectiveness
-        static ref SLOT_TRACKING_BTREEMAP_SIZE: IntGauge = IntGauge::new(
-            "slot_tracking_btreemap_size", "Number of slots in grpc_geyser slot_tracking BTreeMap"
-        ).unwrap();
-
         // Duplicate processing detection
         static ref BLOCK_META_EMISSIONS_COUNT: Histogram = Histogram::with_opts(
             HistogramOpts::new("block_meta_emissions_per_slot", "Number of times block meta is emitted for a single slot")
@@ -273,7 +268,6 @@ pub mod jet {
             register!(GRPC_SLOT_UPDATE_HANDLE_TIME);
             register!(GRPC_CHANNEL_SEND_TIME);
             register!(GRPC_CHANNEL_SEND_FAILURES);
-            register!(SLOT_TRACKING_BTREEMAP_SIZE);
             register!(BLOCK_META_EMISSIONS_COUNT);
             register!(GRPC_MESSAGES_PROCESSED_RATE);
             register!(NEW_SLOT_ARRIVAL_INTERVAL);
@@ -516,10 +510,6 @@ pub mod jet {
         GRPC_CHANNEL_SEND_FAILURES
             .with_label_values(&[channel])
             .inc();
-    }
-
-    pub fn set_slot_tracking_btreemap_size(size: usize) {
-        SLOT_TRACKING_BTREEMAP_SIZE.set(size as i64);
     }
 
     pub fn observe_block_meta_emissions_count(count: usize) {
