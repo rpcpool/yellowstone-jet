@@ -504,6 +504,21 @@ impl OrphanConnectionSet {
     }
 }
 
+/// Keep the timer aligned with the earliest remaining orphan. A completed
+/// `Sleep` stays ready, so retaining its old deadline would spin the driver.
+fn update_orphan_cleanup_timer(timer: &mut Option<Pin<Box<Sleep>>>, expiration: Option<Instant>) {
+    let Some(expiration) = expiration else {
+        *timer = None;
+        return;
+    };
+    let deadline = expiration.into();
+    match timer {
+        Some(timer) if timer.deadline() != deadline => timer.as_mut().reset(deadline),
+        Some(_) => {}
+        None => *timer = Some(Box::pin(tokio::time::sleep_until(deadline))),
+    }
+}
+
 struct OrphanConnectionInfo {
     remote_peer_addr: SocketAddr,
     connection_version: u64,
@@ -3041,23 +3056,7 @@ where
             }
             self.try_predict_upcoming_leaders_if_necessary();
 
-            let next_connection_expiration = self.next_orphan_connection_expiration();
-            match next_connection_expiration {
-                Some(expiration_instant) => {
-                    let now = Instant::now();
-                    if sleep_timer.is_none() {
-                        let sleep_dur = expiration_instant.saturating_duration_since(now);
-                        // If I understand tokio correclty, the first time you poll a timer it must acquire a mutex lock.
-                        // So we box it and pin it to avoid re-creating the timer on every loop iteration since next orphan connection expiration
-                        // is unlikely to change until we evict some connections.
-                        // Also, the next orphan connection deadline can only increase overtime.
-                        sleep_timer = Some(Box::pin(tokio::time::sleep(sleep_dur)));
-                    }
-                }
-                None => {
-                    sleep_timer = None;
-                }
-            };
+            update_orphan_cleanup_timer(&mut sleep_timer, self.next_orphan_connection_expiration());
             tokio::select! {
                 maybe = self.tx_inlet.recv() => {
                     match maybe {
@@ -3811,6 +3810,92 @@ mod test {
 
         let actual = set.iter().count();
         assert_eq!(actual, 0);
+    }
+}
+
+#[cfg(test)]
+mod orphan_cleanup_timer_test {
+    use {
+        super::{OrphanConnectionInfo, OrphanConnectionSet, update_orphan_cleanup_timer},
+        std::time::Duration,
+        tokio::time::{Instant, advance},
+    };
+
+    #[tokio::test(start_paused = true)]
+    async fn rearm_after_staggered_expirations() {
+        let now = Instant::now().into_std();
+        let ttl = Duration::from_secs(1);
+        let mut orphans = OrphanConnectionSet::default();
+        for (port, inserted_at) in [(10000, now), (10001, now + ttl)] {
+            orphans.insert(
+                OrphanConnectionInfo {
+                    remote_peer_addr: ([127, 0, 0, 1], port).into(),
+                    connection_version: 1,
+                },
+                inserted_at,
+            );
+        }
+        let mut timer = None;
+        update_orphan_cleanup_timer(&mut timer, orphans.oldest().map(|at| at + ttl));
+        advance(ttl).await;
+        assert!(futures::poll!(timer.as_mut().unwrap().as_mut()).is_ready());
+
+        // Evicting the first orphan must leave cleanup waiting for the next one.
+        orphans.pop().unwrap();
+        update_orphan_cleanup_timer(&mut timer, orphans.oldest().map(|at| at + ttl));
+        assert!(futures::poll!(timer.as_mut().unwrap().as_mut()).is_pending());
+        advance(ttl).await;
+        assert!(futures::poll!(timer.as_mut().unwrap().as_mut()).is_ready());
+
+        orphans.pop().unwrap();
+        update_orphan_cleanup_timer(&mut timer, orphans.oldest().map(|at| at + ttl));
+        assert!(timer.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn follow_expiration_after_earliest_orphan_is_reused() {
+        let now = Instant::now().into_std();
+        let ttl = Duration::from_secs(1);
+        let mut orphans = OrphanConnectionSet::default();
+        let earliest_addr = ([127, 0, 0, 1], 10000).into();
+        orphans.insert(
+            OrphanConnectionInfo {
+                remote_peer_addr: earliest_addr,
+                connection_version: 1,
+            },
+            now,
+        );
+        orphans.insert(
+            OrphanConnectionInfo {
+                remote_peer_addr: ([127, 0, 0, 1], 10001).into(),
+                connection_version: 1,
+            },
+            now + ttl,
+        );
+        let mut timer = None;
+        update_orphan_cleanup_timer(&mut timer, orphans.oldest().map(|at| at + ttl));
+
+        orphans.remove(&earliest_addr, 1).unwrap();
+        update_orphan_cleanup_timer(&mut timer, orphans.oldest().map(|at| at + ttl));
+        advance(ttl).await;
+        assert!(futures::poll!(timer.as_mut().unwrap().as_mut()).is_pending());
+        advance(ttl).await;
+        assert!(futures::poll!(timer.as_mut().unwrap().as_mut()).is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disarm_and_rearm_when_orphan_queue_becomes_empty() {
+        let ttl = Duration::from_secs(1);
+        let mut timer = None;
+        update_orphan_cleanup_timer(&mut timer, Some((Instant::now() + ttl).into_std()));
+        update_orphan_cleanup_timer(&mut timer, None);
+        assert!(timer.is_none());
+
+        advance(ttl).await;
+        update_orphan_cleanup_timer(&mut timer, Some((Instant::now() + ttl).into_std()));
+        assert!(futures::poll!(timer.as_mut().unwrap().as_mut()).is_pending());
+        advance(ttl).await;
+        assert!(futures::poll!(timer.as_mut().unwrap().as_mut()).is_ready());
     }
 }
 
