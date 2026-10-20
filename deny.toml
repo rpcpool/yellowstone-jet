@@ -4,4 +4,8 @@ all-features = true
 [advisories]
 ignore = [
     "RUSTSEC-2025-0141", # bincode is discontinued: https://rustsec.org/advisories/RUSTSEC-2025-0141
+    # webpki-roots and webpki-root-certs 0.26.11 re-export the patched 1.x roots.
+    "RUSTSEC-2026-0381",
+    "RUSTSEC-2026-0383",
+    "RUSTSEC-2024-0449", # unsafe-libyaml is unmaintained (via serde_yaml): https://rustsec.org/advisories/RUSTSEC-2024-0449
 ]
