@@ -204,6 +204,60 @@ where
     fut
 }
 
+/// Counts consecutive failed connections; a connection that succeeded resets the count.
+#[derive(Debug)]
+struct ReconnectPolicy {
+    max_attempts: usize,
+    failures: usize,
+}
+
+impl ReconnectPolicy {
+    const fn new(max_attempts: usize) -> Self {
+        Self {
+            max_attempts,
+            failures: 0,
+        }
+    }
+
+    /// Records a failed stream and returns true when the client should give up.
+    const fn on_failure(&mut self, connected: bool) -> bool {
+        if connected {
+            self.failures = 0;
+        }
+        self.failures = self.failures.saturating_add(1);
+        self.failures >= self.max_attempts
+    }
+}
+
+/// What happened while waiting out a reconnect backoff.
+#[derive(Debug, PartialEq, Eq)]
+struct BackoffWait {
+    dropped: usize,
+    closed: bool,
+}
+
+/// Waits out the backoff, dropping events instead of queueing them in memory.
+async fn wait_dropping<St>(backoff: &mut IncrementalBackoff, rx: &mut St) -> BackoffWait
+where
+    St: Stream<Item = Event> + Unpin,
+{
+    let mut dropped = 0;
+    let tick = backoff.maybe_tick();
+    tokio::pin!(tick);
+    loop {
+        tokio::select! {
+            () = &mut tick => return BackoffWait { dropped, closed: false },
+            event = rx.next() => match event {
+                Some(_) => {
+                    dropped += 1;
+                    prom::lewis_events_dropped_inc();
+                }
+                None => return BackoffWait { dropped, closed: true },
+            },
+        }
+    }
+}
+
 async fn auto_reconnect_drain_loop<St>(
     config: ConfigLewisEvents,
     mut rx: St,
@@ -211,27 +265,26 @@ async fn auto_reconnect_drain_loop<St>(
 where
     St: Stream<Item = Event> + Unpin + Send,
 {
-    let mut attempt = 0;
-
+    let mut policy = ReconnectPolicy::new(config.max_reconnect_attempts);
     let mut backoff = IncrementalBackoff::new(
         config.reconnect_initial_interval,
         config.reconnect_max_interval,
     );
+    backoff.init();
 
     loop {
-        if attempt == 0 {
-            backoff.init();
-        }
-        match drain_loop(&config, &mut rx).await {
+        let mut connected = false;
+        match drain_loop(&config, &mut rx, &mut connected).await {
             Ok(()) => {
                 info!("Lewis event stream completed normally");
-                backoff.reset();
                 return Ok(());
             }
             Err(e) => {
-                attempt += 1;
-
-                if attempt >= config.max_reconnect_attempts {
+                if connected {
+                    backoff.reset();
+                    backoff.init();
+                }
+                if policy.on_failure(connected) {
                     error!(
                         "Max reconnection attempts ({}) exceeded",
                         config.max_reconnect_attempts
@@ -245,10 +298,12 @@ where
 
                 warn!(
                     "Lewis connection failed (attempt {}/{}): {}. Retrying...",
-                    attempt, config.max_reconnect_attempts, e
+                    policy.failures, config.max_reconnect_attempts, e
                 );
 
-                backoff.maybe_tick().await;
+                if wait_dropping(&mut backoff, &mut rx).await.closed {
+                    return Ok(());
+                }
             }
         }
     }
@@ -268,13 +323,20 @@ async fn create_channel(config: &ConfigLewisEvents) -> Result<Channel, LewisClie
         .map_err(|e| LewisClientError::ConnectionError(e.to_string()))
 }
 
-async fn drain_loop<St>(config: &ConfigLewisEvents, rx: &mut St) -> Result<(), LewisClientError>
+/// Streams events to Lewis until the event channel closes. Sets `connected` once
+/// the connection is up, so the caller can tell a dropped stream from a failed connect.
+async fn drain_loop<St>(
+    config: &ConfigLewisEvents,
+    rx: &mut St,
+    connected: &mut bool,
+) -> Result<(), LewisClientError>
 where
     St: Stream<Item = Event> + Unpin,
 {
     debug!("Connecting to Lewis at {}", config.endpoint);
 
     let channel = create_channel(config).await?;
+    *connected = true;
     info!("Connected to Lewis");
 
     // Always use interceptor (it's a no-op if x_token is None)
@@ -320,13 +382,10 @@ where
             result = &mut response => {
                 match result {
                     Ok(resp) => {
+                        // Lewis ended the stream while jet still has events; reconnect.
                         let _ack: EventAck = resp.into_inner();
-                        info!("Lewis stream completed with acknowledgment");
-                        // Send any remaining events before returning
-                        if !batch.is_empty() {
-                            send_batch(&mut tx, &mut batch).await?;
-                        }
-                        return Ok(());
+                        warn!("Lewis ended the event stream early");
+                        return Err(LewisClientError::StreamTerminated);
                     }
                     Err(status) => {
                         warn!("Lewis stream failed: {}", status);
@@ -405,6 +464,72 @@ mod tests {
         },
         yellowstone_jet_tpu_client::core::{TpuSenderResponse, TpuSenderTxnInfo, TxFailed, TxSent},
     };
+
+    #[test]
+    fn reconnect_policy_resets_after_a_connection() {
+        let mut policy = ReconnectPolicy::new(3);
+        assert!(!policy.on_failure(false));
+        assert!(!policy.on_failure(false));
+        // The stream connected before it failed, so earlier failures no longer count.
+        assert!(!policy.on_failure(true));
+        assert!(!policy.on_failure(false));
+        assert!(policy.on_failure(false));
+    }
+
+    #[test]
+    fn reconnect_policy_default_never_gives_up() {
+        let mut policy = ReconnectPolicy::new(usize::MAX);
+        for _ in 0..10_000 {
+            assert!(!policy.on_failure(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_dropping_drops_events_queued_during_backoff() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut rx = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+        for _ in 0..5 {
+            tx.send(Event::default()).unwrap();
+        }
+        let mut backoff =
+            IncrementalBackoff::new(Duration::from_millis(50), Duration::from_millis(50));
+        backoff.init();
+
+        let wait = wait_dropping(&mut backoff, &mut rx).await;
+        assert_eq!(
+            wait,
+            BackoffWait {
+                dropped: 5,
+                closed: false
+            }
+        );
+        tx.send(Event::default()).unwrap();
+        assert!(
+            rx.next().await.is_some(),
+            "the stream stays usable after the wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_dropping_returns_when_the_event_channel_closes() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let mut rx = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+        drop(tx);
+        let mut backoff = IncrementalBackoff::new(Duration::from_secs(60), Duration::from_secs(60));
+        backoff.init();
+
+        let wait =
+            tokio::time::timeout(Duration::from_secs(5), wait_dropping(&mut backoff, &mut rx))
+                .await
+                .expect("a closed channel must end the wait without sitting out the backoff");
+        assert_eq!(
+            wait,
+            BackoffWait {
+                dropped: 0,
+                closed: true
+            }
+        );
+    }
 
     fn test_adapter(
         jet_id: &str,
