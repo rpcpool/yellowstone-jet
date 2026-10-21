@@ -14,6 +14,7 @@ pub mod config;
 pub mod crypto_provider;
 pub mod grpc_geyser;
 pub mod grpc_lewis;
+pub mod http_ndjson_drain;
 pub mod http_tx_handler;
 pub mod identity;
 pub mod metrics;
