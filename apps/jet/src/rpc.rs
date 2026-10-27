@@ -3,7 +3,10 @@ use jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INVALID_PARAMS_CODE
 pub mod admin {
     use {
         super::invalid_params,
-        crate::{cluster_tpu_info::ClusterTpuInfoProvider, timer_wheel::ActivityWindow},
+        crate::{
+            cluster_tpu_info::ClusterTpuInfoProvider, timer_wheel::ActivityWindow,
+            tip::MinTipLamports,
+        },
         anyhow::Context as _,
         futures::future::{BoxFuture, FutureExt, TryFutureExt, ready},
         hyper::{Request, Response, StatusCode},
@@ -56,6 +59,12 @@ pub mod admin {
 
         #[method(name = "resetIdentity")]
         async fn reset_identity(&self) -> RpcResult<()>;
+
+        #[method(name = "getMinTipLamports")]
+        async fn get_min_tip_lamports(&self) -> RpcResult<u64>;
+
+        #[method(name = "setMinTipLamports")]
+        async fn set_min_tip_lamports(&self, lamports: u64) -> RpcResult<()>;
     }
 
     #[async_trait::async_trait]
@@ -70,6 +79,8 @@ pub mod admin {
         pub allowed_identity: Option<Pubkey>,
         pub jet_identity_updater: Arc<Mutex<JetIdentityUpdateT>>,
         pub cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
+        /// Smallest tip the `/send-via-tip` endpoint accepts, shared with that endpoint.
+        pub min_tip_lamports: Arc<MinTipLamports>,
     }
 
     #[async_trait]
@@ -127,6 +138,16 @@ pub mod admin {
                 .await
                 .update_identity(random_identity)
                 .await;
+            Ok(())
+        }
+
+        async fn get_min_tip_lamports(&self) -> RpcResult<u64> {
+            Ok(self.min_tip_lamports.get())
+        }
+
+        async fn set_min_tip_lamports(&self, lamports: u64) -> RpcResult<()> {
+            let previous = self.min_tip_lamports.set(lamports);
+            info!(previous, lamports, "update min tip lamports");
             Ok(())
         }
     }
@@ -364,6 +385,7 @@ pub mod admin {
             allowed_identity: Option<Pubkey>,
             cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
             tpu_activity_tracker: Arc<TpuActivityTracker>,
+            min_tip_lamports: Arc<MinTipLamports>,
         ) -> Self
         where
             IU: JetIdentityUpdater + Send + 'static,
@@ -396,6 +418,7 @@ pub mod admin {
                             allowed_identity,
                             jet_identity_updater,
                             cluster_tpu_info,
+                            min_tip_lamports,
                         }
                         .into_rpc(),
                     )
@@ -421,13 +444,14 @@ pub mod solana_like {
     use {
         crate::{
             http_tx_handler::{
-                HttpTransactionHandler, HttpTxMiddleware, SimulationPerformed, XRequestId,
-                XSubscriptionId,
+                HttpTransactionHandler, HttpTxMiddleware, SimulationPerformed, TipRequired,
+                XRequestId, XSubscriptionId,
             },
             metrics,
             payload::JetRpcSendTransactionConfig,
             rpc::invalid_params,
             solana::decode_and_deserialize,
+            tip::{MinTipLamports, TipAccounts},
             transaction_handler::TransactionHandler,
         },
         anyhow::Context as _,
@@ -440,7 +464,7 @@ pub mod solana_like {
         solana_rpc_client_api::response::RpcVersionInfo,
         solana_transaction::versioned::VersionedTransaction,
         solana_transaction_status_client_types::UiTransactionEncoding,
-        std::{borrow::Cow, fmt, net::SocketAddr},
+        std::{borrow::Cow, fmt, net::SocketAddr, sync::Arc},
         tracing::{debug, info, warn},
     };
 
@@ -463,6 +487,44 @@ pub mod solana_like {
     pub struct RpcServerImpl {
         pub log_invalid_txn: bool,
         pub tx_handler: TransactionHandler,
+        /// Addresses a transaction sent through the tip endpoint may tip; [`None`] disables it.
+        pub tip_accounts: Option<TipAccounts>,
+        /// Smallest tip the tip endpoint accepts, shared with the admin API.
+        pub min_tip_lamports: Arc<MinTipLamports>,
+    }
+
+    impl RpcServerImpl {
+        /// Checks that a transaction received on the tip endpoint tips an allowed address.
+        ///
+        /// # Arguments
+        ///
+        /// * `transaction` - The decoded [`VersionedTransaction`] to check.
+        ///
+        /// # Errors
+        ///
+        /// Returns an invalid-params error if no tipping address is configured, or if
+        /// `transaction` has no tip per [`TipAccounts::find_tip`].
+        fn check_tip(&self, transaction: &VersionedTransaction) -> RpcResult<()> {
+            let Some(tip_accounts) = &self.tip_accounts else {
+                metrics::jet::incr_versioned_txn_handler_error("TipDisabled");
+                return Err(invalid_params(
+                    "send-via-tip is disabled: no tipping address is configured",
+                ));
+            };
+            // Read once so the check and the error message use the same value.
+            let min_tip_lamports = self.min_tip_lamports.get();
+            if tip_accounts
+                .find_tip(transaction, min_tip_lamports)
+                .is_none()
+            {
+                metrics::jet::incr_versioned_txn_handler_error("MissingTip");
+                return Err(invalid_params(format!(
+                    "transaction must transfer at least {} lamports to an allowed tipping address",
+                    min_tip_lamports.max(1)
+                )));
+            }
+            Ok(())
+        }
     }
 
     fn apply_simulation_performed(
@@ -500,6 +562,9 @@ pub mod solana_like {
                     .into_binary_encoding()
                     .ok_or_else(|| invalid_params("unsupported encoding"))?,
             )?;
+            if extensions.get::<TipRequired>().is_some() {
+                self.check_tip(&transaction)?;
+            }
             let maybe_txn_sig = transaction.signatures.first().cloned();
             let maybe_request_id = extensions.get::<XRequestId>().map(|x| x.0);
             let maybe_subscription_id = extensions.get::<XSubscriptionId>().map(|x| x.0);
@@ -547,10 +612,14 @@ pub mod solana_like {
             addr: SocketAddr,
             tx_handler: TransactionHandler,
             log_invalid_txn: bool,
+            tip_accounts: Option<TipAccounts>,
+            min_tip_lamports: Arc<MinTipLamports>,
         ) -> Self {
             let rpc_server_impl = RpcServerImpl {
                 tx_handler: tx_handler.clone(),
                 log_invalid_txn,
+                tip_accounts,
+                min_tip_lamports,
             };
             let http_tx_handler = HttpTransactionHandler::new(tx_handler, log_invalid_txn);
             let server_middleware = tower::ServiceBuilder::new()
@@ -582,7 +651,205 @@ pub mod solana_like {
 
     #[cfg(test)]
     mod tests {
-        use {super::*, solana_rpc_client_api::config::RpcSendTransactionConfig};
+        use {
+            super::*,
+            base64::{Engine, prelude::BASE64_STANDARD},
+            solana_hash::Hash,
+            solana_keypair::Keypair,
+            solana_message::{VersionedMessage, v0},
+            solana_pubkey::Pubkey,
+            solana_rpc_client_api::config::RpcSendTransactionConfig,
+            solana_signer::Signer,
+            solana_system_interface::instruction::transfer,
+            tokio::sync::mpsc,
+        };
+
+        const MIN_TIP_LAMPORTS: u64 = 1_000_000;
+
+        /// Builds an [`RpcServerImpl`] whose transaction sink has room for one transaction and
+        /// whose tip endpoint requires a tip of at least [`MIN_TIP_LAMPORTS`].
+        ///
+        /// # Arguments
+        ///
+        /// * `tip_accounts` - The tipping addresses, or [`None`] to disable the tip endpoint.
+        ///
+        /// # Returns
+        ///
+        /// The server and the receiving end of its transaction sink.
+        fn server(
+            tip_accounts: Option<TipAccounts>,
+        ) -> (
+            RpcServerImpl,
+            mpsc::Receiver<crate::transactions::SendTransactionRequest>,
+        ) {
+            let (sink, rx) = mpsc::channel(1);
+            let server = RpcServerImpl {
+                log_invalid_txn: false,
+                tx_handler: TransactionHandler::new(sink, true),
+                tip_accounts,
+                min_tip_lamports: Arc::new(MinTipLamports::new(MIN_TIP_LAMPORTS)),
+            };
+            (server, rx)
+        }
+
+        /// Builds a signed transaction transferring `lamports` to `destination`, base64 encoded.
+        ///
+        /// # Arguments
+        ///
+        /// * `destination` - The account receiving the transfer.
+        /// * `lamports` - The transferred lamports.
+        ///
+        /// # Returns
+        ///
+        /// The base64 wire transaction.
+        fn encoded_transfer(destination: &Pubkey, lamports: u64) -> String {
+            let payer = Keypair::new();
+            let message = v0::Message::try_compile(
+                &payer.pubkey(),
+                &[transfer(&payer.pubkey(), destination, lamports)],
+                &[],
+                Hash::new_unique(),
+            )
+            .expect("try compile");
+            let tx = VersionedTransaction::try_new(VersionedMessage::V0(message), &[&payer])
+                .expect("try new");
+            BASE64_STANDARD.encode(wincode::serialize(&tx).expect("serialize"))
+        }
+
+        fn base64_config() -> Option<JetRpcSendTransactionConfig> {
+            Some(JetRpcSendTransactionConfig {
+                config: RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    encoding: Some(UiTransactionEncoding::Base64),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }
+
+        fn tip_required() -> Extensions {
+            let mut extensions = Extensions::new();
+            extensions.insert(TipRequired);
+            extensions
+        }
+
+        #[tokio::test]
+        async fn send_via_tip_forwards_transaction_with_tip() {
+            let tip = Pubkey::new_unique();
+            let (server, mut rx) = server(Some(TipAccounts::parse(&tip.to_string()).unwrap()));
+            let x_request_id = uuid::Uuid::new_v4();
+            let mut extensions = tip_required();
+            extensions.insert(XRequestId(x_request_id));
+
+            let signature = server
+                .send_transaction(
+                    &extensions,
+                    encoded_transfer(&tip, MIN_TIP_LAMPORTS),
+                    base64_config(),
+                )
+                .await
+                .expect("tip is valid");
+
+            let request = rx.try_recv().expect("transaction forwarded");
+            assert_eq!(request.signature.to_string(), signature);
+            assert_eq!(request.x_request_id, Some(x_request_id));
+            assert_eq!(request.x_subscription_id, None);
+        }
+
+        #[tokio::test]
+        async fn send_via_tip_rejects_transaction_without_tip() {
+            let tip = Pubkey::new_unique();
+            let (server, mut rx) = server(Some(TipAccounts::parse(&tip.to_string()).unwrap()));
+
+            let result = server
+                .send_transaction(
+                    &tip_required(),
+                    encoded_transfer(&Pubkey::new_unique(), 1_000_000),
+                    base64_config(),
+                )
+                .await;
+
+            assert!(result.is_err());
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn send_via_tip_rejects_tip_below_minimum() {
+            let tip = Pubkey::new_unique();
+            let (server, mut rx) = server(Some(TipAccounts::parse(&tip.to_string()).unwrap()));
+
+            let result = server
+                .send_transaction(
+                    &tip_required(),
+                    encoded_transfer(&tip, MIN_TIP_LAMPORTS - 1),
+                    base64_config(),
+                )
+                .await;
+
+            assert!(result.is_err());
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn send_via_tip_uses_updated_minimum() {
+            let tip = Pubkey::new_unique();
+            let (server, mut rx) = server(Some(TipAccounts::parse(&tip.to_string()).unwrap()));
+            let small_tip = MIN_TIP_LAMPORTS / 2;
+
+            server.min_tip_lamports.set(small_tip);
+            server
+                .send_transaction(
+                    &tip_required(),
+                    encoded_transfer(&tip, small_tip),
+                    base64_config(),
+                )
+                .await
+                .expect("tip meets the lowered minimum");
+            assert!(rx.try_recv().is_ok());
+
+            server.min_tip_lamports.set(MIN_TIP_LAMPORTS);
+            let result = server
+                .send_transaction(
+                    &tip_required(),
+                    encoded_transfer(&tip, small_tip),
+                    base64_config(),
+                )
+                .await;
+            assert!(result.is_err());
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn send_via_tip_rejects_everything_when_disabled() {
+            let (server, mut rx) = server(None);
+
+            let result = server
+                .send_transaction(
+                    &tip_required(),
+                    encoded_transfer(&Pubkey::new_unique(), 1_000_000),
+                    base64_config(),
+                )
+                .await;
+
+            assert!(result.is_err());
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn send_transaction_does_not_require_tip() {
+            let (server, mut rx) = server(None);
+
+            server
+                .send_transaction(
+                    &Extensions::new(),
+                    encoded_transfer(&Pubkey::new_unique(), 1_000_000),
+                    base64_config(),
+                )
+                .await
+                .expect("no tip required");
+
+            assert!(rx.try_recv().is_ok());
+        }
 
         #[test]
         fn simulation_performed_extension_allows_preflight_requested_config() {

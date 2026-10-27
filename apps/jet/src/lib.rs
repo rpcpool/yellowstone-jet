@@ -26,6 +26,7 @@ pub mod solana;
 pub mod solana_rpc_utils;
 pub mod stake;
 pub mod timer_wheel;
+pub mod tip;
 pub mod tpu_drain;
 pub mod transaction_handler;
 pub mod transactions;

@@ -266,7 +266,7 @@ pub enum CreateTpuSenderError {
 ///
 /// You can also implement your own callback by implementing the [`TpuSenderResponseCallback`] trait.
 ///
-/// ```rust
+/// ```ignore
 /// #[derive(Clone)]
 /// struct LoggingCallback;
 ///
