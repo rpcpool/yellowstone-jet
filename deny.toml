@@ -4,4 +4,13 @@ all-features = true
 [advisories]
 ignore = [
     "RUSTSEC-2025-0141", # bincode is discontinued: https://rustsec.org/advisories/RUSTSEC-2025-0141
+    # unsafe-libyaml is unmaintained, no fixed release exists. It comes from the deprecated
+    # serde_yaml, which only parses operator-provided config files (and yellowstone-fumarole-client
+    # pulls it in too). Remove once serde_yaml is replaced by a maintained YAML crate.
+    "RUSTSEC-2024-0449",
+    # zstd 0.13 / zstd-safe 7 are pinned by solana-account-decoder{,-client-types} 4.3; the fixed
+    # zstd 0.14 only lands with Solana 4.4. Remove these once on Solana >= 4.4 and tonic >= 0.14.7.
+    "RUSTSEC-2026-0391", # zstd `with_context` stream reuse: no dependency calls `with_context`
+    "RUSTSEC-2026-0398", # zstd-safe `Seekable::decompress`: the `seekable` feature is not enabled
+    "RUSTSEC-2026-0403", # zstd-safe legacy frame `write::Decoder`: no dependency uses `write::Decoder`
 ]

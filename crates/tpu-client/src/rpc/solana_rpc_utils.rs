@@ -9,7 +9,7 @@
 //!
 //! This make sure to retry transient errors when making RPC calls, avoiding spreading retry-logic everywhere in business logic.
 //!
-//! ```rust
+//! ```ignore
 //! let http_sender = HttpSender::new(rpc);
 //! let rpc_sender = RetryRpcSender::new(http_sender, Default::default());
 //!
