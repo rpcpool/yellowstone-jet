@@ -10,6 +10,10 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ## [Unreleased]
 
+### Features
+
+- `identity.vault` loads the identity from Vault inside a confidential VM. Jet gets an attestation token from the guest attestation agent, logs in to a Vault JWT auth role that trusts it, and reads one KV v2 secret. The key must match `identity.expected`. In this mode the admin RPC refuses `setIdentity`, `setIdentityFromBytes` and `resetIdentity`.
+
 ### Breaking
 
 - Dropped custom Solana RPC patches. Jet now uses upstream Solana crates directly.

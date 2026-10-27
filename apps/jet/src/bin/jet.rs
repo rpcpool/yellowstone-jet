@@ -53,6 +53,7 @@ use {
         },
         txn_trace_drain::HttpTxnTraceDrain,
         util::WaitShutdown,
+        vault_identity::{VaultIdentityLoader, run_vault_identity_loader},
     },
     yellowstone_jet_tpu_client::{
         core::{
@@ -319,6 +320,11 @@ async fn run_jet(
     let mut tg_name_map = HashMap::<task::Id, String>::new();
     metrics::init();
     let jet_cancellation_token = CancellationToken::new();
+    config.identity.validate()?;
+    let vault_identity_loader = match (&config.identity.vault, config.identity.expected) {
+        (Some(vault), Some(expected)) => Some(VaultIdentityLoader::new(vault.clone(), expected)?),
+        _ => None,
+    };
     if let Some(identity) = config.identity.expected {
         metrics::quic_set_identity_expected(identity);
     }
@@ -538,6 +544,7 @@ async fn run_jet(
         config.listen_admin.bind[0],
         tpu_identity_updater.clone(),
         config.identity.expected,
+        vault_identity_loader.is_none(),
         Arc::new(cluster_tpu_info),
         shared_tpu_activity_tracker,
         min_tip_lamports,
@@ -546,6 +553,15 @@ async fn run_jet(
 
     let ah = tg.spawn(stake_info_bg_fut);
     tg_name_map.insert(ah.id(), "stake_refresh_task".to_string());
+
+    if let Some(loader) = vault_identity_loader {
+        let ah = tg.spawn(run_vault_identity_loader(
+            loader,
+            tpu_identity_updater.clone(),
+            jet_cancellation_token.child_token(),
+        ));
+        tg_name_map.insert(ah.id(), "vault_identity_loader".to_string());
+    }
 
     let ah = tg.spawn(keep_stake_metrics_up_to_date_task(
         tpu_identity_updater.clone(),

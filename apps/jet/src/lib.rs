@@ -32,6 +32,7 @@ pub mod transaction_handler;
 pub mod transactions;
 pub mod txn_trace_drain;
 pub mod util;
+pub mod vault_identity;
 pub mod version;
 
 pub fn setup_tracing(json: bool) -> anyhow::Result<()> {

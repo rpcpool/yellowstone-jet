@@ -77,6 +77,8 @@ pub mod admin {
     pub struct RpcServerImpl<JetIdentityUpdateT> {
         // pub quic: QuicTxSender,
         pub allowed_identity: Option<Pubkey>,
+        /// False when the identity comes from Vault, so the admin port cannot change it
+        pub allow_identity_changes: bool,
         pub jet_identity_updater: Arc<Mutex<JetIdentityUpdateT>>,
         pub cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
         /// Smallest tip the `/send-via-tip` endpoint accepts, shared with that endpoint.
@@ -98,6 +100,7 @@ pub mod admin {
         }
 
         async fn set_identity(&self, keypair_file: String, require_tower: bool) -> RpcResult<()> {
+            self.ensure_identity_changes_allowed()?;
             if require_tower {
                 return Err(invalid_params(
                     "set_identity with require_tower is not supported".to_owned(),
@@ -116,6 +119,7 @@ pub mod admin {
             identity_keypair: Vec<u8>,
             require_tower: bool,
         ) -> RpcResult<()> {
+            self.ensure_identity_changes_allowed()?;
             if require_tower {
                 return Err(invalid_params(
                     "set_identity_from_bytes with require_tower is not supported".to_owned(),
@@ -131,6 +135,7 @@ pub mod admin {
         }
 
         async fn reset_identity(&self) -> RpcResult<()> {
+            self.ensure_identity_changes_allowed()?;
             let random_identity = HardenedKeypair::new();
 
             self.jet_identity_updater
@@ -156,6 +161,16 @@ pub mod admin {
     where
         JetIdentityUpdateT: JetIdentityUpdater + Send + 'static,
     {
+        fn ensure_identity_changes_allowed(&self) -> RpcResult<()> {
+            if self.allow_identity_changes {
+                Ok(())
+            } else {
+                Err(invalid_params(
+                    "identity changes are disabled: the identity comes from Vault".to_owned(),
+                ))
+            }
+        }
+
         async fn set_keypair(&self, identity: HardenedKeypair) -> RpcResult<()> {
             if let Some(allow_ident) = &self.allowed_identity
                 && allow_ident != &identity.pubkey()
@@ -383,6 +398,7 @@ pub mod admin {
             addr: SocketAddr,
             jet_identity_updater: IU,
             allowed_identity: Option<Pubkey>,
+            allow_identity_changes: bool,
             cluster_tpu_info: Arc<dyn ClusterTpuInfoProvider>,
             tpu_activity_tracker: Arc<TpuActivityTracker>,
             min_tip_lamports: Arc<MinTipLamports>,
@@ -416,6 +432,7 @@ pub mod admin {
                     server.start(
                         RpcServerImpl {
                             allowed_identity,
+                            allow_identity_changes,
                             jet_identity_updater,
                             cluster_tpu_info,
                             min_tip_lamports,

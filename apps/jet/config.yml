@@ -8,6 +8,17 @@ identity:
   expected: null # 3RY3bvCRoCoSTy5qSNL1ezeGQwt1ufToLSKdmEZZjb4Z
   # Load specified keypair from file
   keypair: null
+  # Load the keypair from Vault after the guest attestation agent proves this VM.
+  # Requires `expected`, and cannot be used with `keypair`. Disables the admin identity RPCs.
+  vault: null
+  #   address: https://vault.example:8200
+  #   ca_cert_file: null
+  #   auth_mount: trustee # JWT auth mount that trusts the attestation service
+  #   role: jet-snp-testnet
+  #   identity_path: jet-testnet/data/identities/<pubkey> # KV v2 path, reads `priv_key`
+  #   attestation_agent_url: http://127.0.0.1:8006/aa/token?token_type=kbs
+  #   retry_min: 1s
+  #   retry_max: 60s
 
 # RPC & gRPC for upstream validator
 upstream:

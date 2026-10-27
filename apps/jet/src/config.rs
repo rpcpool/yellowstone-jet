@@ -173,9 +173,70 @@ pub struct ConfigIdentity {
         deserialize_with = "ConfigIdentity::deserialize_maybe_keypair"
     )]
     pub keypair: Option<Keypair>,
+    /// Load the keypair from Vault after guest attestation. Requires `expected`.
+    #[serde(default)]
+    pub vault: Option<ConfigVaultIdentity>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigVaultIdentity {
+    /// Vault origin, HTTPS only
+    pub address: Url,
+    /// Extra PEM CA bundle to trust for Vault
+    #[serde(default)]
+    pub ca_cert_file: Option<PathBuf>,
+    /// JWT auth mount that trusts the attestation service, as in `auth/<mount>/login`
+    pub auth_mount: String,
+    /// JWT auth role that binds the attestation claims
+    pub role: String,
+    /// KV v2 API path of the identity, as in `<mount>/data/<secret>`; reads its `priv_key` field
+    pub identity_path: String,
+    /// Attestation agent token endpoint on guest loopback
+    #[serde(default = "ConfigVaultIdentity::default_attestation_agent_url")]
+    pub attestation_agent_url: Url,
+    #[serde(
+        default = "ConfigVaultIdentity::default_retry_min",
+        with = "humantime_serde"
+    )]
+    pub retry_min: Duration,
+    #[serde(
+        default = "ConfigVaultIdentity::default_retry_max",
+        with = "humantime_serde"
+    )]
+    pub retry_max: Duration,
+}
+
+impl ConfigVaultIdentity {
+    fn default_attestation_agent_url() -> Url {
+        Url::parse("http://127.0.0.1:8006/aa/token?token_type=kbs").expect("valid default URL")
+    }
+
+    const fn default_retry_min() -> Duration {
+        Duration::from_secs(1)
+    }
+
+    const fn default_retry_max() -> Duration {
+        Duration::from_secs(60)
+    }
 }
 
 impl ConfigIdentity {
+    /// A Vault source needs `expected` and replaces `keypair`.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.vault.is_some() {
+            anyhow::ensure!(
+                self.expected.is_some(),
+                "identity.vault requires identity.expected"
+            );
+            anyhow::ensure!(
+                self.keypair.is_none(),
+                "identity.vault and identity.keypair cannot be used together"
+            );
+        }
+        Ok(())
+    }
+
     fn deserialize_maybe_pubkey<'de, D>(deserializer: D) -> Result<Option<Pubkey>, D::Error>
     where
         D: Deserializer<'de>,
@@ -609,6 +670,44 @@ impl PrometheusConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_vault_parses_with_defaults() {
+        let identity: ConfigIdentity = serde_yaml::from_str(
+            r#"
+expected: 3RY3bvCRoCoSTy5qSNL1ezeGQwt1ufToLSKdmEZZjb4Z
+vault:
+  address: https://vault.example
+  auth_mount: trustee
+  role: jet-snp-testnet
+  identity_path: jet-testnet/data/identities/3RY3bvCRoCoSTy5qSNL1ezeGQwt1ufToLSKdmEZZjb4Z
+"#,
+        )
+        .unwrap();
+        identity.validate().unwrap();
+        let vault = identity.vault.unwrap();
+        assert_eq!(
+            vault.attestation_agent_url.as_str(),
+            "http://127.0.0.1:8006/aa/token?token_type=kbs"
+        );
+        assert_eq!(vault.retry_min, Duration::from_secs(1));
+        assert_eq!(vault.retry_max, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn identity_vault_requires_expected() {
+        let identity: ConfigIdentity = serde_yaml::from_str(
+            r#"
+vault:
+  address: https://vault.example
+  auth_mount: trustee
+  role: jet-snp-testnet
+  identity_path: jet-testnet/data/identities/x
+"#,
+        )
+        .unwrap();
+        assert!(identity.validate().is_err());
+    }
 
     /// Isolates `ConfigJet::deserialize_http_txn_trace_drain` behind a minimal wrapper instead
     /// of exercising it through a full `ConfigJet`, which would need every other required field

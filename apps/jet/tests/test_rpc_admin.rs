@@ -70,6 +70,7 @@ pub async fn set_identity_if_expected() {
         rpc_addr,
         jet_identity_updater,
         Some(expected_identity.pubkey()),
+        true,
         mock_cluster_info,
         Arc::new(TpuActivityTracker::default()),
         Arc::new(MinTipLamports::default()),
@@ -114,6 +115,7 @@ pub async fn set_identity_wrong_keypair() {
         rpc_addr,
         jet_identity_updater,
         Some(expected_identity.pubkey()),
+        true,
         mock_cluster_info,
         Arc::new(TpuActivityTracker::default()),
         Arc::new(MinTipLamports::default()),
@@ -153,6 +155,7 @@ pub async fn set_identity_from_file() {
         rpc_addr,
         jet_identity_updater,
         Some(expected_identity.pubkey()),
+        true,
         mock_cluster_info,
         Arc::new(TpuActivityTracker::default()),
         Arc::new(MinTipLamports::default()),
@@ -197,6 +200,7 @@ pub async fn reset_identity_to_random() {
         rpc_addr,
         jet_identity_updater,
         Some(expected_identity.pubkey()),
+        true,
         mock_cluster_info,
         Arc::new(TpuActivityTracker::default()),
         Arc::new(MinTipLamports::default()),
@@ -249,6 +253,7 @@ pub async fn test_get_latest_slot() {
         rpc_addr,
         jet_identity_updater,
         None,
+        true,
         Arc::new(mock_cluster_info),
         Arc::new(TpuActivityTracker::default()),
         Arc::new(MinTipLamports::default()),
@@ -302,6 +307,7 @@ pub async fn test_get_latest_slot_updates() {
         rpc_addr,
         jet_identity_updater,
         None,
+        true,
         updatable_mock,
         Arc::new(TpuActivityTracker::default()),
         Arc::new(MinTipLamports::default()),
@@ -345,6 +351,7 @@ pub async fn set_min_tip_lamports_updates_shared_value() {
         rpc_addr,
         jet_identity_updater,
         None,
+        true,
         Arc::new(MockClusterTpuInfo::default()),
         Arc::new(TpuActivityTracker::default()),
         Arc::clone(&min_tip_lamports),
@@ -375,6 +382,53 @@ pub async fn set_min_tip_lamports_updates_shared_value() {
             .await
             .expect("Error getting min tip lamports"),
         1_000_000
+    );
+
+    rpc_admin.shutdown();
+}
+
+#[tokio::test]
+pub async fn identity_changes_refused_when_disabled() {
+    let rpc_addr = generate_random_local_addr();
+    let expected_identity = Keypair::new();
+    let initial_kp = Keypair::new();
+    let shared = Arc::new(RwLock::new(initial_kp.pubkey()));
+    let jet_identity_updater = NullJetIdentityUpdater {
+        current: Arc::clone(&shared),
+    };
+    let rpc_admin = AdminServer::new(
+        rpc_addr,
+        jet_identity_updater,
+        Some(expected_identity.pubkey()),
+        false,
+        Arc::new(MockClusterTpuInfo::default()),
+        Arc::new(TpuActivityTracker::default()),
+        Arc::new(MinTipLamports::default()),
+    )
+    .await;
+
+    let client = HttpClientBuilder::default()
+        .build(format!("http://{rpc_addr}"))
+        .expect("Error build rpc client");
+
+    let keypair_bytes = Vec::from(expected_identity.to_bytes());
+    assert!(
+        client
+            .set_identity_from_bytes(keypair_bytes, false)
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .set_identity("/nonexistent".to_owned(), false)
+            .await
+            .is_err()
+    );
+    assert!(client.reset_identity().await.is_err());
+    assert_eq!(*shared.read().unwrap(), initial_kp.pubkey());
+    assert_eq!(
+        client.get_identity().await.expect("Error getting identity"),
+        initial_kp.pubkey().to_string()
     );
 
     rpc_admin.shutdown();

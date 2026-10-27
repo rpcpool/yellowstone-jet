@@ -229,6 +229,15 @@ pub mod jet {
             "jet_tpu_forwarding_stalled", "Whether TPU forwarding meets the stall condition in the trailing 30-second activity window (1 stalled, 0 otherwise)"
         ).unwrap();
 
+        static ref VAULT_IDENTITY_LOADED: IntGauge = IntGauge::new(
+            "vault_identity_loaded", "Whether the identity from Vault is loaded (1 loaded, 0 otherwise)"
+        ).unwrap();
+
+        static ref VAULT_IDENTITY_LOAD_ERRORS: IntCounterVec = IntCounterVec::new(
+            Opts::new("vault_identity_load_errors_total", "Failed attempts to load the identity from Vault, by stage"),
+            &["stage"]
+        ).unwrap();
+
     }
 
     pub fn init() {
@@ -275,10 +284,20 @@ pub mod jet {
             register!(HTTP_TX_REQUESTS);
             register!(HTTP_TX_REQUEST_DURATION);
             register!(STALLED_TPU_ACTIVITY);
+            register!(VAULT_IDENTITY_LOADED);
+            register!(VAULT_IDENTITY_LOAD_ERRORS);
 
             yellowstone_jet_tpu_client::prom::register_metrics(&REGISTRY);
             grpc_lewis::prom::register_metrics(&REGISTRY);
         });
+    }
+
+    pub fn vault_identity_loaded_set(loaded: bool) {
+        VAULT_IDENTITY_LOADED.set(i64::from(loaded));
+    }
+
+    pub fn vault_identity_load_error_inc(stage: &str) {
+        VAULT_IDENTITY_LOAD_ERRORS.with_label_values(&[stage]).inc();
     }
 
     pub fn set_stalled_tpu_activity(stalled: bool) {
