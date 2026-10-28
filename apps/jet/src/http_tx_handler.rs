@@ -24,7 +24,7 @@ use {
 };
 
 const API_TX_PATH: &str = "/api/v1/transactions";
-pub const SEND_VIA_TIP_PATH: &str = "/send-via-tip";
+pub const SEND_VIA_TIP_PATH: &str = "/api/v1/send-via-tip";
 pub const SIMULATION_PERFORMED_HEADER: &str = "simulation-performed";
 const SOLANA_FORWARDING_POLICIES: &str = "solana-forwardingpolicies";
 

@@ -509,6 +509,76 @@ struct OrphanConnectionInfo {
     connection_version: u64,
 }
 
+///
+/// Wakes the driver loop when the oldest orphan connection expires.
+///
+/// The [`Sleep`] is boxed and kept across loop iterations: the first poll of a tokio timer takes
+/// a lock, and the next expiration rarely changes between iterations. Once the timer fires it is
+/// disarmed, because a completed [`Sleep`] stays ready forever and would make the driver loop spin
+/// until the next orphan connection expires.
+///
+/// # Examples
+///
+/// ```ignore
+/// let mut timer = OrphanExpirationTimer::default();
+/// timer.arm(orphan_connection_set.oldest().map(|oldest| oldest + ttl));
+/// if timer.is_armed() {
+///     timer.expired().await;
+///     // evict the expired orphan connections, then call `arm` again.
+/// }
+/// ```
+///
+#[derive(Default)]
+struct OrphanExpirationTimer {
+    sleep: Option<Pin<Box<Sleep>>>,
+}
+
+impl OrphanExpirationTimer {
+    ///
+    /// Arms the timer for `expiration` unless it is already armed, or disarms it when there is no
+    /// orphan connection left.
+    ///
+    /// # Arguments
+    ///
+    /// * `expiration` - When the oldest orphan connection expires, or [`None`] if there is none.
+    ///
+    fn arm(&mut self, expiration: Option<Instant>) {
+        let Some(expiration) = expiration else {
+            self.sleep = None;
+            return;
+        };
+        if self.sleep.is_none() {
+            let sleep_dur = expiration.saturating_duration_since(Instant::now());
+            self.sleep = Some(Box::pin(tokio::time::sleep(sleep_dur)));
+        }
+    }
+
+    ///
+    /// Tells whether the timer is waiting on an expiration.
+    ///
+    /// # Returns
+    ///
+    /// `true` if [`Self::expired`] would wait on a deadline.
+    ///
+    const fn is_armed(&self) -> bool {
+        self.sleep.is_some()
+    }
+
+    ///
+    /// Waits until the armed expiration, then disarms the timer so the next [`Self::arm`]
+    /// schedules the following expiration.
+    ///
+    /// Returns immediately if the timer is not armed. Dropping the future before it completes
+    /// leaves the timer armed.
+    ///
+    async fn expired(&mut self) {
+        if let Some(sleep) = self.sleep.as_mut() {
+            sleep.as_mut().await;
+        }
+        self.sleep = None;
+    }
+}
+
 #[derive(Default)]
 struct ConnectionEvictionSet {
     set: HashSet<ConnectionEviction>,
@@ -3029,7 +3099,7 @@ where
         }
         #[allow(unused_mut, dead_code)]
         let mut last_metric_update = Instant::now();
-        let mut sleep_timer: Option<Pin<Box<Sleep>>> = None;
+        let mut orphan_expiration_timer = OrphanExpirationTimer::default();
         loop {
             self.do_eviction_if_required();
             #[cfg(feature = "prometheus")]
@@ -3041,23 +3111,7 @@ where
             }
             self.try_predict_upcoming_leaders_if_necessary();
 
-            let next_connection_expiration = self.next_orphan_connection_expiration();
-            match next_connection_expiration {
-                Some(expiration_instant) => {
-                    let now = Instant::now();
-                    if sleep_timer.is_none() {
-                        let sleep_dur = expiration_instant.saturating_duration_since(now);
-                        // If I understand tokio correclty, the first time you poll a timer it must acquire a mutex lock.
-                        // So we box it and pin it to avoid re-creating the timer on every loop iteration since next orphan connection expiration
-                        // is unlikely to change until we evict some connections.
-                        // Also, the next orphan connection deadline can only increase overtime.
-                        sleep_timer = Some(Box::pin(tokio::time::sleep(sleep_dur)));
-                    }
-                }
-                None => {
-                    sleep_timer = None;
-                }
-            };
+            orphan_expiration_timer.arm(self.next_orphan_connection_expiration());
             tokio::select! {
                 maybe = self.tx_inlet.recv() => {
                     match maybe {
@@ -3070,7 +3124,7 @@ where
                         }
                     }
                 }
-                _ = async { sleep_timer.as_mut().unwrap().await }, if sleep_timer.is_some() => {
+                _ = orphan_expiration_timer.expired(), if orphan_expiration_timer.is_armed() => {
                     self.try_evict_orphan_connections();
                 }
                 // If cnc_rx returns None, we don't care as clients can safely drop cnc sender and the runtime should keep function.
@@ -3811,6 +3865,61 @@ mod test {
 
         let actual = set.iter().count();
         assert_eq!(actual, 0);
+    }
+}
+
+#[cfg(test)]
+mod orphan_expiration_timer_test {
+    use {
+        super::OrphanExpirationTimer,
+        std::{
+            pin::pin,
+            time::{Duration, Instant},
+        },
+    };
+
+    #[tokio::test(start_paused = true)]
+    async fn it_should_wait_for_the_next_expiration_after_firing() {
+        // Orphan connections expiring at 10s and 15s.
+        let start = tokio::time::Instant::now();
+        let mut timer = OrphanExpirationTimer::default();
+        timer.arm(Some(Instant::now() + Duration::from_secs(10)));
+        timer.expired().await;
+        assert!(start.elapsed() >= Duration::from_secs(10));
+        assert!(!timer.is_armed());
+
+        // The 10s connection is evicted, the 15s one remains.
+        timer.arm(Some(Instant::now() + Duration::from_secs(5)));
+        {
+            let mut expired = pin!(timer.expired());
+            assert!(futures::poll!(expired.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(4)).await;
+            assert!(futures::poll!(expired.as_mut()).is_pending());
+            expired.await;
+        }
+        assert!(start.elapsed() >= Duration::from_secs(15));
+        assert!(!timer.is_armed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn it_should_keep_the_armed_deadline_until_it_fires() {
+        let start = tokio::time::Instant::now();
+        let mut timer = OrphanExpirationTimer::default();
+        timer.arm(Some(Instant::now() + Duration::from_secs(10)));
+        timer.arm(Some(Instant::now() + Duration::from_secs(20)));
+        timer.expired().await;
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_secs(10));
+        assert!(elapsed < Duration::from_secs(20));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn it_should_disarm_when_no_orphan_connection_is_left() {
+        let mut timer = OrphanExpirationTimer::default();
+        timer.arm(Some(Instant::now() + Duration::from_secs(10)));
+        assert!(timer.is_armed());
+        timer.arm(None);
+        assert!(!timer.is_armed());
     }
 }
 
