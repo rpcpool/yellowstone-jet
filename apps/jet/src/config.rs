@@ -437,7 +437,8 @@ pub struct ConfigLewisEvents {
     #[serde(default = "ConfigLewisEvents::default_keep_alive_while_idle")]
     pub keep_alive_while_idle: bool,
 
-    /// Maximum number of reconnection attempts
+    /// Consecutive failed connections before the client stops reconnecting and drops events.
+    /// A connection that succeeds resets the count. Unlimited by default.
     #[serde(default = "ConfigLewisEvents::default_max_reconnect_attempts")]
     pub max_reconnect_attempts: usize,
 
@@ -494,7 +495,7 @@ impl ConfigLewisEvents {
     }
 
     const fn default_max_reconnect_attempts() -> usize {
-        3
+        usize::MAX
     }
 
     const fn default_reconnect_initial_interval() -> Duration {
