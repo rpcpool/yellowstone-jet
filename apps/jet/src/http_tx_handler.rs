@@ -24,11 +24,17 @@ use {
 };
 
 const API_TX_PATH: &str = "/api/v1/transactions";
+pub const SEND_VIA_TIP_PATH: &str = "/api/v1/send-via-tip";
 pub const SIMULATION_PERFORMED_HEADER: &str = "simulation-performed";
 const SOLANA_FORWARDING_POLICIES: &str = "solana-forwardingpolicies";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SimulationPerformed;
+
+/// Marks a JSON-RPC request received on [`SEND_VIA_TIP_PATH`]: `sendTransaction` only accepts
+/// transactions that tip one of the configured tipping addresses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TipRequired;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResponseMode {
@@ -371,19 +377,25 @@ where
             .and_then(|x_req_id| Uuid::try_parse(x_req_id).ok())
             .map(XRequestId);
 
-        let subscription_id = request
-            .headers()
-            .get(X_SUBSCRIPTION_ID_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|sub_id| Uuid::try_parse(sub_id).ok())
-            .map(XSubscriptionId);
-
         if let Some(x_request_id) = x_request_id {
             request.extensions_mut().insert(x_request_id);
         }
 
-        if let Some(subscription_id) = subscription_id {
-            request.extensions_mut().insert(subscription_id);
+        // The tip endpoint is paid for by the tip instead of a subscription, so it does not
+        // read the subscription id.
+        if request.uri().path() == SEND_VIA_TIP_PATH {
+            request.extensions_mut().insert(TipRequired);
+        } else {
+            let subscription_id = request
+                .headers()
+                .get(X_SUBSCRIPTION_ID_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|sub_id| Uuid::try_parse(sub_id).ok())
+                .map(XSubscriptionId);
+
+            if let Some(subscription_id) = subscription_id {
+                request.extensions_mut().insert(subscription_id);
+            }
         }
 
         if request.uri().path() == API_TX_PATH {
@@ -509,6 +521,62 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.forwarding_policies.len(), 1);
+    }
+
+    /// Runs `request` through [`HttpTxMiddleware`] around an inner service that echoes the
+    /// request extensions back in the response.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The request to send through the middleware.
+    ///
+    /// # Returns
+    ///
+    /// The response of the inner service, carrying the extensions it received.
+    async fn call_inner(request: Request<Body>) -> Response<Body> {
+        let (sink, _rx) = tokio::sync::mpsc::channel(1);
+        let handler = HttpTransactionHandler::new(TransactionHandler::new(sink, true), false);
+        let inner = tower::service_fn(|request: Request<Body>| async move {
+            let mut response = Response::new(Body::new(String::new()));
+            *response.extensions_mut() = request.extensions().clone();
+            Ok::<_, std::convert::Infallible>(response)
+        });
+        HttpTxMiddleware::new(inner, handler)
+            .call(request)
+            .await
+            .expect("inner service is infallible")
+    }
+
+    fn rpc_request(path: &str) -> Request<Body> {
+        Request::builder()
+            .method(hyper::Method::POST)
+            .uri(path)
+            .header(X_REQUEST_ID_HEADER, Uuid::new_v4().to_string())
+            .header(X_SUBSCRIPTION_ID_HEADER, Uuid::new_v4().to_string())
+            .header(SIMULATION_PERFORMED_HEADER, "true")
+            .body(Body::new(String::new()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_send_via_tip_requires_tip_and_ignores_subscription_id() {
+        let response = call_inner(rpc_request(SEND_VIA_TIP_PATH)).await;
+        let extensions = response.extensions();
+
+        assert!(extensions.get::<TipRequired>().is_some());
+        assert!(extensions.get::<SimulationPerformed>().is_some());
+        assert!(extensions.get::<XRequestId>().is_some());
+        assert!(extensions.get::<XSubscriptionId>().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_json_rpc_keeps_client_ids_without_tip() {
+        let response = call_inner(rpc_request("/")).await;
+        let extensions = response.extensions();
+
+        assert!(extensions.get::<TipRequired>().is_none());
+        assert!(extensions.get::<XRequestId>().is_some());
+        assert!(extensions.get::<XSubscriptionId>().is_some());
     }
 
     #[test]

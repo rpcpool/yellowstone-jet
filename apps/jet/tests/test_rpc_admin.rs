@@ -11,7 +11,10 @@ use {
         time::Duration,
     },
     testkit::generate_random_local_addr,
-    yellowstone_jet::rpc::admin::{AdminServer, JetIdentityUpdater, RpcClient, TpuActivityTracker},
+    yellowstone_jet::{
+        rpc::admin::{AdminServer, JetIdentityUpdater, RpcClient, TpuActivityTracker},
+        tip::MinTipLamports,
+    },
     yellowstone_jet_tpu_client::identity::HardenedKeypair,
 };
 #[cfg(test)]
@@ -69,6 +72,7 @@ pub async fn set_identity_if_expected() {
         Some(expected_identity.pubkey()),
         mock_cluster_info,
         Arc::new(TpuActivityTracker::default()),
+        Arc::new(MinTipLamports::default()),
     )
     .await;
 
@@ -112,6 +116,7 @@ pub async fn set_identity_wrong_keypair() {
         Some(expected_identity.pubkey()),
         mock_cluster_info,
         Arc::new(TpuActivityTracker::default()),
+        Arc::new(MinTipLamports::default()),
     )
     .await;
 
@@ -150,6 +155,7 @@ pub async fn set_identity_from_file() {
         Some(expected_identity.pubkey()),
         mock_cluster_info,
         Arc::new(TpuActivityTracker::default()),
+        Arc::new(MinTipLamports::default()),
     )
     .await;
 
@@ -193,6 +199,7 @@ pub async fn reset_identity_to_random() {
         Some(expected_identity.pubkey()),
         mock_cluster_info,
         Arc::new(TpuActivityTracker::default()),
+        Arc::new(MinTipLamports::default()),
     )
     .await;
 
@@ -244,6 +251,7 @@ pub async fn test_get_latest_slot() {
         None,
         Arc::new(mock_cluster_info),
         Arc::new(TpuActivityTracker::default()),
+        Arc::new(MinTipLamports::default()),
     )
     .await;
 
@@ -296,6 +304,7 @@ pub async fn test_get_latest_slot_updates() {
         None,
         updatable_mock,
         Arc::new(TpuActivityTracker::default()),
+        Arc::new(MinTipLamports::default()),
     )
     .await;
 
@@ -320,6 +329,53 @@ pub async fn test_get_latest_slot_updates() {
         .await
         .expect("Error getting latest slot");
     assert_eq!(latest_slot, updated_slot);
+
+    rpc_admin.shutdown();
+}
+
+#[tokio::test]
+pub async fn set_min_tip_lamports_updates_shared_value() {
+    let rpc_addr = generate_random_local_addr();
+    let jet_identity_updater = NullJetIdentityUpdater {
+        current: Arc::new(RwLock::new(Keypair::new().pubkey())),
+    };
+    let min_tip_lamports = Arc::new(MinTipLamports::new(10_000));
+
+    let rpc_admin = AdminServer::new(
+        rpc_addr,
+        jet_identity_updater,
+        None,
+        Arc::new(MockClusterTpuInfo::default()),
+        Arc::new(TpuActivityTracker::default()),
+        Arc::clone(&min_tip_lamports),
+    )
+    .await;
+
+    let client = HttpClientBuilder::default()
+        .build(format!("http://{rpc_addr}"))
+        .expect("Error build rpc client");
+
+    assert_eq!(
+        client
+            .get_min_tip_lamports()
+            .await
+            .expect("Error getting min tip lamports"),
+        10_000
+    );
+
+    client
+        .set_min_tip_lamports(1_000_000)
+        .await
+        .expect("Error setting min tip lamports");
+
+    assert_eq!(min_tip_lamports.get(), 1_000_000);
+    assert_eq!(
+        client
+            .get_min_tip_lamports()
+            .await
+            .expect("Error getting min tip lamports"),
+        1_000_000
+    );
 
     rpc_admin.shutdown();
 }
