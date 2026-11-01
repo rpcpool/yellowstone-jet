@@ -17,6 +17,7 @@ The minor version will be incremented upon a breaking change and the patch versi
 - Removed `proxy_preflight_check`. Transactions with `skip_preflight: false` are now rejected with an error.
 - `TransactionHandler` no longer needs an RPC client.
 - Proto field `TransactionConfig.skip_sanitize` (field 2) is now reserved.
+- `tpu_port` now defaults to `normal` instead of `forwards`. Agave 4.3 with Alpenglow drops forwards-port packets that reach a leader before its block starts. Set `tpu_port: forwards` to keep the old behavior.
 
 ## [14.9.1]
 
