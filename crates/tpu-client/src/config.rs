@@ -18,13 +18,13 @@ use {
 #[serde(rename_all = "lowercase")]
 pub enum TpuPortKind {
     ///
-    /// Use the normal TPU port for QUIC connections.
-    ///
-    Normal,
-    ///
-    /// (Preferred) Use the forwards TPU port for QUIC connections.
+    /// (Default) Use the normal TPU port for QUIC connections.
     ///
     #[default]
+    Normal,
+    ///
+    /// Use the forwards TPU port. Agave 4.3 with Alpenglow drops these packets before the leader's block starts.
+    ///
     Forwards,
 }
 
@@ -136,7 +136,7 @@ pub struct TpuSenderConfig {
     pub connecting_timeout: Duration,
 
     ///
-    /// Which TPU port to use for QUIC connections, default is "forwards".
+    /// Which TPU port to use for QUIC connections, default is "normal".
     ///
     #[serde(default = "TpuSenderConfig::default_tpu_port_kind")]
     pub tpu_port: TpuPortKind,
@@ -312,7 +312,7 @@ impl TpuSenderConfig {
     }
 
     pub const fn default_tpu_port_kind() -> TpuPortKind {
-        TpuPortKind::Forwards
+        TpuPortKind::Normal
     }
 
     pub const fn default_port_range() -> PortRange {
@@ -397,18 +397,25 @@ pub mod test {
     }
 
     #[test]
+    fn it_should_default_tpu_port_to_normal() {
+        let config: super::TpuSenderConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config.tpu_port, TpuPortKind::Normal);
+        assert_eq!(TpuSenderConfig::default().tpu_port, TpuPortKind::Normal);
+    }
+
+    #[test]
     fn it_should_supports_legacy_jet_field_name() {
         let yaml = r#"
         endpoint_count: 3
         send_retry_count: 5
         connection_prediction_lookahead: 7
-        tpu_port: normal
+        tpu_port: forwards
         "#;
         let expected = TpuSenderConfig {
             num_endpoints: NonZeroUsize::new(3).unwrap(),
             max_send_attempt: NonZeroUsize::new(5).unwrap(),
             leader_prediction_lookahead: NonZeroUsize::new(7),
-            tpu_port: TpuPortKind::Normal,
+            tpu_port: TpuPortKind::Forwards,
             ..TpuSenderConfig::default()
         };
 

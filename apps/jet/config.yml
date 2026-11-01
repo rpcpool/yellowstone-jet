@@ -97,8 +97,8 @@ quic:
   # How far in the leader schedule from current slot should we pre-emptively warm-up connections.
   # default is none, we recommend 10
   connection_prediction_lookahead: 10
-  # Kind of Quic port: `normal` or `forwards`
-  tpu_port: forwards
+  # Kind of Quic port: `normal` (default) or `forwards`
+  tpu_port: normal
   # Quic handshake timeout ~ timeout to connect to a remote peer.
   # Default is `solana_sdk::quic::QUIC_CONNECTION_HANDSHAKE_TIMEOUT` -- 2s
   # we recommend 4s, or 6-8s if you are geographically localted APAC (Asia-Pacific)
@@ -131,7 +131,7 @@ quic:
 #   endpoint_count: 1024
 #   send_retry_count: 1
 #   connection_handshake_timeout: 4s
-#   tpu_port: forwards
+#   tpu_port: normal
 #   endpoint_port_range:
 #     start: 35000
 #     end: 45000
