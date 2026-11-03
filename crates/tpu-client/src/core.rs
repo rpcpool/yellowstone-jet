@@ -53,8 +53,8 @@ use {
     derive_more::Display,
     futures::task::AtomicWaker,
     quinn::{
-        ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, TransportConfig, VarInt,
-        WriteError,
+        ApplicationClose, ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout,
+        TransportConfig, VarInt, WriteError,
     },
     rustls::{NamedGroup, crypto::CryptoProvider},
     solana_clock::DEFAULT_MS_PER_SLOT,
@@ -84,6 +84,32 @@ use {
 
 /// This has been copy-pasted from `solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID`
 pub const ALPN_TPU_PROTOCOL_ID: &[u8] = b"solana-tpu";
+
+/// Application close code solana-streamer's QUIC server uses when it closes a connection
+/// because our IP address is being throttled (too many connections opened in the last
+/// throttling window). Copy-pasted from
+/// `solana_streamer::nonblocking::quic::CONNECTION_CLOSE_CODE_DISALLOWED`.
+const CONNECTION_CLOSE_CODE_DISALLOWED: u32 = 2;
+
+/// Application close reason paired with [`CONNECTION_CLOSE_CODE_DISALLOWED`]. Copy-pasted
+/// from `solana_streamer::nonblocking::quic::CONNECTION_CLOSE_REASON_DISALLOWED`.
+const CONNECTION_CLOSE_REASON_DISALLOWED: &[u8] = b"disallowed";
+
+/// How long a remote peer throttles connections from our IP address for, once it closes a
+/// connection with the "disallowed" reason. See
+/// <https://github.com/rpcpool/yellowstone-jet/issues/127>.
+pub const DISALLOWED_THROTTLE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Returns `true` if `err` is the QUIC application close solana-streamer sends when
+/// throttling connections from our IP address (see [`CONNECTION_CLOSE_CODE_DISALLOWED`]).
+fn is_disallowed_close(err: &ConnectionError) -> bool {
+    matches!(
+        err,
+        ConnectionError::ApplicationClosed(ApplicationClose { error_code, reason })
+            if *error_code == VarInt::from_u32(CONNECTION_CLOSE_CODE_DISALLOWED)
+                && reason.as_ref() == CONNECTION_CLOSE_REASON_DISALLOWED
+    )
+}
 
 /// Solana's max transaction wire size, as raised to `4096` bytes by SIMD-0296. See
 /// `accept_tx`'s size check, which rejects anything larger than this (unless
@@ -410,6 +436,12 @@ pub(crate) struct TpuSenderDriver<CB> {
     /// Set of unused connections (no tx worker associated).
     ///
     orphan_connection_set: OrphanConnectionSet,
+
+    ///
+    /// Remote peer addresses currently throttling our connections, mapped to when the
+    /// throttling window ends. See [`DISALLOWED_THROTTLE_WINDOW`].
+    ///
+    disallowed_remote_peer_addrs: HashMap<SocketAddr, Instant>,
 }
 
 #[derive(Default)]
@@ -918,6 +950,12 @@ pub enum TxDropReason {
     ///
     #[display("driver QUIC identity changed")]
     DriverIdentityChanged,
+    ///
+    /// The remote peer closed the connection to throttle our IP address. We won't retry
+    /// connecting to it until the throttling window elapses.
+    ///
+    #[display("disallowed by remote peer")]
+    DisallowedByPeer,
 }
 
 impl TxDropReason {
@@ -929,6 +967,7 @@ impl TxDropReason {
             TxDropReason::RemotePeerBeingEvicted => "remote-conn-peer-being-evicted",
             TxDropReason::InvalidPacketSize => "invalid-packet-size",
             TxDropReason::DriverIdentityChanged => "quic-driver-identity-changed",
+            TxDropReason::DisallowedByPeer => "disallowed-by-peer",
         }
     }
 }
@@ -1868,6 +1907,16 @@ where
             return;
         };
 
+        if self.is_remote_peer_addr_disallowed(&remote_peer_addr) {
+            tracing::debug!(
+                "Skipping connection attempt to remote peer: {} at address: {} since it is within the disallow throttle window",
+                remote_peer_identity,
+                remote_peer_addr
+            );
+            self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DisallowedByPeer);
+            return;
+        }
+
         if self
             .pending_connection_eviction_set
             .contains_socket_addr(&remote_peer_addr)
@@ -2023,6 +2072,35 @@ where
             prom::inc_quic_gw_unreachable_peer_count(remote_peer_identity);
         }
         self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::RemotePeerUnreachable);
+    }
+
+    ///
+    /// Returns `true` if `remote_peer_addr` is still within its "disallowed" throttle window,
+    /// i.e. the remote peer recently closed a connection to throttle our IP address and
+    /// [`DISALLOWED_THROTTLE_WINDOW`] has not elapsed yet.
+    ///
+    /// Lazily evicts the entry once the throttle window has elapsed.
+    ///
+    fn is_remote_peer_addr_disallowed(&mut self, remote_peer_addr: &SocketAddr) -> bool {
+        match self.disallowed_remote_peer_addrs.get(remote_peer_addr) {
+            Some(until) if *until > Instant::now() => true,
+            Some(_) => {
+                self.disallowed_remote_peer_addrs.remove(remote_peer_addr);
+                false
+            }
+            None => false,
+        }
+    }
+
+    ///
+    /// Remembers that `remote_peer_addr` disallowed our connection, starting a
+    /// [`DISALLOWED_THROTTLE_WINDOW`] during which we won't attempt to reconnect to it.
+    ///
+    fn mark_remote_peer_addr_disallowed(&mut self, remote_peer_addr: SocketAddr) {
+        self.disallowed_remote_peer_addrs.insert(
+            remote_peer_addr,
+            Instant::now() + DISALLOWED_THROTTLE_WINDOW,
+        );
     }
 
     fn has_connection_capacity(&self) -> bool {
@@ -2317,6 +2395,24 @@ where
                                 panic!(
                                     "Endpoint is stopping, cannot connect to remote peer: {multiplexed_remote_peer_identity_vec:?}, with identity: {current_client_identity}"
                                 );
+                            }
+                            ConnectingError::ConnectionError(ref conn_err)
+                                if is_disallowed_close(conn_err) =>
+                            {
+                                // The remote peer closed the connection to throttle our IP
+                                // address. Retrying immediately would just get throttled again,
+                                // so we give up on this burst of attempts and remember the
+                                // remote peer address for the duration of the throttling window.
+                                tracing::warn!(
+                                    "Remote peer: {multiplexed_remote_peer_identity_vec:?} disallowed our connection attempt (throttled), not retrying for {DISALLOWED_THROTTLE_WINDOW:?}",
+                                );
+                                self.mark_remote_peer_addr_disallowed(remote_peer_address);
+                                for remote_peer_identity in multiplexed_remote_peer_identity_vec {
+                                    self.drop_peer_queued_tx(
+                                        remote_peer_identity,
+                                        TxDropReason::DisallowedByPeer,
+                                    );
+                                }
                             }
                             ConnectingError::ConnectionError(_)
                                 if connection_attempt < self.config.max_connection_attempts =>
@@ -2635,6 +2731,7 @@ where
                     .tx_worker_handle_map
                     .remove(&remote_peer_identity)
                     .expect("tx worker sender");
+                let worker_remote_peer_addr = worker_tx.remote_peer_addr;
 
                 if let Some(active_conn) = self.connection_map.get_mut(&worker_tx.remote_peer_addr)
                 {
@@ -2673,6 +2770,10 @@ where
                     tx_to_rescue.push_back((tx, attempt));
                 }
 
+                let is_disallowed_by_peer = worker_completed.err.as_ref().is_some_and(|e| {
+                    matches!(e, TxSenderWorkerError::ConnectionLost(err) if is_disallowed_close(err))
+                });
+
                 let is_peer_unreachable = worker_completed
                     .err
                     .filter(|e| {
@@ -2692,7 +2793,13 @@ where
                     prom::incr_quic_gw_connection_close_cnt();
                 }
 
-                if is_peer_unreachable {
+                if is_disallowed_by_peer {
+                    // The remote peer closed the connection to throttle our IP address.
+                    // Don't reconnect for the duration of the throttling window, even though
+                    // there might be queued transactions left to rescue.
+                    self.mark_remote_peer_addr_disallowed(worker_remote_peer_addr);
+                    self.drop_peer_queued_tx(remote_peer_identity, TxDropReason::DisallowedByPeer);
+                } else if is_peer_unreachable {
                     // If the peer is unreachable, we drop all queued transactions for it.
                     self.unreachable_peer(remote_peer_identity);
                 } else if is_being_evicted {
@@ -3549,6 +3656,7 @@ impl TpuSenderDriverSpawner {
             pending_connection_eviction_set: Default::default(),
             active_staked_sorted_remote_peer_addr: Default::default(),
             orphan_connection_set: Default::default(),
+            disallowed_remote_peer_addrs: Default::default(),
         };
 
         let jh = driver_rt.spawn(driver.run());

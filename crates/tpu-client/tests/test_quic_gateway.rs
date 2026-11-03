@@ -444,6 +444,142 @@ async fn gateway_should_handle_connection_refused_by_peer() {
 }
 
 #[tokio::test]
+async fn gateway_should_stop_retrying_when_disallowed_by_peer() {
+    // Mirrors the QUIC application close solana-streamer's QUIC server sends when it
+    // throttles connections from our IP address. See
+    // `solana_streamer::nonblocking::quic::{CONNECTION_CLOSE_CODE_DISALLOWED, CONNECTION_CLOSE_REASON_DISALLOWED}`.
+    const CONNECTION_CLOSE_CODE_DISALLOWED: u32 = 2;
+    const CONNECTION_CLOSE_REASON_DISALLOWED: &[u8] = b"disallowed";
+
+    let rx_server_addr = generate_random_local_addr();
+    let rx_server_identity = Keypair::new();
+
+    let gateway_kp = Keypair::new();
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let fake_tpu_info_service =
+        FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+
+    let gateway_spawner = TpuSenderDriverSpawner {
+        stake_info_map: Arc::new(stake_info_map.clone()),
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        driver_tx_channel_capacity: 100,
+    };
+    let gateway_config = TpuSenderConfig {
+        max_connection_attempts: 1,
+        // Evict the connection from the active connection map quickly once it has no more
+        // workers attached, so that the second transaction below is forced through a fresh
+        // connection attempt instead of reusing the (already dead) connection object. That's
+        // the only way to prove the gateway doesn't just attempt to reconnect.
+        orphan_connection_ttl: Duration::from_millis(20),
+        ..Default::default()
+    };
+    let (rx_server_endpoint, _) = build_random_endpoint(rx_server_addr);
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        driver_join_handle: _,
+    } = gateway_spawner.spawn(
+        tpu_identity(&gateway_kp),
+        gateway_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
+    );
+
+    // Accept the connection fully, then immediately close it with the "disallowed" reason,
+    // simulating a remote peer throttling connections from our IP address. Only one accept
+    // is expected: a second connection attempt during the throttle window would mean the
+    // gateway didn't suppress the retry.
+    let rx_server_handle = tokio::spawn(async move {
+        let incoming = rx_server_endpoint.accept().await.expect("accept");
+        let conn = incoming.await.expect("handshake");
+        conn.close(
+            VarInt::from_u32(CONNECTION_CLOSE_CODE_DISALLOWED),
+            CONNECTION_CLOSE_REASON_DISALLOWED,
+        );
+        rx_server_endpoint
+    });
+
+    let tx_sig = Signature::new_unique();
+    let txn_info = TpuSenderTxnInfo::new(tx_sig);
+    let txn = TpuSenderTxn::from_owned(
+        rx_server_identity.pubkey(),
+        "helloworld".as_bytes().to_vec(),
+        Some(txn_info),
+    );
+    transaction_sink.send(txn).await.expect("send tx");
+
+    // The transaction itself is written to the QUIC stream buffer successfully (the local
+    // write doesn't need to wait for the peer), so it is reported as sent even though the
+    // connection is about to be closed by the peer.
+    let resp = callback_rx.recv().await.expect("recv response");
+    let TpuSenderResponse::TxSent(actual_sent) = resp else {
+        panic!("Expected TpuSenderResponse::TxSent, got something {resp:?}");
+    };
+    assert_eq!(
+        actual_sent.remote_peer_identity,
+        rx_server_identity.pubkey()
+    );
+
+    // The worker then observes the connection closing with the "disallowed" reason and
+    // reports it via TxDropReason::DisallowedByPeer.
+    let resp = callback_rx.recv().await.expect("recv response");
+    let TpuSenderResponse::TxDrop(actual_resp) = resp else {
+        panic!("Expected TpuSenderResponse::TxDrop, got something {resp:?}");
+    };
+    assert!(matches!(
+        actual_resp.drop_reason,
+        TxDropReason::DisallowedByPeer
+    ));
+    assert_eq!(
+        actual_resp.remote_peer_identity,
+        rx_server_identity.pubkey()
+    );
+
+    // Give the driver loop a chance to evict the now-workerless connection from its active
+    // connection map (see `orphan_connection_ttl` above), so the next transaction is forced
+    // through a brand new connection attempt rather than reusing the dead connection object.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The gateway should still remember the remote peer address is throttled: a second
+    // transaction should be dropped immediately with the same reason, without attempting a
+    // new connection (which the test server above is not listening for anymore, and which
+    // would otherwise take up to `connecting_timeout` to time out).
+    let tx_sig_2 = Signature::new_unique();
+    let txn_info_2 = TpuSenderTxnInfo::new(tx_sig_2);
+    let txn_2 = TpuSenderTxn::from_owned(
+        rx_server_identity.pubkey(),
+        "helloworld2".as_bytes().to_vec(),
+        Some(txn_info_2),
+    );
+    transaction_sink.send(txn_2).await.expect("send tx 2");
+
+    let resp_2 = tokio::time::timeout(Duration::from_secs(1), callback_rx.recv())
+        .await
+        .expect("second tx should be dropped immediately, not retried")
+        .expect("recv response");
+    let TpuSenderResponse::TxDrop(mut actual_resp_2) = resp_2 else {
+        panic!("Expected TpuSenderResponse::TxDrop, got something {resp_2:?}");
+    };
+    assert!(matches!(
+        actual_resp_2.drop_reason,
+        TxDropReason::DisallowedByPeer
+    ));
+    let (actual_txn_2, _curr_attempt) = actual_resp_2.dropped_tx_vec.pop_front().unwrap();
+    let actual_sig_2 = actual_txn_2
+        .info
+        .as_ref()
+        .unwrap()
+        .downcast_ref::<Signature>()
+        .copied()
+        .expect("downcast_ref::<Signature>");
+    assert_eq!(actual_sig_2, tx_sig_2);
+
+    let _rx_server_endpoint = rx_server_handle.await.expect("server task");
+}
+
+#[tokio::test]
 async fn it_should_update_gatway_identity() {
     let rx_server_addr = generate_random_local_addr();
     let rx_server_identity = Keypair::new();
