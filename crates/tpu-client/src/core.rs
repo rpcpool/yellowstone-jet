@@ -1875,6 +1875,23 @@ where
             return;
         }
 
+        if let Some(active_conn) = self.connection_map.get(&remote_peer_addr)
+            && let Some(close_reason) = active_conn.conn.close_reason()
+        {
+            let closed_version = active_conn.connection_version;
+            tracing::debug!(
+                "Dropping closed connection to remote peer address: {} (version {}): {}",
+                remote_peer_addr,
+                closed_version,
+                close_reason
+            );
+            self.connection_map.remove(&remote_peer_addr);
+            self.orphan_connection_set
+                .remove(&remote_peer_addr, closed_version);
+            self.active_staked_sorted_remote_peer_addr
+                .remove(&remote_peer_addr);
+        }
+
         if self.connection_map.contains_key(&remote_peer_addr) {
             // We already have an active connection for the remote peer address
             tracing::debug!(
@@ -2554,7 +2571,8 @@ where
         remote_peer_addr: SocketAddr,
         remote_peer_identity: Pubkey,
         expected_connection_version: u64,
-    ) {
+    ) -> bool {
+        let mut dropped_closed_connection = false;
         if let Some(active_conn) = self.connection_map.get_mut(&remote_peer_addr) {
             if active_conn.connection_version != expected_connection_version {
                 // This means the connection has been re-established since the worker was created.
@@ -2566,7 +2584,7 @@ where
                     expected_connection_version,
                     active_conn.connection_version,
                 );
-                return;
+                return false;
             }
             active_conn
                 .multiplexed_remote_peer_identity_with_stake
@@ -2582,6 +2600,7 @@ where
             let has_no_worker = active_conn
                 .multiplexed_remote_peer_identity_with_stake
                 .is_empty();
+            let is_closed = active_conn.conn.close_reason().is_some();
 
             let new_stake_for_addr: u64 = active_conn
                 .multiplexed_remote_peer_identity_with_stake
@@ -2599,6 +2618,12 @@ where
                     self.unblock_eviction_waiting_connection();
                     self.active_staked_sorted_remote_peer_addr
                         .remove(&remote_peer_addr);
+                } else if is_closed {
+                    // agave's TPU closes a peer's connection over its connection limit (`too_many`)
+                    self.connection_map.remove(&remote_peer_addr);
+                    self.active_staked_sorted_remote_peer_addr
+                        .remove(&remote_peer_addr);
+                    dropped_closed_connection = true;
                 } else {
                     let orphan_conn_info = OrphanConnectionInfo {
                         remote_peer_addr,
@@ -2609,6 +2634,7 @@ where
                 }
             }
         }
+        dropped_closed_connection
     }
 
     ///
@@ -2636,21 +2662,11 @@ where
                     .remove(&remote_peer_identity)
                     .expect("tx worker sender");
 
-                if let Some(active_conn) = self.connection_map.get_mut(&worker_tx.remote_peer_addr)
-                {
-                    let active_conn_version = active_conn.connection_version;
-                    let worker_conn_version = worker_tx.connection_version;
-                    assert!(
-                        active_conn_version == worker_conn_version,
-                        "Connection version mismatch for remote peer: {remote_peer_identity}, active: {active_conn_version}, worker: {worker_conn_version}",
-                    );
-
-                    self.remove_worker_from_active_connection(
-                        worker_tx.remote_peer_addr,
-                        remote_peer_identity,
-                        worker_conn_version,
-                    );
-                }
+                let dropped_closed_connection = self.remove_worker_from_active_connection(
+                    worker_tx.remote_peer_addr,
+                    remote_peer_identity,
+                    worker_tx.connection_version,
+                );
                 self.last_peer_activity.remove(&remote_peer_identity);
                 drop(worker_tx);
 
@@ -2692,6 +2708,7 @@ where
                     prom::incr_quic_gw_connection_close_cnt();
                 }
 
+                let mut rescue_spawned = false;
                 if is_peer_unreachable {
                     // If the peer is unreachable, we drop all queued transactions for it.
                     self.unreachable_peer(remote_peer_identity);
@@ -2722,8 +2739,12 @@ where
                     self.last_peer_activity
                         .insert(remote_peer_identity, Instant::now());
                     self.spawn_connecting(remote_peer_identity, 1, SpawnSource::Rescue);
+                    rescue_spawned = true;
                 } else {
                     // Worker returned without error, no work to do, all done.
+                }
+                if dropped_closed_connection && !rescue_spawned {
+                    self.unblock_eviction_waiting_connection();
                 }
             }
             Err(join_err) => {

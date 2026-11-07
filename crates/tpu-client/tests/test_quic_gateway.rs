@@ -1362,3 +1362,330 @@ async fn it_should_support_multiplexed_connection() {
         "Eviction strategy should be called at least once"
     );
 }
+
+fn spawn_connection_closing_server(
+    endpoint: quinn::Endpoint,
+    close_after_txns: usize,
+    close_trigger: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> (
+    mpsc::UnboundedReceiver<(usize, Vec<u8>)>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    // agave's TPU closes a connection over the peer's limit with `ApplicationClose(4, "too_many")`.
+    let (txn_tx, txn_rx) = mpsc::unbounded_channel();
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let conn = endpoint
+            .accept()
+            .await
+            .expect("accept")
+            .await
+            .expect("quinn connection");
+        for _ in 0..close_after_txns {
+            let mut rx = conn.accept_uni().await.expect("accept uni");
+            let data = rx.read_to_end(PACKET_DATA_SIZE).await.expect("read");
+            let _ = txn_tx.send((0, data));
+        }
+        if let Some(close_trigger) = close_trigger {
+            close_trigger.await.expect("close trigger");
+        }
+        conn.close(VarInt::from_u32(4), b"too_many");
+        let _ = closed_tx.send(());
+        let mut connection_index = 0;
+        while let Some(incoming) = endpoint.accept().await {
+            let Ok(conn) = incoming.await else {
+                continue;
+            };
+            connection_index += 1;
+            let txn_tx = txn_tx.clone();
+            tokio::spawn(async move {
+                while let Ok(mut rx) = conn.accept_uni().await {
+                    let Ok(data) = rx.read_to_end(PACKET_DATA_SIZE).await else {
+                        break;
+                    };
+                    let _ = txn_tx.send((connection_index, data));
+                }
+            });
+        }
+    });
+    (txn_rx, closed_rx)
+}
+
+async fn expect_tx_sent(
+    callback_rx: &mut mpsc::UnboundedReceiver<TpuSenderResponse>,
+) -> TpuSenderTxnInfo {
+    let resp = tokio::time::timeout(Duration::from_secs(10), callback_rx.recv())
+        .await
+        .expect("response within 10s")
+        .expect("driver still running");
+    let TpuSenderResponse::TxSent(sent) = resp else {
+        panic!("Expected TpuSenderResponse::TxSent, got {resp:?}");
+    };
+    sent.info.expect("txn info")
+}
+
+#[tokio::test]
+async fn it_should_reconnect_after_remote_peer_closed_the_connection() {
+    let rx_server_addr = generate_random_local_addr();
+    let rx_server_identity = Keypair::new();
+
+    let gateway_kp = Keypair::new();
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let fake_tpu_info_service =
+        FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+
+    let gateway_spawner = TpuSenderDriverSpawner {
+        stake_info_map: Arc::new(stake_info_map.clone()),
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        driver_tx_channel_capacity: 100,
+    };
+    let gateway_config = TpuSenderConfig {
+        max_send_attempt: NonZeroUsize::new(2).unwrap(),
+        orphan_connection_ttl: Duration::from_secs(60),
+        ..Default::default()
+    };
+    let rx_server_endpoint = build_validator_quic_tpu_endpoint(&rx_server_identity, rx_server_addr);
+    let (mut server_txn_rx, first_conn_closed_rx) =
+        spawn_connection_closing_server(rx_server_endpoint, 1, None);
+
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        driver_join_handle: _,
+    } = gateway_spawner.spawn(
+        tpu_identity(&gateway_kp),
+        gateway_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
+    );
+
+    let tx1_sig = Signature::new_unique();
+    transaction_sink
+        .send(TpuSenderTxn::from_owned(
+            rx_server_identity.pubkey(),
+            b"tx1".to_vec(),
+            Some(TpuSenderTxnInfo::new(tx1_sig)),
+        ))
+        .await
+        .expect("send tx1");
+    assert_eq!(
+        signature_from_txn_info(Some(expect_tx_sent(&mut callback_rx).await)),
+        tx1_sig
+    );
+    first_conn_closed_rx
+        .await
+        .expect("server closed the first connection");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let tx2_sig = Signature::new_unique();
+    transaction_sink
+        .send(TpuSenderTxn::from_owned(
+            rx_server_identity.pubkey(),
+            b"tx2".to_vec(),
+            Some(TpuSenderTxnInfo::new(tx2_sig)),
+        ))
+        .await
+        .expect("send tx2");
+    assert_eq!(
+        signature_from_txn_info(Some(expect_tx_sent(&mut callback_rx).await)),
+        tx2_sig
+    );
+
+    let mut received = vec![];
+    while received.len() < 2 {
+        let txn = tokio::time::timeout(Duration::from_secs(10), server_txn_rx.recv())
+            .await
+            .expect("server received the transaction")
+            .expect("server running");
+        received.push(txn);
+    }
+    assert_eq!(received[0], (0, b"tx1".to_vec()));
+    assert_eq!(
+        received[1],
+        (1, b"tx2".to_vec()),
+        "tx2 must arrive on a new connection"
+    );
+}
+
+#[tokio::test]
+async fn it_should_reconnect_multiplexed_peers_after_the_shared_connection_closed() {
+    let rx_server_addr = generate_random_local_addr();
+    let shared_cert_identity = Keypair::new();
+    let remote_peer_identity1 = Keypair::new();
+    let remote_peer_identity2 = Keypair::new();
+
+    let gateway_kp = Keypair::new();
+    let stake_info_map = MockStakeInfoMap::constant([
+        (gateway_kp.pubkey(), 1000),
+        (remote_peer_identity1.pubkey(), 1000),
+        (remote_peer_identity2.pubkey(), 1000),
+    ]);
+    let fake_tpu_info_service = FakeLeaderTpuInfoService::from_iter([
+        (remote_peer_identity1.pubkey(), rx_server_addr),
+        (remote_peer_identity2.pubkey(), rx_server_addr),
+    ]);
+
+    let gateway_spawner = TpuSenderDriverSpawner {
+        stake_info_map: Arc::new(stake_info_map.clone()),
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        driver_tx_channel_capacity: 100,
+    };
+    let gateway_config = TpuSenderConfig {
+        max_send_attempt: NonZeroUsize::new(2).unwrap(),
+        orphan_connection_ttl: Duration::from_secs(60),
+        ..Default::default()
+    };
+    let rx_server_endpoint =
+        build_validator_quic_tpu_endpoint(&shared_cert_identity, rx_server_addr);
+    let (mut server_txn_rx, first_conn_closed_rx) =
+        spawn_connection_closing_server(rx_server_endpoint, 2, None);
+
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        driver_join_handle: _,
+    } = gateway_spawner.spawn(
+        tpu_identity(&gateway_kp),
+        gateway_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
+    );
+
+    let peers = [
+        remote_peer_identity1.pubkey(),
+        remote_peer_identity2.pubkey(),
+    ];
+    for (peer, payload) in peers.iter().zip([b"a1", b"a2"]) {
+        transaction_sink
+            .send(TpuSenderTxn::from_owned(
+                *peer,
+                payload.to_vec(),
+                Some(TpuSenderTxnInfo::new(Signature::new_unique())),
+            ))
+            .await
+            .expect("send");
+    }
+    for _ in 0..2 {
+        expect_tx_sent(&mut callback_rx).await;
+    }
+    first_conn_closed_rx
+        .await
+        .expect("server closed the shared connection");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    for (peer, payload) in peers.iter().zip([b"b1", b"b2"]) {
+        transaction_sink
+            .send(TpuSenderTxn::from_owned(
+                *peer,
+                payload.to_vec(),
+                Some(TpuSenderTxnInfo::new(Signature::new_unique())),
+            ))
+            .await
+            .expect("send");
+    }
+    for _ in 0..2 {
+        expect_tx_sent(&mut callback_rx).await;
+    }
+
+    let mut after_close = vec![];
+    while after_close.len() < 2 {
+        let (connection_index, data) =
+            tokio::time::timeout(Duration::from_secs(10), server_txn_rx.recv())
+                .await
+                .expect("server received the transaction")
+                .expect("server running");
+        if connection_index > 0 {
+            after_close.push(data);
+        }
+    }
+    after_close.sort_unstable();
+    assert_eq!(after_close, vec![b"b1".to_vec(), b"b2".to_vec()]);
+}
+
+#[tokio::test]
+async fn it_should_not_reuse_an_idle_connection_the_peer_closed() {
+    let rx_server_addr = generate_random_local_addr();
+    let rx_server_identity = Keypair::new();
+
+    let gateway_kp = Keypair::new();
+    let stake_info_map = MockStakeInfoMap::constant([(gateway_kp.pubkey(), 1000)]);
+    let fake_tpu_info_service =
+        FakeLeaderTpuInfoService::from_iter([(rx_server_identity.pubkey(), rx_server_addr)]);
+
+    let gateway_spawner = TpuSenderDriverSpawner {
+        stake_info_map: Arc::new(stake_info_map.clone()),
+        leader_tpu_info_service: Arc::new(fake_tpu_info_service.clone()),
+        driver_tx_channel_capacity: 100,
+    };
+    let gateway_config = TpuSenderConfig {
+        max_send_attempt: NonZeroUsize::new(1).unwrap(),
+        orphan_connection_ttl: Duration::from_secs(120),
+        ..Default::default()
+    };
+    let rx_server_endpoint = build_validator_quic_tpu_endpoint(&rx_server_identity, rx_server_addr);
+    let (close_trigger_tx, close_trigger_rx) = tokio::sync::oneshot::channel();
+    let (mut server_txn_rx, first_conn_closed_rx) =
+        spawn_connection_closing_server(rx_server_endpoint, 1, Some(close_trigger_rx));
+
+    let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+    let TpuSenderSessionContext {
+        identity_updater: _,
+        driver_tx_sink: transaction_sink,
+        driver_join_handle: _,
+    } = gateway_spawner.spawn(
+        tpu_identity(&gateway_kp),
+        gateway_config,
+        Arc::new(StakeBasedEvictionStrategy::default()),
+        Arc::new(IgnorantLeaderPredictor),
+        Some(callback_tx),
+    );
+
+    transaction_sink
+        .send(TpuSenderTxn::from_owned(
+            rx_server_identity.pubkey(),
+            b"tx1".to_vec(),
+            Some(TpuSenderTxnInfo::new(Signature::new_unique())),
+        ))
+        .await
+        .expect("send tx1");
+    expect_tx_sent(&mut callback_rx).await;
+
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    close_trigger_tx.send(()).expect("trigger close");
+    first_conn_closed_rx
+        .await
+        .expect("server closed the idle connection");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let tx2_sig = Signature::new_unique();
+    transaction_sink
+        .send(TpuSenderTxn::from_owned(
+            rx_server_identity.pubkey(),
+            b"tx2".to_vec(),
+            Some(TpuSenderTxnInfo::new(tx2_sig)),
+        ))
+        .await
+        .expect("send tx2");
+    assert_eq!(
+        signature_from_txn_info(Some(expect_tx_sent(&mut callback_rx).await)),
+        tx2_sig
+    );
+
+    let mut received = vec![];
+    while received.len() < 2 {
+        let txn = tokio::time::timeout(Duration::from_secs(10), server_txn_rx.recv())
+            .await
+            .expect("server received the transaction")
+            .expect("server running");
+        received.push(txn);
+    }
+    assert_eq!(
+        received[1],
+        (1, b"tx2".to_vec()),
+        "tx2 must arrive on a new connection"
+    );
+}
