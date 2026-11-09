@@ -235,7 +235,8 @@ impl TpuIdentity {
             .dangerous()
             .with_custom_certificate_verifier(solana_tls_utils::SkipServerVerification::new())
             .with_client_cert_resolver(resolver);
-        crypto.enable_early_data = true;
+        // disable "early data" feature of TLS 1.3 (0-RTT is not supported in agave TPU)
+        crypto.enable_early_data = false;
         crypto.alpn_protocols = vec![ALPN_TPU_PROTOCOL_ID.to_vec()];
 
         let quic_client_config = Arc::new(
