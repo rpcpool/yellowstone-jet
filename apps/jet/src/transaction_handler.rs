@@ -6,7 +6,9 @@ use {
     },
     anyhow::Result,
     bytes::Bytes,
-    jsonrpsee::types::error::{ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE},
+    jsonrpsee::types::error::{
+        ErrorObject, ErrorObjectOwned, INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE,
+    },
     solana_client::rpc_response::RpcVersionInfo,
     solana_rpc_client_api::config::RpcSendTransactionConfig,
     solana_transaction::versioned::VersionedTransaction,
@@ -56,7 +58,15 @@ impl From<ErrorObjectOwned> for TransactionHandlerError {
 
 impl From<TransactionHandlerError> for ErrorObjectOwned {
     fn from(err: TransactionHandlerError) -> Self {
-        ErrorObject::owned(INTERNAL_ERROR_CODE, err.to_string(), None::<()>)
+        // Client-side faults use -32602, as Agave does. Only a server-side failure uses -32603.
+        let code = match err {
+            TransactionHandlerError::SerializationFailed(_) => INTERNAL_ERROR_CODE,
+            TransactionHandlerError::InvalidTransaction(_)
+            | TransactionHandlerError::PreflightNotSupported
+            | TransactionHandlerError::InvalidParams(_)
+            | TransactionHandlerError::UnsupportedEncoding => INVALID_PARAMS_CODE,
+        };
+        ErrorObject::owned(code, err.to_string(), None::<()>)
     }
 }
 
@@ -237,5 +247,42 @@ impl TransactionHandler {
             .map_err(|e| TransactionHandlerError::InvalidTransaction(e.to_string()))?;
 
         Ok((wire_transaction, transaction))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn code(err: TransactionHandlerError) -> i32 {
+        ErrorObjectOwned::from(err).code()
+    }
+
+    #[test]
+    fn client_errors_map_to_invalid_params() {
+        let client_errors = [
+            TransactionHandlerError::InvalidTransaction("index out of bounds".to_owned()),
+            TransactionHandlerError::PreflightNotSupported,
+            TransactionHandlerError::InvalidParams("bad base58".to_owned()),
+            TransactionHandlerError::UnsupportedEncoding,
+        ];
+        for err in client_errors {
+            assert_eq!(code(err), INVALID_PARAMS_CODE);
+        }
+    }
+
+    #[test]
+    fn serialization_failure_maps_to_internal_error() {
+        let err = TransactionHandlerError::SerializationFailed(
+            wincode::WriteError::TagEncodingOverflow("test"),
+        );
+        assert_eq!(code(err), INTERNAL_ERROR_CODE);
+    }
+
+    #[test]
+    fn error_message_is_unchanged() {
+        let err = TransactionHandlerError::InvalidTransaction("index out of bounds".to_owned());
+        let obj = ErrorObjectOwned::from(err);
+        assert_eq!(obj.message(), "invalid transaction: index out of bounds");
     }
 }
