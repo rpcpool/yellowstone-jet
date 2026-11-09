@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "apps/jet", # 14.9.2
-    "apps/jet-txn-landing-elt", # 0.1.0
-    "crates/tpu-client", # 0.3.0
+    "apps/jet",
+    "apps/jet-txn-landing-elt",
+    "crates/tpu-client",
 ]
 exclude = [
     "examples/jet-tpu-sender", # 0.1.0
@@ -116,7 +116,7 @@ wincode = "0.6.0"
 yellowstone-fumarole-client = "0.9.0"
 yellowstone-grpc-client = "15.0.0"
 yellowstone-grpc-proto = "14.0.1"
-yellowstone-jet-tpu-client = { path = "crates/tpu-client", version = "0.8.1", default-features = false }
+yellowstone-jet-tpu-client = { path = "crates/tpu-client", version = "0.8.2", default-features = false }
 yellowstone-shield-store = "0.11.0"
 
 [workspace.lints.clippy]

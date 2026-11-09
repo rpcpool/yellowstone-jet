@@ -1015,6 +1015,12 @@ impl ConnectingTask {
 
             let max_idle_timeout = IdleTimeout::try_from(self.max_idle_timeout)
                 .expect("Failed to set QUIC max idle timeout");
+            res.datagram_receive_buffer_size(None);
+            // The validator can't open any stream to the client, either bidirectional or unidirectional.
+            // The client never sends MAX_STREAMS frames to raise that limit. If the peer opened a stream anyway, that would break the protocol and close the connection with STREAM_LIMIT_ERROR.
+            // Quinn reserves no state for incoming streams: no per-stream receive windows and no slots for incoming streams.
+            res.max_concurrent_bidi_streams(0u32.into());
+            res.max_concurrent_uni_streams(0u32.into());
             res.max_idle_timeout(Some(max_idle_timeout));
             res.keep_alive_interval(Some(QUIC_KEEP_ALIVE));
             // We don't want fairness : https://github.com/quinn-rs/quinn/pull/2002
@@ -1027,7 +1033,6 @@ impl ConnectingTask {
 
         let mut config = ClientConfig::new(Arc::new(self.identity.insecure_clone()));
         config.transport_config(Arc::new(transport_config));
-
         let server_name = socket_addr_to_quic_server_name(remote_peer_addr);
         let connecting = self
             .endpoint
