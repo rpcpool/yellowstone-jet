@@ -18,6 +18,116 @@ The minor version will be incremented upon a breaking change and the patch versi
 - `TransactionHandler` no longer needs an RPC client.
 - Proto field `TransactionConfig.skip_sanitize` (field 2) is now reserved.
 
+## [18.1.1]
+
+Ships `yellowstone-jet-tpu-client` 0.8.2.
+
+### Security
+
+- The TPU client no longer accepts streams or datagrams opened by a validator. It only ever
+  sends, so it now advertises a limit of zero incoming streams and turns off datagrams. A
+  misbehaving peer can no longer make it allocate state for streams it opens
+  [#192](https://github.com/rpcpool/yellowstone-jet/pull/192).
+- The TPU client turns off TLS 1.3 early data (0-RTT), which the agave TPU does not support
+  [#192](https://github.com/rpcpool/yellowstone-jet/pull/192).
+- Bumped `pulldown-cmark` to 0.13.6 for RUSTSEC-2026-0433
+  [#192](https://github.com/rpcpool/yellowstone-jet/pull/192).
+
+### Fixes
+
+- `sendTransaction` now returns `-32602` (invalid params) for client errors: an invalid
+  transaction, `skip_preflight: false`, invalid parameters and an unsupported encoding. This
+  matches Agave. Only a serialization failure still returns `-32603` (internal error). Clients
+  that matched `-32603` for these errors must match `-32602` instead
+  [#191](https://github.com/rpcpool/yellowstone-jet/pull/191).
+- TPU client: a connection the remote peer closed is no longer reused. Before, it stayed
+  cached, and every later send to that peer failed at once (for example with
+  `closed by peer: too_many (code 4)`) until no traffic went to that peer for the orphan
+  connection TTL. Now the closed connection is dropped and the next send opens a new one.
+  This covers any close: agave refusing a connection over its per-peer limit (`too_many`),
+  pruning (`dropped`), a validator restart or an idle timeout
+  [#189](https://github.com/rpcpool/yellowstone-jet/issues/189).
+
+## [18.1.0]
+
+Ships `yellowstone-jet-tpu-client` 0.8.1.
+
+### Features
+
+- New `/api/v1/send-via-tip` endpoint, next to `/api/v1/transactions`. It takes the same
+  JSON-RPC `sendTransaction` request but needs no subscription: the tip pays for the
+  transaction, so `x-subscription-id` is not read (`x-request-id` still is). A transaction is
+  accepted only if one of its top-level instructions is a System Program `Transfer` of at
+  least the minimum tip to a tipping address listed in its static account keys. Transfers made
+  through a CPI do not count [#184](https://github.com/rpcpool/yellowstone-jet/pull/184).
+- New `--tipping-addr-file` argument: a text file with one base58 tipping address per line.
+  Blank lines and lines starting with `#` are ignored. Jet refuses to start if the file can't
+  be read, has an invalid address, or has no address. Without this argument the endpoint
+  rejects every transaction [#184](https://github.com/rpcpool/yellowstone-jet/pull/184).
+- New `--min-tip-lamports` argument (default `10000`, never less than 1). It can be changed at
+  runtime with the admin RPC methods `getMinTipLamports` / `setMinTipLamports`, or with
+  `jet admin get-min-tip-lamports` / `jet admin set-min-tip-lamports`. A runtime change is lost
+  on restart [#184](https://github.com/rpcpool/yellowstone-jet/pull/184).
+
+### Fixes
+
+- TPU client: the driver loop no longer spins after an orphan connection expires. Before, it
+  re-ran the eviction check on every loop iteration until the next orphan connection expired,
+  instead of waiting for it [#184](https://github.com/rpcpool/yellowstone-jet/pull/184).
+
+### Security
+
+- Raised the `rustls` requirement to 0.23.46
+  [#184](https://github.com/rpcpool/yellowstone-jet/pull/184).
+
+## [18.0.0]
+
+Ships `yellowstone-jet-tpu-client` 0.8.0.
+
+### Breaking
+
+- Removed the `simd-0296` cargo feature from both `yellowstone-jet` and
+  `yellowstone-jet-tpu-client`. SIMD-0296's 4096-byte transaction size is now always used
+  (`PACKET_DATA_SIZE`, and jet's base58/base64 length checks). You can no longer build for a
+  cluster that still caps transactions at 1232 bytes
+  [#179](https://github.com/rpcpool/yellowstone-jet/pull/179).
+- Jet now shuts down when the geyser gRPC stream gets no slot update for
+  `upstream.grpc.slot_idle_timeout`, or when it fails to connect 5 times in a row. Before, it
+  kept retrying forever. Run jet under a supervisor that restarts it
+  [#179](https://github.com/rpcpool/yellowstone-jet/pull/179).
+- Removed the `slot_tracking_btreemap_size` metric
+  [#179](https://github.com/rpcpool/yellowstone-jet/pull/179).
+
+### Features
+
+- New `upstream.grpc.slot_idle_timeout` setting (default `5s`). Only slot updates reset it, so
+  server pings can no longer keep alive a stream that delivers no slots
+  [#179](https://github.com/rpcpool/yellowstone-jet/pull/179).
+- New `jet_tpu_forwarding_stalled` gauge: `1` when TPU forwarding meets the stall condition
+  over the trailing 30 seconds, `0` otherwise. It is updated on every `/health` request, and
+  `/health` still answers `503 tpu sender has stalled` when stalled
+  [#175](https://github.com/rpcpool/yellowstone-jet/pull/175),
+  [#178](https://github.com/rpcpool/yellowstone-jet/pull/178).
+
+### Fixes
+
+- The geyser connection uses HTTP/2 keepalive (2s interval, 3s timeout), so a dead connection
+  is detected instead of hanging [#179](https://github.com/rpcpool/yellowstone-jet/pull/179).
+- An unsupported geyser message is now logged and skipped instead of ending the stream
+  [#179](https://github.com/rpcpool/yellowstone-jet/pull/179).
+
+### Misc
+
+- Removed the unused transaction-status subscription from the geyser client
+  [#179](https://github.com/rpcpool/yellowstone-jet/pull/179).
+- Upgraded dependencies [#179](https://github.com/rpcpool/yellowstone-jet/pull/179):
+  - `yellowstone-grpc-client`: 13.1.0 to 15.0.0
+  - `yellowstone-grpc-proto`: 12.5.0 to 14.0.1
+  - `yellowstone-fumarole-client`: 0.7.1 to 0.9.0
+  - `ed25519-dalek`: 2.2.0 to 3.0.0
+  - `base64`: 0.22.1 to 0.23.0
+  - `wincode`: 0.5.5 to 0.6.0
+
 ## [14.9.1]
 
 ### Fixes

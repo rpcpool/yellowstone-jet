@@ -61,7 +61,7 @@ use {
     solana_pubkey::Pubkey,
     std::{
         any::TypeId,
-        collections::{BTreeMap, HashMap, HashSet, VecDeque},
+        collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map},
         future,
         net::SocketAddr,
         num::NonZeroUsize,
@@ -655,6 +655,20 @@ pub struct ActiveConnection {
     conn: Arc<Connection>,
     connection_version: u64,
     multiplexed_remote_peer_identity_with_stake: HashMap<Pubkey, u64>,
+}
+
+impl ActiveConnection {
+    ///
+    /// Tells whether the connection is closed, by either side, so it can no longer open streams.
+    ///
+    /// # Returns
+    ///
+    /// `true` once the [`Connection`] has a close reason, for example after agave's TPU refused
+    /// it with `ApplicationClose(4, "too_many")`, `false` while it is still usable.
+    ///
+    fn is_closed(&self) -> bool {
+        self.conn.close_reason().is_some()
+    }
 }
 
 pub trait LeaderTpuInfoService {
@@ -1880,8 +1894,8 @@ where
             return;
         }
 
-        if self.connection_map.contains_key(&remote_peer_addr) {
-            // We already have an active connection for the remote peer address
+        if self.has_reusable_connection(remote_peer_addr) {
+            // We already have an open connection for the remote peer address
             tracing::debug!(
                 "Re-using existing active connection to remote peer address: {} for remote peer identity: {}",
                 remote_peer_addr,
@@ -2545,14 +2559,104 @@ where
     }
 
     ///
+    /// Removes a connection from the driver and gives its slot to the next connection attempt
+    /// waiting on eviction.
+    ///
+    /// Every connection leaves [`TpuSenderDriver::connection_map`] through this method, so the
+    /// indexes kept per connection ([`TpuSenderDriver::orphan_connection_set`],
+    /// [`TpuSenderDriver::pending_connection_eviction_set`] and
+    /// [`TpuSenderDriver::active_staked_sorted_remote_peer_addr`]) are cleared together with it.
+    ///
+    /// # Arguments
+    ///
+    /// - `remote_peer_addr`: The socket address of the connection to remove.
+    /// - `connection_version`: The version of the connection to remove. A newer connection to the
+    ///   same address is left untouched.
+    ///
+    /// # Returns
+    ///
+    /// The removed [`ActiveConnection`], or `None` if `remote_peer_addr` holds no connection of
+    /// that version. The connection is not closed: workers still holding it keep it alive until
+    /// they exit.
+    ///
+    fn remove_connection(
+        &mut self,
+        remote_peer_addr: SocketAddr,
+        connection_version: u64,
+    ) -> Option<ActiveConnection> {
+        let hash_map::Entry::Occupied(entry) = self.connection_map.entry(remote_peer_addr) else {
+            return None;
+        };
+        if entry.get().connection_version != connection_version {
+            return None;
+        }
+        let active_conn = entry.remove();
+        self.orphan_connection_set
+            .remove(&remote_peer_addr, connection_version);
+        self.pending_connection_eviction_set
+            .remove(&ConnectionEviction {
+                remote_peer_addr,
+                connection_version,
+            });
+        self.active_staked_sorted_remote_peer_addr
+            .remove(&remote_peer_addr);
+        self.unblock_eviction_waiting_connection();
+        Some(active_conn)
+    }
+
+    ///
+    /// Tells whether a new worker can use the cached connection to `remote_peer_addr`.
+    ///
+    /// A cached connection can be closed without the driver knowing: the remote peer may close
+    /// it while no worker watches it (an orphan connection), or while its last worker is still
+    /// being reaped. A closed connection is removed here, through
+    /// [`TpuSenderDriver::remove_connection`], so it is never handed to a worker and the caller
+    /// connects again.
+    ///
+    /// # Arguments
+    ///
+    /// - `remote_peer_addr`: The socket address to look up.
+    ///
+    /// # Returns
+    ///
+    /// `true` if [`TpuSenderDriver::connection_map`] holds an open connection to
+    /// `remote_peer_addr`, `false` if it holds none or held a closed one.
+    ///
+    fn has_reusable_connection(&mut self, remote_peer_addr: SocketAddr) -> bool {
+        let Some(active_conn) = self.connection_map.get(&remote_peer_addr) else {
+            return false;
+        };
+        if !active_conn.is_closed() {
+            return true;
+        }
+        tracing::debug!(
+            "Dropping closed connection to remote peer address: {} (version {}): {:?}",
+            remote_peer_addr,
+            active_conn.connection_version,
+            active_conn.conn.close_reason(),
+        );
+        let connection_version = active_conn.connection_version;
+        self.remove_connection(remote_peer_addr, connection_version);
+        false
+    }
+
+    ///
     /// Removes a worker from an active connection's multiplexed peer list.
     ///
-    /// If the connection has no more multiplexed peers and is marked for eviction,
-    /// the connection is removed from the active connection map and eviction waiters are unblocked.
+    /// When the connection has no more multiplexed peers, it is removed through
+    /// [`TpuSenderDriver::remove_connection`] if it is marked for eviction or closed, and kept as
+    /// an orphan connection for reuse otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// - `remote_peer_addr`: The socket address of the worker's connection.
+    /// - `remote_peer_identity`: The remote peer identity the worker sent to.
+    /// - `expected_connection_version`: The version of the connection the worker used.
     ///
     /// # Note
     ///
-    /// if the connection version does not match the expected version, the removal operation is ignored, not mutation is performed.
+    /// If `remote_peer_addr` holds no connection of `expected_connection_version`, nothing is
+    /// changed: the worker's connection was already removed, or replaced by a newer one.
     ///
     fn remove_worker_from_active_connection(
         &mut self,
@@ -2562,9 +2666,10 @@ where
     ) {
         if let Some(active_conn) = self.connection_map.get_mut(&remote_peer_addr) {
             if active_conn.connection_version != expected_connection_version {
-                // This means the connection has been re-established since the worker was created.
+                // The connection has been re-established since the worker was created: either it
+                // was evicted, or it was closed and replaced while this worker still held it.
                 // So we don't need to remove the multiplexed peer from this connection.
-                tracing::warn!(
+                tracing::debug!(
                     "Skipping removal of remote peer: {} from active connection at address: {} due to connection version mismatch, expected: {}, actual: {}",
                     remote_peer_identity,
                     remote_peer_addr,
@@ -2577,16 +2682,16 @@ where
                 .multiplexed_remote_peer_identity_with_stake
                 .remove(&remote_peer_identity);
 
-            let connection_eviction = ConnectionEviction {
-                remote_peer_addr,
-                connection_version: expected_connection_version,
-            };
-            let is_connection_mark_for_eviction = self
-                .pending_connection_eviction_set
-                .contains(&connection_eviction);
+            let is_connection_mark_for_eviction =
+                self.pending_connection_eviction_set
+                    .contains(&ConnectionEviction {
+                        remote_peer_addr,
+                        connection_version: expected_connection_version,
+                    });
             let has_no_worker = active_conn
                 .multiplexed_remote_peer_identity_with_stake
                 .is_empty();
+            let is_closed = active_conn.is_closed();
 
             let new_stake_for_addr: u64 = active_conn
                 .multiplexed_remote_peer_identity_with_stake
@@ -2597,13 +2702,10 @@ where
                 .insert(remote_peer_addr, new_stake_for_addr);
 
             if has_no_worker {
-                if is_connection_mark_for_eviction {
-                    self.connection_map.remove(&remote_peer_addr);
-                    self.pending_connection_eviction_set
-                        .remove(&connection_eviction);
-                    self.unblock_eviction_waiting_connection();
-                    self.active_staked_sorted_remote_peer_addr
-                        .remove(&remote_peer_addr);
+                // A closed connection can't open streams anymore: free its slot instead of
+                // keeping it for reuse.
+                if is_connection_mark_for_eviction || is_closed {
+                    self.remove_connection(remote_peer_addr, expected_connection_version);
                 } else {
                     let orphan_conn_info = OrphanConnectionInfo {
                         remote_peer_addr,
@@ -2641,21 +2743,13 @@ where
                     .remove(&remote_peer_identity)
                     .expect("tx worker sender");
 
-                if let Some(active_conn) = self.connection_map.get_mut(&worker_tx.remote_peer_addr)
-                {
-                    let active_conn_version = active_conn.connection_version;
-                    let worker_conn_version = worker_tx.connection_version;
-                    assert!(
-                        active_conn_version == worker_conn_version,
-                        "Connection version mismatch for remote peer: {remote_peer_identity}, active: {active_conn_version}, worker: {worker_conn_version}",
-                    );
-
-                    self.remove_worker_from_active_connection(
-                        worker_tx.remote_peer_addr,
-                        remote_peer_identity,
-                        worker_conn_version,
-                    );
-                }
+                // The worker's connection may already be gone: a multiplexed sibling's rescue
+                // replaces a closed shared connection while this worker still held it.
+                self.remove_worker_from_active_connection(
+                    worker_tx.remote_peer_addr,
+                    remote_peer_identity,
+                    worker_tx.connection_version,
+                );
                 self.last_peer_activity.remove(&remote_peer_identity);
                 drop(worker_tx);
 
@@ -3075,19 +3169,12 @@ where
                     // this orphan entry is stale.
                     continue;
                 }
-                let Some(active_conn) = self.connection_map.remove(&remote_peer_addr) else {
+                let Some(active_conn) =
+                    self.remove_connection(remote_peer_addr, connection_version)
+                else {
                     continue;
                 };
-
-                assert!(
-                    active_conn
-                        .multiplexed_remote_peer_identity_with_stake
-                        .is_empty(),
-                    "Evicting connection to remote peer address: {remote_peer_addr} that still has multiplexed peers",
-                );
                 active_conn.conn.close(VarInt::from_u32(0), &[0u8]);
-                drop(active_conn);
-                self.unblock_eviction_waiting_connection();
                 #[cfg(feature = "prometheus")]
                 {
                     prom::incr_evicted_orphan_connections();
