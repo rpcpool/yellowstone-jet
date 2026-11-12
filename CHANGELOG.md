@@ -18,6 +18,10 @@ The minor version will be incremented upon a breaking change and the patch versi
 - `TransactionHandler` no longer needs an RPC client.
 - Proto field `TransactionConfig.skip_sanitize` (field 2) is now reserved.
 
+### Security
+
+- The HTTP endpoint `/api/v1/transactions` limits the request body to 6618 bytes and returns `413 Payload Too Large` above it. Before, it read the whole body into memory before it checked the transaction size [#194](https://github.com/rpcpool/yellowstone-jet/pull/194).
+
 ## [18.1.1]
 
 Ships `yellowstone-jet-tpu-client` 0.8.2.
