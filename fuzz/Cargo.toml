@@ -1,0 +1,33 @@
+[package]
+name = "yellowstone-jet-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bytes = "1.11.1"
+futures = "0.3.31"
+libfuzzer-sys = "0.4.13"
+solana-rpc-client-api = "4.0.0"
+solana-transaction = { version = "4.0.0", features = ["wincode"] }
+solana-transaction-status-client-types = "4.0.0"
+tokio = { version = "1.48.0", features = ["sync"] }
+wincode = "0.6.0"
+yellowstone-jet = { path = "../apps/jet" }
+
+# A separate workspace keeps the fuzz build out of the root release profile, which uses LTO.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "sendtx"
+path = "fuzz_targets/sendtx.rs"
+test = false
+doc = false
+bench = false
