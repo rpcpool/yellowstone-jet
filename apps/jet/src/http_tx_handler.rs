@@ -1,11 +1,12 @@
 use {
     crate::{
-        metrics::jet as metrics, payload::JetRpcSendTransactionConfig,
+        metrics::jet as metrics, payload::JetRpcSendTransactionConfig, solana::MAX_BASE58_SIZE,
         transaction_handler::TransactionHandler,
     },
     base64::Engine,
     bytes::Bytes,
     futures::future::{BoxFuture, FutureExt},
+    http_body_util::{BodyExt, LengthLimitError, Limited},
     hyper::{HeaderMap, Request, Response, StatusCode},
     jsonrpsee::core::http_helpers::Body,
     solana_pubkey::Pubkey,
@@ -27,6 +28,8 @@ const API_TX_PATH: &str = "/api/v1/transactions";
 pub const SEND_VIA_TIP_PATH: &str = "/api/v1/send-via-tip";
 pub const SIMULATION_PERFORMED_HEADER: &str = "simulation-performed";
 const SOLANA_FORWARDING_POLICIES: &str = "solana-forwardingpolicies";
+// Base58 is the longest transaction encoding. The slack allows whitespace around a full-size one.
+const MAX_BODY_SIZE: usize = MAX_BASE58_SIZE + 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SimulationPerformed;
@@ -205,8 +208,15 @@ impl HttpTransactionHandler {
             params.encoding_label()
         };
 
-        let body_bytes = match http_body_util::BodyExt::collect(req.into_body()).await {
+        let body_bytes = match Limited::new(req.into_body(), MAX_BODY_SIZE).collect().await {
             Ok(collected) => collected.to_bytes(),
+            Err(e) if e.is::<LengthLimitError>() => {
+                metrics::http_tx_requests_inc("error", encoding_label);
+                return text_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!("request body exceeds {MAX_BODY_SIZE} bytes"),
+                );
+            }
             Err(e) => {
                 metrics::http_tx_requests_inc("error", encoding_label);
                 return text_response(
@@ -577,6 +587,38 @@ mod tests {
         assert!(extensions.get::<TipRequired>().is_none());
         assert!(extensions.get::<XRequestId>().is_some());
         assert!(extensions.get::<XSubscriptionId>().is_some());
+    }
+
+    fn tx_request(body: Body) -> Request<Body> {
+        Request::builder()
+            .method(hyper::Method::POST)
+            .uri(API_TX_PATH)
+            .body(body)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_body_at_limit_reaches_decode() {
+        let response = call_inner(tx_request(Body::from("1".repeat(MAX_BODY_SIZE)))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_body_over_limit_rejected() {
+        let response = call_inner(tx_request(Body::from("1".repeat(MAX_BODY_SIZE + 1)))).await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn test_endless_body_rejected() {
+        let chunks = futures::stream::repeat_with(|| {
+            Ok::<_, std::convert::Infallible>(hyper::body::Frame::data(Bytes::from_static(
+                &[b'1'; 1024],
+            )))
+        });
+        let body = Body::new(http_body_util::StreamBody::new(chunks));
+        let response = call_inner(tx_request(body)).await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]
